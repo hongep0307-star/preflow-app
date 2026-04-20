@@ -200,10 +200,52 @@ PHASE 2 — 씬 디벨롭
 - 전체 합산이 광고 길이(보통 15초·30초·60초)에 맞도록 배분할 것
 - Hook 씬은 짧게(3~5초), CTA 씬은 여유있게(5~8초) 배분 권 imgs
 
-[tagged_assets 규칙]
-- 반드시 등록된 tag_name만 사용, 없으면 []
-- description에 등 imgs하는 에셋은 @tag_name으로 멘션
-- location이 배경 에셋이면 tagged_assets에 포함`;
+[tagged_assets 규칙 — MANDATORY]
+- 프로젝트에 등록된 에셋 라이브러리가 하나라도 존재하면, 모든 씬은 **기본적으로 등록된 에셋을 최우선 활용**한다.
+- 사용자가 "새 캐릭터/장소/소품을 만들어" 같이 **명시적**으로 새 에셋 창작을 요청하지 않는 한, 등록된 캐릭터·장소·소품 외의 새 인물/공간을 임의로 등장시키지 말 것.
+- description·location·mood 자연어 안에 등록 에셋이 등장할 때마다 반드시 해당 @tag_name을 그대로 표기할 것 (예: "@민준이 카메라를 든 채 거리를 걷는다").
+- 각 씬의 tagged_assets 배열에는 그 씬에서 등장한 모든 등록 태그를 **중복 없이 전부 포함**할 것. 등장했는데 배열에서 빠뜨리는 것은 오류다.
+- 등록되지 않은 임의의 태그는 **절대 사용 금지**. tagged_assets에는 오직 라이브러리에 있는 tag_name만 올릴 수 있다.
+- 캐릭터 에셋이 1개 이상 등록되어 있다면, 스토리보드 전체에서 해당 캐릭터들을 **주요 등장인물로 기본 설정**할 것 (사용자의 다른 지시가 없는 한).
+- 해당 씬에 등장하는 등록 에셋이 하나도 없을 때만 tagged_assets: [].`;
+
+// 매 user 메시지 직전에 LLM 에게 재주지시키는 에셋 활용 체크리스트.
+// 시스템 프롬프트의 [tagged_assets 규칙] 과 별개로, 사용자 입력 바로 앞에 붙여서
+// LLM 순응도를 최대화한다. (chat UI / DB 에는 저장하지 않고 API payload 에만 prepend)
+const buildAssetUsageReminder = (assets: Asset[], lang: "ko" | "en" = "ko"): string => {
+  if (!assets?.length) return "";
+  const toTag = (a: Asset) => (a.tag_name.startsWith("@") ? a.tag_name : `@${a.tag_name}`);
+  const chars = assets.filter((a) => !a.asset_type || a.asset_type === "character");
+  const items = assets.filter((a) => a.asset_type === "item");
+  const bgs = assets.filter((a) => a.asset_type === "background");
+  const sections: string[] = [];
+  if (chars.length) sections.push(`캐릭터(${chars.length}): ${chars.map(toTag).join(", ")}`);
+  if (items.length) sections.push(`소품(${items.length}): ${items.map(toTag).join(", ")}`);
+  if (bgs.length) sections.push(`배경(${bgs.length}): ${bgs.map(toTag).join(", ")}`);
+  if (!sections.length) return "";
+  if (lang === "en") {
+    return [
+      "[ASSET USAGE CHECKLIST — MUST FOLLOW]",
+      ...sections,
+      "1) Use registered assets as the default choice when drafting or revising scenes.",
+      "2) Do NOT introduce new characters/locations/props unless the user explicitly asks you to.",
+      "3) Whenever a registered asset appears in description/location, spell its @tag_name exactly.",
+      "4) Every scene's tagged_assets array MUST include ALL registered tags that appear in that scene.",
+      "5) Never invent tags that are not in the registered list above.",
+      "",
+    ].join("\n");
+  }
+  return [
+    "[에셋 활용 체크리스트 — 반드시 지킬 것]",
+    ...sections,
+    "1) 드래프트/수정 응답에서 위 등록 에셋을 기본값으로 최우선 활용한다.",
+    "2) 사용자가 명시적으로 '새로 만들어'라고 요청하지 않는 한, 새 인물/장소/소품을 임의로 등장시키지 않는다.",
+    "3) description·location에 등록 에셋이 등장할 때는 반드시 해당 @tag_name 을 정확히 표기한다.",
+    "4) 각 씬의 tagged_assets 배열에는 그 씬에서 등장한 등록 태그를 전부 포함한다.",
+    "5) 등록되지 않은 임의의 태그는 절대 쓰지 않는다.",
+    "",
+  ].join("\n");
+};
 
 const buildCharacterContext = (assets: Asset[]): string => {
   if (!assets?.length) return "";
@@ -1233,16 +1275,9 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
     setIsLoading(true);
     const createdAt = new Date().toISOString();
     const currentImages = [...chatImages];
-    const userApiContent: any =
-      currentImages.length > 0
-        ? [
-            ...currentImages.map((img) => ({
-              type: "image",
-              source: { type: "base64", media_type: img.mediaType, data: img.base64 },
-            })),
-            { type: "text", text },
-          ]
-        : text;
+    // NOTE: chat UI / chat_logs DB 에는 사용자가 타이핑한 원본 `text` 그대로 저장.
+    //       LLM payload 에만 에셋 활용 체크리스트를 prepend 해서 순응도를 강제한다.
+    //       (latestAssets 는 아래 try 블록 안에서 fetch 후 실제 주입됨 → 여기서는 플레이스홀더)
     setChatHistory((prev) => [...prev, { project_id: projectId, role: "user", content: text, created_at: createdAt }]);
     if (currentImages.length > 0)
       sessionImageMap.set(
@@ -1254,6 +1289,22 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       // ✅ assets와 briefAnalysis 동시 re-fetch
       const [latestAssets, latestAnalysis] = await Promise.all([fetchAssets(), fetchBrief()]);
       await supabase.from("chat_logs").insert({ project_id: projectId, role: "user", content: text });
+
+      // LLM payload 용 텍스트: 등록 에셋이 있으면 체크리스트를 사용자 메시지 앞에 prepend.
+      // chat UI / DB 에는 영향 없고 이번 API 호출에만 사용됨.
+      const assetReminder = buildAssetUsageReminder(latestAssets ?? [], briefLang);
+      const textForLLM = assetReminder ? `${assetReminder}\n[사용자 요청]\n${text}` : text;
+      const userApiContent: any =
+        currentImages.length > 0
+          ? [
+              ...currentImages.map((img) => ({
+                type: "image",
+                source: { type: "base64", media_type: img.mediaType, data: img.base64 },
+              })),
+              { type: "text", text: textForLLM },
+            ]
+          : textForLLM;
+
       // ✅ Mirror the cumulative storyline-ID remap that the UI applies, so the LLM
       //    sees the same A/B/C → D/E/F numbering the user is looking at.
       const cumulativeIds = new Set<string>();
