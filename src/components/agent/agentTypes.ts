@@ -249,12 +249,27 @@ export type RightPanel = "scenes" | "mood";
 
 export const genMoodId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
-export const toMoodImages = (raw: (string | MoodImage)[]): MoodImage[] =>
-  raw.map((item) =>
+export const toMoodImages = (raw: (string | MoodImage)[]): MoodImage[] => {
+  // 1) 문자열 → MoodImage 정규화
+  const normalized: MoodImage[] = raw.map((item) =>
     typeof item === "string"
       ? { id: genMoodId(), url: item, liked: false, sceneRef: null, comment: "", createdAt: new Date().toISOString() }
       : item,
   );
+  // 2) URL 기반 dedup.
+  //    과거 generateMoodImages 가 DB 에 raw URL 배열을 append 하면서
+  //    persistMoodGenResultToDB 가 skel ID 객체를 prepend 하여 같은 URL 이
+  //    중복 기록된 브리프들이 존재. 로드 시점에 첫 항목만 유지해 자동 치유.
+  const seen = new Set<string>();
+  const out: MoodImage[] = [];
+  for (const img of normalized) {
+    const key = img.url ?? `__null__${img.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(img);
+  }
+  return out;
+};
 
 export const briefFieldToString = (f: BriefField | undefined | null): string => {
   if (!f) return "";

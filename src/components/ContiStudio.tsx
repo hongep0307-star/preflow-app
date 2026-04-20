@@ -566,6 +566,65 @@ export const ContiStudio = ({
     return out.toDataURL("image/png").split(",")[1];
   };
 
+  /* ━━━━━ 마스크 오버레이 — NB2(Gemini 3.1) 용 시각 힌트 이미지 ━━━━━
+   * NB2 는 mask 파라미터가 없으므로, 원본 위에 브러시 영역을 형광 마젠타(#FF00FF)로
+   * 칠한 합성 PNG 를 레퍼런스로 같이 보내 "수정 영역"을 시각적으로 지정한다.
+   */
+  const buildMaskOverlayBase64 = (): string | null => {
+    const ic = imageCanvasRef.current;
+    const mc = maskCanvasRef.current;
+    if (!ic || !mc) return null;
+    const mImg = mc.getContext("2d")!.getImageData(0, 0, mc.width, mc.height);
+    let anyPainted = false;
+    for (let i = 0; i < mImg.data.length; i += 4) {
+      if (mImg.data[i] > 128) {
+        anyPainted = true;
+        break;
+      }
+    }
+    if (!anyPainted) return null;
+
+    const out = document.createElement("canvas");
+    out.width = ic.width;
+    out.height = ic.height;
+    const ctx = out.getContext("2d")!;
+    ctx.drawImage(ic, 0, 0);
+    const maskScaled = document.createElement("canvas");
+    maskScaled.width = ic.width;
+    maskScaled.height = ic.height;
+    const msCtx = maskScaled.getContext("2d")!;
+    msCtx.imageSmoothingEnabled = false;
+    msCtx.drawImage(mc, 0, 0, ic.width, ic.height);
+    const msImg = msCtx.getImageData(0, 0, ic.width, ic.height);
+    const imageData = ctx.getImageData(0, 0, out.width, out.height);
+    for (let i = 0; i < msImg.data.length; i += 4) {
+      if (msImg.data[i] > 128) {
+        imageData.data[i] = 255;
+        imageData.data[i + 1] = 0;
+        imageData.data[i + 2] = 255;
+        imageData.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return out.toDataURL("image/png").split(",")[1];
+  };
+
+  const uploadMaskOverlayAndGetUrl = async (projectId: string): Promise<string | null> => {
+    const b64 = buildMaskOverlayBase64();
+    if (!b64) return null;
+    try {
+      const blob = await (await fetch(`data:image/png;base64,${b64}`)).blob();
+      const path = `${projectId}/temp-mask-overlay-${Date.now()}.png`;
+      const { error } = await supabase.storage
+        .from("contis")
+        .upload(path, blob, { upsert: true, contentType: "image/png" });
+      if (error) return null;
+      return supabase.storage.from("contis").getPublicUrl(path).data.publicUrl;
+    } catch {
+      return null;
+    }
+  };
+
   const toggleSceneRef = (s: (typeof otherScenes)[0]) => {
     const isAlreadySelected = selectedSceneRefs.find((x) => x.id === s.id);
     if (isAlreadySelected) {
@@ -595,7 +654,25 @@ export const ContiStudio = ({
       return p.filter((_, i) => i !== idx);
     });
 
-  const buildEnrichedPrompt = async (): Promise<string> => {
+  const urlToBase64 = async (url: string): Promise<string | null> => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      return await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string).split(",")[1] ?? "");
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  const buildEnrichedPrompt = async (
+    sourceImageBase64?: string,
+    tagImageBase64?: string,
+  ): Promise<string> => {
     const maskEmpty = isMaskEmpty();
     const rawPrompt = sanitizeImagePrompt(inpaintPrompt.trim());
     const mentionedTagNames = (inpaintPrompt.match(/@([\w가-힣]+)/g) || []).map((t) => t.slice(1));
@@ -623,7 +700,17 @@ export const ContiStudio = ({
       .join("\n\n");
     try {
       const { data, error } = await supabase.functions.invoke("enhance-inpaint-prompt", {
-        body: { prompt: rawPrompt, hasMask: !maskEmpty, assetDescriptions: assetDescriptions || undefined },
+        body: {
+          prompt: rawPrompt,
+          hasMask: !maskEmpty,
+          assetDescriptions: assetDescriptions || undefined,
+          // 브러시 모드에서만 SOURCE + TAG 이미지를 같이 보내서 Gemini 가
+          //   PRESERVE: (원본에서 보존할 요소)
+          //   TAG_IDENTITY: (태그 에셋의 식별 특징)
+          // 블록을 모두 포함한 강화 프롬프트를 만들게 한다.
+          sourceImageBase64: !maskEmpty && sourceImageBase64 ? sourceImageBase64 : undefined,
+          tagImageBase64: !maskEmpty && tagImageBase64 ? tagImageBase64 : undefined,
+        },
       });
       if (!error && data?.enhanced) {
         let p = data.enhanced as string;
@@ -672,19 +759,37 @@ export const ContiStudio = ({
     const promptText = inpaintPrompt;
     const maskEmptyVal = isMaskEmpty();
     const maskB64 = maskEmptyVal ? null : extractMaskBase64();
-    const useNanoBanana = maskEmptyVal;
+    // 항상 NB2 를 우선 사용. 브러시가 있을 때는 마스크 오버레이 레퍼런스로 영역 지시,
+    // 브러시가 없을 때는 NB2 의 instruction-based 전체 편집을 활용.
+    const useNanoBanana = true;
     const moodRefUrls = useMoodRef && moodReferenceUrl ? [moodReferenceUrl] : [];
     const mentionedTagNames = (promptText.match(/@([\w가-힣]+)/g) || []).map((t) => t.slice(1));
     const REMOVAL_KEYWORDS = /제거|삭제|없애|지워|지우|remove|delete|erase|get rid/i;
     const isRemoval = REMOVAL_KEYWORDS.test(promptText);
+    const matchedAssets = mentionedTagNames
+      .map((name) => ({
+        name,
+        asset: assets.find((a) => a.tag_name === name || a.tag_name === `@${name}`),
+      }))
+      .map((x) => ({
+        name: x.name,
+        matched: !!x.asset,
+        hasPhoto: !!x.asset?.photo_url,
+        photoUrl: x.asset?.photo_url ?? null,
+      }));
     const assetRefUrls = isRemoval
       ? []
-      : mentionedTagNames
-          .map((name) => assets.find((a) => a.tag_name === name || a.tag_name === `@${name}`))
-          .filter(Boolean)
-          .filter((a) => a!.photo_url)
-          .map((a) => a!.photo_url as string);
+      : matchedAssets.filter((m) => m.matched && m.hasPhoto).map((m) => m.photoUrl as string);
     const selectedRefs = [...compareSelectedRefs];
+
+    console.log("[Inpaint:tag-debug]", {
+      promptText,
+      mentionedTagNames,
+      isRemoval,
+      availableAssetTagNames: assets.map((a) => a.tag_name),
+      matchedAssets,
+      assetRefUrls,
+    });
     const fmt = videoFormat;
 
     // ── 원본 비율 보존: 로드된 캔버스 크기에서 imageSize 계산 ──
@@ -707,14 +812,92 @@ export const ContiStudio = ({
           reader.readAsDataURL(imgBlob);
         });
         const customRefUrls = await uploadCustomRefsAndGetUrls();
-        const referenceImageUrls = [...moodRefUrls, ...assetRefUrls, ...selectedRefs, ...customRefUrls].slice(0, 3);
-        const enrichedPrompt = await buildEnrichedPrompt();
+
+        // 브러시가 있으면 마스크 오버레이 레퍼런스 생성 — NB2 가 "수정 영역" 을 시각으로 인식
+        const maskOverlayUrl = !maskEmptyVal ? await uploadMaskOverlayAndGetUrl(sceneProjectId) : null;
+
+        // ── refs 배치 전략 ─────────────────────────────────────
+        // NB2 는 이미지 장수가 늘수록 "합성" 해버리는 경향이 강해지므로,
+        // 브러시 인페인트 시에는 의도적으로 총 3장 (원본 + 마스크 오버레이 + 태그 1장) 으로 제한.
+        //   · 서버가 sourceImageUrl 을 [0] 에 prepend 하므로 여기서는 [overlay, tag] 만 넘김.
+        //   · mood/selectedRefs/custom 는 브러시 모드에서 제외 (noise 감소).
+        //   · 태그가 없으면 [overlay] 만.
+        //
+        // 브러시 없을 때(전체 편집)는 기존대로 asset+mood+selected+custom 합쳐서 3장까지.
+        const primaryAssetRef = assetRefUrls[0] ?? null;
+        let referenceImageUrls: string[];
+        if (maskOverlayUrl) {
+          referenceImageUrls = [maskOverlayUrl];
+          if (primaryAssetRef) referenceImageUrls.push(primaryAssetRef);
+        } else {
+          referenceImageUrls = [...assetRefUrls, ...moodRefUrls, ...selectedRefs, ...customRefUrls].slice(0, 3);
+        }
+
+        console.log("[Inpaint:refs-debug]", {
+          useNanoBanana,
+          hasMaskOverlay: !!maskOverlayUrl,
+          primaryAssetRef,
+          droppedRefsWhenMasked: maskOverlayUrl
+            ? {
+                extraAssetsDropped: assetRefUrls.slice(1),
+                moodRefUrls,
+                selectedRefs,
+                customRefUrls,
+              }
+            : null,
+          finalReferenceImageUrls: referenceImageUrls,
+        });
+
+        // Gemini 가 SOURCE + TAG 를 직접 보고 PRESERVE + TAG_IDENTITY 블록을 생성하도록 두 이미지 base64 전달
+        const tagImageBase64 = primaryAssetRef ? await urlToBase64(primaryAssetRef) : null;
+        const rawEnrichedPrompt = await buildEnrichedPrompt(imageBase64, tagImageBase64 ?? undefined);
+        // ── NB2 mask-overlay prompt ───────────────────────────
+        // Reference image order passed to NB2 is (3장 구성):
+        //   [1] SOURCE      ← 원본 (서버에서 prepend) — 반드시 보존할 "캔버스"
+        //   [2] MASK_HINT   ← 원본 + 브러시 영역을 #FF00FF 로 칠한 합성 PNG
+        //   [3] TAG_ASSET   ← 바꿔서 그려 넣을 오브젝트의 정체성 (있을 때)
+        //
+        // 핵심 문제 2 개 타겟:
+        //   A. 원본 유지가 안 됨        → "픽셀 복사 → 마젠타만 교체" 를 여러 각도로 강제
+        //   B. 태그 이미지가 너무 강함 → TAG_ASSET 은 식별정보(shape/color/material)만,
+        //                                배경/조명/구도/시점/스케일은 절대 복제 금지
+        const hasTagRef = !!primaryAssetRef;
+        const maskPrefix = maskOverlayUrl
+          ? `CRITICAL INPAINTING TASK — read carefully before generating.
+
+Reference images (exact order):
+  [1] SOURCE     — the original scene. This is your canvas.
+  [2] MASK_HINT  — identical to SOURCE except the region that MUST be edited is painted pure magenta #FF00FF.${hasTagRef ? `
+  [3] TAG_ASSET  — a reference photo showing the identity of the object to place inside the magenta region.` : ""}
+
+Hard output rules — ALL must hold:
+ 1. Your output MUST start from [1] SOURCE, pixel-for-pixel. Treat [1] as an immutable background layer.
+ 2. Only the pixels inside the magenta region of [2] may change. Every other pixel of your output MUST be pixel-identical to [1] SOURCE — same composition, same crop, same camera angle, same aspect ratio, same lighting, same color grading, same subject poses and positions, same background, same other objects. Do NOT re-render, re-light, re-color, re-frame, re-pose, or re-paint any unmasked pixel.
+ 3. Inside the magenta region, paint the requested content so it blends into SOURCE. The magenta color must NOT appear in the final output.
+ 4. Do NOT move, resize, crop, or duplicate the subject. Do NOT add or remove any object outside the magenta region.${hasTagRef ? `
+ 5. TAG_ASSET identity match (REQUIRED):
+    - The object you paint inside the magenta region MUST be recognizably the same specific object as in [3]. Match its exact shape, silhouette, proportions, materials, colors, surface finish, markings/logos/text, and all distinguishing attachments or details.
+    - A viewer familiar with [3] must immediately recognize the painted object as the same model/design. Do NOT produce a generic or "similar" version.
+    - Refer to the TAG_IDENTITY: block in the edit request below — every feature listed there must appear on the painted object.
+    - You MAY adapt only the object's viewing angle, lighting, and scale to match SOURCE naturally. Do NOT copy [3]'s background, surroundings, or photo framing into the output.` : ""}
+
+Self-check before emitting pixels:
+ - If your planned output changes ANY unmasked pixel of SOURCE → STOP and restart from rule 1.${hasTagRef ? `
+ - If your planned object would NOT be immediately recognizable as the specific object in [3] → STOP and restart from rule 5.
+ - If your planned output copies [3]'s background or framing → STOP and restart from rule 5.` : ""}
+
+Edit request (applies ONLY inside the magenta region):
+`
+          : "";
+        const enrichedPrompt = maskPrefix + rawEnrichedPrompt;
+
         const body: Record<string, any> = {
           mode: "inpaint",
           imageBase64,
           maskBase64: maskB64,
           prompt: enrichedPrompt,
-          forceGpt: !useNanoBanana && maskEmptyVal,
+          // NB2 가 실패했을 때만 GPT edits 로 폴백. 브러시 없을 때 GPT 로 억지로 돌리지 않음.
+          forceGpt: false,
           projectId: sceneProjectId,
           sceneNumber,
           imageSize, // ← 원본 비율 기반 계산값

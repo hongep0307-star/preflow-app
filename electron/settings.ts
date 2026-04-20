@@ -1,5 +1,5 @@
 import { ipcMain } from "electron";
-import { getDb, saveDb } from "./db";
+import { getDb } from "./db";
 
 export interface AppSettings {
   anthropic_api_key?: string;
@@ -10,25 +10,21 @@ export interface AppSettings {
 
 export function getSettings(): AppSettings {
   const db = getDb();
-  const stmt = db.prepare("SELECT key, value FROM settings");
+  const rows = db.prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
   const settings: any = {};
-  while (stmt.step()) {
-    const row = stmt.getAsObject() as { key: string; value: string };
-    settings[row.key] = row.value;
-  }
-  stmt.free();
+  for (const row of rows) settings[row.key] = row.value;
   return settings;
 }
 
 export function setSettings(settings: Partial<AppSettings>) {
   const db = getDb();
+  const stmt = db.prepare(
+    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+  );
   for (const [key, value] of Object.entries(settings)) {
     if (value === undefined) continue;
-    const stmt = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value");
-    stmt.run([key, value]);
-    stmt.free();
+    stmt.run(key, value);
   }
-  saveDb();
 }
 
 export function registerSettingsHandlers() {

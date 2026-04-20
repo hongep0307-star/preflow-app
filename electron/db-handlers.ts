@@ -1,5 +1,5 @@
 import { ipcMain } from "electron";
-import { getDb, saveDb } from "./db";
+import { getDb } from "./db";
 import crypto from "crypto";
 
 const JSON_COLUMNS = new Set([
@@ -13,6 +13,8 @@ function serializeValue(key: string, value: any): any {
     return JSON.stringify(value);
   }
   if (typeof value === "boolean") return value ? 1 : 0;
+  // better-sqlite3 rejects `undefined`; coerce to null.
+  if (typeof value === "undefined") return null;
   return value;
 }
 
@@ -34,44 +36,23 @@ function generateId(): string {
   return crypto.randomUUID().replace(/-/g, "");
 }
 
-// sql.js returns results as { columns: string[], values: any[][] }
-function stmtToObjects(columns: string[], values: any[][]): Record<string, any>[] {
-  return values.map(row => {
-    const obj: Record<string, any> = {};
-    columns.forEach((col, i) => { obj[col] = row[i]; });
-    return obj;
-  });
-}
-
 function runQuery(sql: string, params: any[] = []): Record<string, any>[] {
   const db = getDb();
   const stmt = db.prepare(sql);
-  if (params.length > 0) stmt.bind(params);
-  const results: Record<string, any>[] = [];
-  while (stmt.step()) {
-    const row = stmt.getAsObject();
-    results.push(row);
-  }
-  stmt.free();
-  return results;
+  return stmt.all(...params) as Record<string, any>[];
 }
 
-function runExec(sql: string, params: any[] = []): void {
+function runExec(sql: string, params: any[] = []): { changes: number; lastInsertRowid: number | bigint } {
   const db = getDb();
-  if (params.length === 0) {
-    db.run(sql);
-  } else {
-    const stmt = db.prepare(sql);
-    stmt.run(params);
-    stmt.free();
-  }
-  saveDb();
+  const stmt = db.prepare(sql);
+  const info = stmt.run(...params);
+  return { changes: info.changes, lastInsertRowid: info.lastInsertRowid };
 }
 
 export function registerDbHandlers() {
   ipcMain.handle("db:run", (_e, sql: string, params?: any[]) => {
-    runExec(sql, params ?? []);
-    return { changes: 0 };
+    const info = runExec(sql, params ?? []);
+    return { changes: info.changes };
   });
 
   ipcMain.handle("db:get", (_e, sql: string, params?: any[]) => {
@@ -141,8 +122,8 @@ export function registerDbHandlers() {
     const clauses = Object.keys(where).map(k => `"${k}" = ?`);
     const values = Object.values(where);
     const sql = `DELETE FROM "${table}" WHERE ${clauses.join(" AND ")}`;
-    runExec(sql, values);
-    return { changes: 1 };
+    const info = runExec(sql, values);
+    return { changes: info.changes };
   });
 
   // High-level UPSERT
@@ -160,7 +141,6 @@ export function registerDbHandlers() {
       ON CONFLICT (${conflictKeys.map(k => `"${k}"`).join(", ")}) DO UPDATE SET ${updateClauses.join(", ")}`;
     runExec(sql, values);
 
-    // Return the row
     const rows = runQuery(`SELECT * FROM "${table}" WHERE id = ?`, [data.id]);
     return rows.length > 0 ? deserializeRow(rows[0]) : data;
   });

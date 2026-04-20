@@ -1,5 +1,5 @@
 import http from "http";
-import { getDb, saveDb } from "./db";
+import { getDb } from "./db";
 import { getSettings, setSettings } from "./settings";
 import { getStorageBasePath } from "./storage";
 import { handleClaudeProxy, handleEnhanceInpaintPrompt, handleTranslateAnalysis, handleAnalyzeReferenceImages, handleOpenaiImage } from "./api-handlers";
@@ -41,19 +41,12 @@ function generateId() {
 
 function runQuery(sql: string, params: any[] = []) {
   const db = getDb();
-  const stmt = db.prepare(sql);
-  if (params.length > 0) stmt.bind(params);
-  const results: any[] = [];
-  while (stmt.step()) results.push(stmt.getAsObject());
-  stmt.free();
-  return results;
+  return db.prepare(sql).all(...params) as any[];
 }
 
 function runExec(sql: string, params: any[] = []) {
   const db = getDb();
-  if (params.length === 0) { db.run(sql); }
-  else { const stmt = db.prepare(sql); stmt.run(params); stmt.free(); }
-  saveDb();
+  db.prepare(sql).run(...params);
 }
 
 function parseBody(req: http.IncomingMessage): Promise<any> {

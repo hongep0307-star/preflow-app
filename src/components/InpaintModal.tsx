@@ -160,7 +160,7 @@ export const InpaintModal = ({ scene, videoFormat, onClose, onSave }: Props) => 
     if (mc) mc.getContext("2d")!.clearRect(0, 0, mc.width, mc.height);
   };
 
-  /* ━━━━━ 마스크 추출 — Flux 형식 (칠한 영역 = 흰색) ━━━━━ */
+  /* ━━━━━ 마스크 추출 — Flux/GPT 형식 (칠한 영역 = 흰색) ━━━━━ */
   const extractMaskBase64 = (): string => {
     const mc = maskCanvasRef.current!;
     const src = mc.getContext("2d")!.getImageData(0, 0, mc.width, mc.height);
@@ -179,6 +179,60 @@ export const InpaintModal = ({ scene, videoFormat, onClose, onSave }: Props) => 
     }
     octx.putImageData(outID, 0, 0);
     return out.toDataURL("image/png").split(",")[1];
+  };
+
+  /* ━━━━━ 마스크 오버레이 생성 — NB2(Gemini 3.1) 용 시각 힌트 이미지 ━━━━━
+   * NB2 는 mask 파라미터가 없으므로, 원본 위에 브러시 영역을 형광 마젠타(#FF00FF)로
+   * 칠한 합성 PNG 를 레퍼런스 이미지로 전달하여 "수정 영역"을 시각적으로 지정한다.
+   * 프롬프트 프리픽스와 함께 사용될 때 surgical precision 을 최대한 보존.
+   */
+  const buildMaskOverlayBase64 = (): string | null => {
+    const ic = imageCanvasRef.current;
+    const mc = maskCanvasRef.current;
+    if (!ic || !mc) return null;
+    // 칠해진 픽셀이 하나도 없으면 오버레이 생성 스킵
+    const mImg = mc.getContext("2d")!.getImageData(0, 0, mc.width, mc.height);
+    let anyPainted = false;
+    for (let i = 3; i < mImg.data.length; i += 4) {
+      if (mImg.data[i] > 10) {
+        anyPainted = true;
+        break;
+      }
+    }
+    if (!anyPainted) return null;
+
+    const out = document.createElement("canvas");
+    out.width = ic.width;
+    out.height = ic.height;
+    const ctx = out.getContext("2d")!;
+    ctx.drawImage(ic, 0, 0);
+    const imageData = ctx.getImageData(0, 0, out.width, out.height);
+    for (let i = 0; i < mImg.data.length; i += 4) {
+      if (mImg.data[i + 3] > 10) {
+        imageData.data[i] = 255; // R
+        imageData.data[i + 1] = 0; // G
+        imageData.data[i + 2] = 255; // B — 형광 마젠타
+        imageData.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return out.toDataURL("image/png").split(",")[1];
+  };
+
+  const uploadMaskOverlayAndGetUrl = async (): Promise<string | null> => {
+    const b64 = buildMaskOverlayBase64();
+    if (!b64) return null;
+    try {
+      const blob = await (await fetch(`data:image/png;base64,${b64}`)).blob();
+      const path = `${scene.project_id}/temp-mask-overlay-${Date.now()}.png`;
+      const { error } = await supabase.storage
+        .from("contis")
+        .upload(path, blob, { upsert: true, contentType: "image/png" });
+      if (error) return null;
+      return supabase.storage.from("contis").getPublicUrl(path).data.publicUrl;
+    } catch {
+      return null;
+    }
   };
 
   /* ━━━━━ 레퍼런스 토글 ━━━━━ */
@@ -243,7 +297,7 @@ export const InpaintModal = ({ scene, videoFormat, onClose, onSave }: Props) => 
     return urls;
   };
 
-  /* ━━━━━ 인페인팅 실행 ━━━━━ */
+  /* ━━━━━ 인페인팅 실행 (NB2 우선 · GPT edits 폴백) ━━━━━ */
   const handleInpaint = async () => {
     if (!inpaintPrompt.trim() || !scene.conti_image_url) return;
     setIsGenerating(true);
@@ -262,20 +316,37 @@ export const InpaintModal = ({ scene, videoFormat, onClose, onSave }: Props) => 
       const assetRefUrls = selectedAssets.filter((a) => a.photo_url).map((a) => a.photo_url as string);
       const sceneRefUrls = selectedScenes.map((s) => s.conti_image_url);
       const customRefUrls = await uploadCustomRefsAndGetUrls();
-      const referenceImageUrls = [...assetRefUrls, ...sceneRefUrls, ...customRefUrls].slice(0, 3);
+      const userRefUrls = [...assetRefUrls, ...sceneRefUrls, ...customRefUrls];
 
-      const finalPrompt = buildEnrichedPrompt();
+      // NB2 용 마스크 오버레이 업로드 (브러시 영역이 있을 때만)
+      const maskOverlayUrl = await uploadMaskOverlayAndGetUrl();
+
+      // NB2 레퍼런스 구성: [마스크 오버레이, ...사용자 레퍼런스] — sourceImageUrl 은 서버가 맨 앞에 자동 추가
+      // 총 4장(source + overlay + refs 2) 이하로 제한
+      const nbReferenceImageUrls = maskOverlayUrl
+        ? [maskOverlayUrl, ...userRefUrls].slice(0, 3)
+        : userRefUrls.slice(0, 3);
+
+      const userPrompt = buildEnrichedPrompt();
+      const maskPrefix = maskOverlayUrl
+        ? `You are editing a scene image. The SECOND reference image is identical to the first but with the region to edit highlighted in bright magenta (#FF00FF). EDIT ONLY pixels within that magenta-marked region. Every pixel outside the magenta region MUST remain pixel-identical to the first reference image — do not re-render, do not alter lighting or color or composition of unmasked areas. Do not draw the magenta color itself into the output; replace the magenta area with the requested content, blended naturally.\n\nEdit request:\n`
+        : "";
+      const finalPrompt = maskPrefix + userPrompt;
 
       const { data, error } = await supabase.functions.invoke("openai-image", {
         body: {
           mode: "inpaint",
+          // NB2 경로 활성화
+          useNanoBanana: true,
+          sourceImageUrl: scene.conti_image_url,
+          referenceImageUrls: nbReferenceImageUrls,
+          // GPT edits 폴백용 필드 유지 — NB2 실패 시 서버가 이 값으로 재시도
           imageBase64,
           maskBase64,
           prompt: finalPrompt,
           projectId: scene.project_id,
           sceneNumber: scene.scene_number,
           imageSize: IMAGE_SIZE_MAP[videoFormat],
-          referenceImageUrls,
         },
       });
 

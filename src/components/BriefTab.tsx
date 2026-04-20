@@ -31,6 +31,9 @@ import {
   GalleryHorizontalEnd,
   ChevronLeft,
   GripVertical,
+  Package,
+  MessageSquare,
+  type LucideIcon,
 } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Button } from "@/components/ui/button";
@@ -511,7 +514,7 @@ const SectionCard = ({
 }) => (
   <div
     className={`bg-elevated border border-border overflow-hidden ${className}`}
-    style={{ borderRadius: 4, ...style }}
+    style={{ borderRadius: 0, ...style }}
   >
     {children}
   </div>
@@ -543,7 +546,7 @@ const BulletList = ({ items, dot = "red" }: { items: string[]; dot?: "red" | "bl
 );
 
 const SubCard = ({ label, value }: { label: string; value: string }) => (
-  <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+  <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
     <p className="label-meta text-muted-foreground mb-1">{label}</p>
     <div className="text-[13px] leading-relaxed text-foreground/80 space-y-1">
       {value
@@ -652,7 +655,7 @@ const CollapsibleSection = ({
 /* ━━━━━ Section heading helpers ━━━━━ */
 const Heading1 = ({ children }: { children: React.ReactNode }) => (
   <div className="flex items-center gap-2.5 mt-8 first:mt-0 mb-4">
-    <span className="w-[3px] self-stretch bg-primary" style={{ borderRadius: 1 }} />
+    <span className="w-[3px] self-stretch bg-primary" style={{ borderRadius: 0 }} />
     <span className="text-[15px] font-bold text-primary tracking-wide">{children}</span>
   </div>
 );
@@ -664,7 +667,7 @@ const Heading2 = ({ children, tag }: { children: React.ReactNode; tag?: string }
       <span
         className="ml-auto font-mono text-[10px] px-2 py-0.5 font-bold uppercase tracking-wider"
         style={{
-          borderRadius: 2,
+          borderRadius: 0,
           background: "rgba(255,255,255,0.06)",
           color: "rgba(255,255,255,0.4)",
           border: "1px solid rgba(255,255,255,0.08)",
@@ -750,7 +753,7 @@ const EditableText = ({
         className={`cursor-text transition-colors duration-150 ${extraClass}`}
         style={{
           ...extraStyle,
-          borderRadius: 4,
+          borderRadius: 0,
           display: multiline ? "block" : "inline",
         }}
         onMouseEnter={(e) => {
@@ -806,7 +809,7 @@ const EditableText = ({
           width: "100%",
           background: "rgba(255,255,255,0.06)",
           border: "1px solid rgba(249,66,58,0.3)",
-          borderRadius: 4,
+          borderRadius: 0,
           padding: "4px 8px",
           color: "#fff",
           outline: "none",
@@ -839,7 +842,7 @@ const EditableText = ({
         width: "100%",
         background: "rgba(255,255,255,0.06)",
         border: "1px solid rgba(249,66,58,0.3)",
-        borderRadius: 4,
+        borderRadius: 0,
         padding: "4px 8px",
         color: "#fff",
         outline: "none",
@@ -905,7 +908,7 @@ const SortableUspCard = ({
     transform: CSS.Transform.toString(transform),
     transition: isDragging ? transition : undefined,
     opacity: isDragging ? 0.7 : 1,
-    borderRadius: 3,
+    borderRadius: 0,
     ...(index === 0
       ? {
           background: "rgba(249,66,58,0.08)",
@@ -925,7 +928,7 @@ const SortableUspCard = ({
           {...listeners}
           className="w-5 h-5 flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5 cursor-grab active:cursor-grabbing group relative"
           style={{
-            borderRadius: 2,
+            borderRadius: 0,
             background: index === 0 ? "#f9423a" : index === 1 ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)",
             color: index === 0 ? "#fff" : "rgba(255,255,255,0.5)",
           }}
@@ -996,7 +999,7 @@ const AccordionCard = ({
     style={{
       background: isOpen ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.02)",
       border: `1px solid ${isOpen ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.06)"}`,
-      borderRadius: 10,
+      borderRadius: 0,
       marginBottom: 8,
     }}
   >
@@ -1153,7 +1156,7 @@ const CoreStrategyUI = ({
               className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5"
               title={analysis.classification_reasoning ?? ""}
               style={{
-                borderRadius: 3,
+                borderRadius: 0,
                 background: `${CONTENT_TYPE_LABEL[analysis.content_type].color}15`,
                 color: CONTENT_TYPE_LABEL[analysis.content_type].color,
                 border: `1px solid ${CONTENT_TYPE_LABEL[analysis.content_type].color}40`,
@@ -1189,7 +1192,7 @@ const CoreStrategyUI = ({
               <EditableBulletList items={analysis.goal.items} basePath={["goal", "items"]} dot="red" />
               {analysis.goal.core_message && (
                 <div
-                  className="rounded-lg px-3 py-2.5"
+                  className="rounded-none px-3 py-2.5"
                   style={{ background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}
                 >
                   <span className="text-[11px] font-medium" style={{ color: "#888" }}>
@@ -1204,7 +1207,7 @@ const CoreStrategyUI = ({
               )}
               {analysis.goal.success_criteria && (
                 <div
-                  className="rounded-lg px-3 py-2.5"
+                  className="rounded-none px-3 py-2.5"
                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
                 >
                   <span className="text-[11px] font-medium" style={{ color: "#888" }}>
@@ -1220,7 +1223,7 @@ const CoreStrategyUI = ({
               )}
               {analysis.goal.desired_action && (
                 <div
-                  className="rounded-lg px-3 py-2.5"
+                  className="rounded-none px-3 py-2.5"
                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
                 >
                   <span className="text-[11px] font-medium" style={{ color: "#888" }}>
@@ -1243,14 +1246,14 @@ const CoreStrategyUI = ({
                 className: "text-[13px] font-medium text-muted-foreground",
               })}
               <EditableBulletList items={analysis.target.primary} basePath={["target", "primary"]} dot="black" />
-              <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+              <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
                 <Label3>{t("psychological_insight", lang)}</Label3>
                 {E(["target", "insight"], analysis.target.insight, {
                   multiline: true,
                   className: "text-[13px] leading-relaxed text-foreground/80",
                 })}
               </div>
-              <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+              <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
                 <Label3>{t("media_behavior", lang)}</Label3>
                 {E(["target", "media_behavior"], analysis.target.media_behavior, {
                   multiline: true,
@@ -1298,7 +1301,7 @@ const CoreStrategyUI = ({
                           key={i}
                           className="px-3 py-2"
                           style={{
-                            borderRadius: 3,
+                            borderRadius: 0,
                             ...(i === 0
                               ? { background: "rgba(249,66,58,0.08)", border: "1px solid rgba(249,66,58,0.2)" }
                               : { background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }),
@@ -1308,7 +1311,7 @@ const CoreStrategyUI = ({
                             <span
                               className="w-5 h-5 flex items-center justify-center text-[10px] font-bold shrink-0 mt-px"
                               style={{
-                                borderRadius: 2,
+                                borderRadius: 0,
                                 background:
                                   i === 0 ? "#f9423a" : i === 1 ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)",
                                 color: i === 0 ? "#fff" : "rgba(255,255,255,0.5)",
@@ -1339,7 +1342,7 @@ const CoreStrategyUI = ({
               })()}
               {analysis.usp.competitive_edge && (
                 <div className="pt-1">
-                  <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+                  <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
                     <Label3>{t("competitive_edge", lang)}</Label3>
                     {E(["usp", "competitive_edge"], analysis.usp.competitive_edge, {
                       className: "text-[13px] leading-relaxed text-foreground/80",
@@ -1378,7 +1381,7 @@ const CoreStrategyUI = ({
                 { icon: "✂️", label: lang === "ko" ? "편집" : "Editing", key: "editing" as const },
               ] as const
             ).map(({ icon, label: cellLabel, key }) => (
-              <div key={key} className="px-3 py-3" style={{ borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
+              <div key={key} className="px-3 py-3" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
                 <div className="flex items-center gap-1.5 mb-1.5">
                   <span className="text-[12px]">{icon}</span>
                   <span className="text-[10px] font-bold uppercase tracking-wider text-foreground/60">{cellLabel}</span>
@@ -1399,7 +1402,7 @@ const CoreStrategyUI = ({
         {analysis.tone_manner.reference_mood && (
           <div className="mb-6">
             <Heading2>{t("reference_mood", lang)}</Heading2>
-            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
               {E(["tone_manner", "reference_mood"], analysis.tone_manner.reference_mood, {
                 multiline: true,
                 className: "text-[13px] leading-relaxed text-foreground/80",
@@ -1409,7 +1412,7 @@ const CoreStrategyUI = ({
         )}
 
         <Heading2>{t("scene_flow", lang)}</Heading2>
-        <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+        <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
           <div className="flex items-start mb-3">
             {(["Hook", "Body", "CTA"] as const).map((step, i) => (
               <div key={step} className="flex-1 relative">
@@ -1417,7 +1420,7 @@ const CoreStrategyUI = ({
                 <div className="flex flex-col items-center gap-1.5 relative z-10">
                   <div
                     className="w-3 h-3 border-2 border-background"
-                    style={{ borderRadius: 2, background: i === 1 ? "rgba(255,255,255,0.2)" : "#f9423a" }}
+                    style={{ borderRadius: 0, background: i === 1 ? "rgba(255,255,255,0.2)" : "#f9423a" }}
                   />
                   <span
                     className="font-mono text-[10px] font-bold uppercase"
@@ -1441,7 +1444,7 @@ const CoreStrategyUI = ({
                   <div
                     key={key}
                     className="px-3 py-3"
-                    style={{ borderRadius: 8, background: "rgba(255,255,255,0.03)" }}
+                    style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}
                   >
                     <div className="flex items-center gap-2 mb-1.5">
                       <span className="font-mono text-[12px] font-semibold" style={{ color: "#f9423a" }}>
@@ -1530,7 +1533,7 @@ const SlideUspContent = ({
               key={i}
               className="px-4 py-3"
               style={{
-                borderRadius: 6,
+                borderRadius: 0,
                 ...(i === 0
                   ? { background: "rgba(249,66,58,0.08)", border: "1px solid rgba(249,66,58,0.2)" }
                   : { background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }),
@@ -1540,7 +1543,7 @@ const SlideUspContent = ({
                 <span
                   className="w-6 h-6 flex items-center justify-center text-[11px] font-bold shrink-0"
                   style={{
-                    borderRadius: 3,
+                    borderRadius: 0,
                     background: i === 0 ? "#f9423a" : "rgba(255,255,255,0.12)",
                     color: i === 0 ? "#fff" : "rgba(255,255,255,0.5)",
                   }}
@@ -1564,7 +1567,7 @@ const SlideUspContent = ({
       )}
       {analysis.usp.competitive_edge &&
         (onUpdate ? (
-          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
             <Label3>{t("competitive_edge", lang)}</Label3>
             <EditableText
               value={analysis.usp.competitive_edge}
@@ -1622,7 +1625,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
         </ul>
         {a.goal.core_message && (
           <div
-            className="rounded-lg px-3 py-1.5"
+            className="rounded-none px-3 py-1.5"
             style={{ background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}
           >
             <span className="text-[11px] font-medium" style={{ color: "#888" }}>
@@ -1643,7 +1646,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
         )}
         {a.goal.success_criteria && (
           <div
-            className="rounded-lg px-3 py-1.5"
+            className="rounded-none px-3 py-1.5"
             style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
           >
             <span className="text-[11px] font-medium" style={{ color: "#888" }}>
@@ -1671,7 +1674,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
         )}
         {a.goal.desired_action && (
           <div
-            className="rounded-lg px-3 py-1.5"
+            className="rounded-none px-3 py-1.5"
             style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
           >
             <span className="text-[11px] font-medium" style={{ color: "#888" }}>
@@ -1726,7 +1729,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
         </ul>
         {onU ? (
           <>
-            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
               <Label3>{t("psychological_insight", l)}</Label3>
               <EditableText
                 value={a.target.insight}
@@ -1735,7 +1738,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
                 className="text-[13px] leading-relaxed text-foreground/80"
               />
             </div>
-            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
               <Label3>{t("media_behavior", l)}</Label3>
               <EditableText
                 value={a.target.media_behavior}
@@ -1843,7 +1846,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
               { icon: "✂️", label: l === "ko" ? "편집" : "Editing", key: "editing" as const },
             ] as const
           ).map(({ icon, label: cellLabel, key }) => (
-            <div key={key} className="px-4 py-4" style={{ borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
+            <div key={key} className="px-4 py-4" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-[14px]">{icon}</span>
                 <span className="text-[11px] font-bold uppercase tracking-wider text-foreground/60">{cellLabel}</span>
@@ -1904,7 +1907,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
               <div className="flex flex-col items-center gap-1.5 relative z-10">
                 <div
                   className="w-3 h-3 border-2 border-background"
-                  style={{ borderRadius: 2, background: i === 1 ? "rgba(255,255,255,0.2)" : "#f9423a" }}
+                  style={{ borderRadius: 0, background: i === 1 ? "rgba(255,255,255,0.2)" : "#f9423a" }}
                 />
                 <span
                   className="font-mono text-[10px] font-bold uppercase"
@@ -1923,7 +1926,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
             {(["hook", "body", "cta"] as const).map((key) => {
               const section = (a.production_notes.scene_count_hint as SceneFlowStructured)[key];
               return (
-                <div key={key} className="px-4 py-4" style={{ borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
+                <div key={key} className="px-4 py-4" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
                   <div className="flex items-center gap-2 mb-2">
                     <span className="font-mono text-[13px] font-semibold" style={{ color: "#f9423a" }}>
                       {key.toUpperCase()}
@@ -1983,17 +1986,17 @@ const NarrativeSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lan
   if (!n) return null;
   return (
     <div className="space-y-4">
-      <div className="px-4 py-3" style={{ borderRadius: 4, background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}>
+      <div className="px-4 py-3" style={{ borderRadius: 0, background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}>
         <Label3>{t("controlling_idea", lang)}</Label3>
         <p className="text-[14px] text-foreground/90 leading-relaxed italic">"{n.controlling_idea}"</p>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="px-3 py-2.5" style={{ borderRadius: 3, background: "rgba(255,255,255,0.03)" }}>
+        <div className="px-3 py-2.5" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
           <Label3>Story Structure</Label3>
           <p className="text-[13px] text-foreground/80 font-mono">{n.story_structure}</p>
         </div>
-        <div className="px-3 py-2.5" style={{ borderRadius: 3, background: "rgba(255,255,255,0.03)" }}>
+        <div className="px-3 py-2.5" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
           <Label3>{t("protagonist", lang)}</Label3>
           <p className="text-[12px] text-foreground/80 leading-relaxed">
             <span className="text-foreground/60">{lang === "ko" ? "정체성" : "Identity"}:</span> {n.protagonist?.identity}
@@ -2006,7 +2009,7 @@ const NarrativeSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lan
       </div>
 
       {Array.isArray(n.emotional_beats) && n.emotional_beats.length > 0 && (
-        <div className="px-3 py-2.5" style={{ borderRadius: 3, background: "rgba(255,255,255,0.03)" }}>
+        <div className="px-3 py-2.5" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
           <Label3>{t("emotional_beats", lang)}</Label3>
           <div className="space-y-1.5 mt-1">
             {n.emotional_beats.map((b, i) => (
@@ -2017,7 +2020,7 @@ const NarrativeSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lan
                   {Array.from({ length: 10 }).map((_, idx) => (
                     <div
                       key={idx}
-                      className="flex-1 rounded-sm"
+                      className="flex-1 rounded-none"
                       style={{
                         background: idx < b.intensity ? "#f9423a" : "rgba(255,255,255,0.08)",
                         height: `${30 + idx * 7}%`,
@@ -2038,6 +2041,7 @@ const NarrativeSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lan
 /* ━━━━━ ABCD Effectiveness Slide ━━━━━ */
 const AbcdSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: Lang }) => {
   // 브리프 설계값만으로 채점하는 "설계 체크리스트". 저장된 값이 있으면 사용.
+  // 브리프 설계값만으로 채점 → scoreABCD 는 scenes 미전달 시 항상 non-null 반환
   const computed = analysis.abcd_compliance ?? scoreABCD({
     hook_strategy: analysis.hook_strategy,
     hero_visual: analysis.hero_visual,
@@ -2050,7 +2054,13 @@ const AbcdSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: La
         ? analysis.tone_manner.visual_direction
         : undefined,
     reference_mood: analysis.tone_manner?.reference_mood,
-  });
+  }) ?? {
+    attract: { score: 0, notes: "" },
+    brand: { score: 0, notes: "" },
+    connect: { score: 0, notes: "" },
+    direct: { score: 0, notes: "" },
+    total: 0,
+  };
   const total = computed.total ?? (computed.attract.score + computed.brand.score + computed.connect.score + computed.direct.score);
   const gradeInfo = gradeABCD(total);
   const colorMap: Record<typeof gradeInfo.color, string> = {
@@ -2077,7 +2087,7 @@ const AbcdSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: La
               <span className="text-[12px] uppercase tracking-wider text-foreground/70 font-semibold">{label}</span>
               <span className="ml-auto font-mono text-[13px] text-foreground/80">{row.score}/10</span>
             </div>
-            <div className="h-2 w-full rounded bg-foreground/10 overflow-hidden">
+            <div className="h-2 w-full rounded-none bg-foreground/10 overflow-hidden">
               <div
                 className="h-full transition-all"
                 style={{
@@ -2095,7 +2105,7 @@ const AbcdSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: La
       })}
       <div
         className="mt-4 px-4 py-3 flex items-center justify-between"
-        style={{ borderRadius: 4, background: "rgba(255,255,255,0.03)", border: `1px solid ${colorMap[gradeInfo.color]}40` }}
+        style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)", border: `1px solid ${colorMap[gradeInfo.color]}40` }}
       >
         <div className="flex items-baseline gap-2">
           <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{t("abcd_total", lang)}</span>
@@ -2147,7 +2157,7 @@ const SlideViewUI = ({
               className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5"
               title={analysis.classification_reasoning ?? ""}
               style={{
-                borderRadius: 3,
+                borderRadius: 0,
                 background: `${CONTENT_TYPE_LABEL[analysis.content_type].color}15`,
                 color: CONTENT_TYPE_LABEL[analysis.content_type].color,
                 border: `1px solid ${CONTENT_TYPE_LABEL[analysis.content_type].color}40`,
@@ -2184,7 +2194,7 @@ const SlideViewUI = ({
       <div className="flex-1 min-h-0 flex flex-col">
         <div
           className="flex-1 overflow-y-auto"
-          style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12 }}
+          style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 0 }}
         >
           <div className="flex items-center gap-3 px-5 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
             <span className="font-mono text-[11px] font-bold" style={{ color: "#666" }}>
@@ -2193,7 +2203,7 @@ const SlideViewUI = ({
             <span
               className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5"
               style={{
-                borderRadius: 3,
+                borderRadius: 0,
                 background: SLIDE_GROUP_LABEL[current.group].bg,
                 color: SLIDE_GROUP_LABEL[current.group].color,
               }}
@@ -2231,7 +2241,7 @@ const SlideViewUI = ({
                   style={{
                     width: i === slideIndex ? 20 : 6,
                     height: 6,
-                    borderRadius: 3,
+                    borderRadius: 0,
                     background: i === slideIndex ? "#f9423a" : "rgba(255,255,255,0.15)",
                     border: "none",
                     cursor: "pointer",
@@ -2317,7 +2327,7 @@ const ProductionGuideUI = ({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 mb-1">
-        <span className="w-[3px] h-3 bg-foreground/30" style={{ borderRadius: 1 }} />
+        <span className="w-[3px] h-3 bg-foreground/30" style={{ borderRadius: 0 }} />
         <span className="label-meta text-muted-foreground">{t("production_guide", lang)}</span>
       </div>
 
@@ -2330,7 +2340,7 @@ const ProductionGuideUI = ({
                 key={i}
                 className="font-mono text-[10px] px-2 py-1 font-bold uppercase tracking-wider relative group"
                 style={{
-                  borderRadius: 2,
+                  borderRadius: 0,
                   ...(i % 2 === 0
                     ? { background: "rgba(249,66,58,0.12)", color: "#f9423a", border: "1px solid rgba(249,66,58,0.2)" }
                     : {
@@ -2357,7 +2367,7 @@ const ProductionGuideUI = ({
                 onClick={() => setAddingTag(true)}
                 className="font-mono text-[10px] px-2 py-1 font-bold uppercase tracking-wider transition-colors"
                 style={{
-                  borderRadius: 2,
+                  borderRadius: 0,
                   background: "rgba(255,255,255,0.06)",
                   color: "#666",
                   border: "1px solid rgba(255,255,255,0.08)",
@@ -2388,7 +2398,7 @@ const ProductionGuideUI = ({
                 className="font-mono text-[10px] px-2 py-1 font-bold uppercase tracking-wider"
                 style={{
                   width: 80,
-                  borderRadius: 2,
+                  borderRadius: 0,
                   background: "rgba(255,255,255,0.06)",
                   border: "1px solid rgba(249,66,58,0.3)",
                   color: "#fff",
@@ -2399,11 +2409,11 @@ const ProductionGuideUI = ({
           </div>
           <div
             className="flex items-start gap-2.5 px-3 py-2.5"
-            style={{ borderRadius: 3, background: "rgba(249,66,58,0.08)", border: "1px solid rgba(249,66,58,0.25)" }}
+            style={{ borderRadius: 0, background: "rgba(249,66,58,0.08)", border: "1px solid rgba(249,66,58,0.25)" }}
           >
             <div
               className="w-5 h-5 flex items-center justify-center shrink-0 mt-px"
-              style={{ borderRadius: 2, background: "#f9423a" }}
+              style={{ borderRadius: 0, background: "#f9423a" }}
             >
               <span className="text-white text-[11px] font-bold leading-none">!</span>
             </div>
@@ -2429,19 +2439,19 @@ const ProductionGuideUI = ({
           </span>
         </div>
         <div className="px-3 py-3 space-y-2">
-          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
             <p className="label-meta text-muted-foreground mb-1">{t("format", lang)}</p>
             {E(["production_notes", "format_recommendation"], analysis.production_notes.format_recommendation, {
               className: "text-[13px] leading-relaxed text-foreground/80",
             })}
           </div>
-          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
             <p className="label-meta text-muted-foreground mb-1">{t("shooting_style", lang)}</p>
             {E(["production_notes", "shooting_style"], analysis.production_notes.shooting_style, {
               className: "text-[13px] leading-relaxed text-foreground/80",
             })}
           </div>
-          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
             <p className="label-meta text-muted-foreground mb-1">{t("budget_efficiency", lang)}</p>
             {E(["production_notes", "budget_efficiency"], analysis.production_notes.budget_efficiency, {
               multiline: true,
@@ -2493,12 +2503,12 @@ const LegacyResultUI = ({ analysis, lang = "ko" }: { analysis: LegacyAnalysis; l
 
 /* ━━━━━ NextStepOption ━━━━━ */
 const NextStepOption = ({
-  icon,
+  Icon,
   title,
   desc,
   onClick,
 }: {
-  icon: string;
+  Icon: LucideIcon;
   title: string;
   desc: string;
   onClick: () => void;
@@ -2511,14 +2521,18 @@ const NextStepOption = ({
       onMouseLeave={() => setHovered(false)}
       className="w-full flex items-start gap-3 p-3 border text-left transition-all duration-150"
       style={{
-        borderRadius: 4,
+        borderRadius: 0,
         borderColor: hovered ? "rgba(249,66,58,0.4)" : "rgba(255,255,255,0.07)",
         background: hovered ? "rgba(249,66,58,0.06)" : "transparent",
         transform: hovered ? "translateY(-1px)" : "translateY(0)",
         boxShadow: hovered ? "0 4px 12px rgba(249,66,58,0.12)" : "none",
       }}
     >
-      <span className="text-xl mt-0.5">{icon}</span>
+      <Icon
+        className="w-4 h-4 shrink-0 mt-0.5"
+        style={{ color: hovered ? "#f9423a" : "rgba(255,255,255,0.5)" }}
+        strokeWidth={1.75}
+      />
       <div>
         <div className="text-[12px] font-semibold text-foreground">{title}</div>
         <div className="text-[11px] text-muted-foreground mt-0.5">{desc}</div>
@@ -2538,7 +2552,7 @@ const NextStepModal = ({
   analysisLang?: "ko" | "en";
 }) => (
   <Dialog open onOpenChange={(o) => !o && onClose()}>
-    <DialogContent className="max-w-[380px] bg-card border-border" style={{ borderRadius: 4 }}>
+    <DialogContent className="max-w-[380px] bg-card border-border" style={{ borderRadius: 0 }}>
       <DialogHeader>
         <DialogTitle className="text-[15px] font-semibold text-foreground">Choose next step</DialogTitle>
       </DialogHeader>
@@ -2548,7 +2562,7 @@ const NextStepModal = ({
       <div className="space-y-2 mt-1">
         {[
           {
-            icon: "🎭",
+            Icon: Package,
             title: "Set Up Assets First",
             desc: "Register characters, items, backgrounds then go to Agent",
             onClick: () => {
@@ -2557,7 +2571,7 @@ const NextStepModal = ({
             },
           },
           {
-            icon: "💬",
+            Icon: MessageSquare,
             title: "Go to Agent Directly",
             desc: "Start building the story without assets",
             onClick: () => {
@@ -2592,7 +2606,7 @@ const LangToggle = ({
     onClick={() => onChange(lang === "ko" ? "en" : "ko")}
     disabled={loading}
     className="flex items-center h-6 border border-border overflow-hidden"
-    style={{ borderRadius: 2 }}
+    style={{ borderRadius: 0 }}
   >
     {(["ko", "en"] as const).map((l) => (
       <span
@@ -3441,7 +3455,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       {/* ── CENTER: Strategy Manifesto ── */}
       {(hasAnalysis || analyzing) && (
         <div className="flex-1 min-w-0 flex flex-col">
-          <div className="border border-border overflow-hidden flex flex-col h-full" style={{ borderRadius: 4 }}>
+          <div className="border border-border overflow-hidden flex flex-col h-full" style={{ borderRadius: 0 }}>
             <div
               className="flex items-center gap-2 px-4 py-3 border-b border-border shrink-0"
               style={{ background: "rgba(249,66,58,0.06)" }}
@@ -3449,7 +3463,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
               <h2 className="text-[13px] font-bold tracking-wider text-foreground">Strategy Manifesto</h2>
               {showEditHint && (
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded animate-fade-in"
+                  className="text-[10px] px-2 py-0.5 rounded-none animate-fade-in"
                   style={{
                     background: "rgba(249,66,58,0.12)",
                     color: "#f9423a",
@@ -3463,7 +3477,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                 <>
                   <div
                     className="ml-auto flex items-center gap-1"
-                    style={{ background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: 2 }}
+                    style={{ background: "rgba(255,255,255,0.04)", borderRadius: 0, padding: 2 }}
                   >
                     <button
                       onClick={() => setViewMode("list")}
@@ -3471,7 +3485,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                       style={{
                         width: 28,
                         height: 28,
-                        borderRadius: 6,
+                        borderRadius: 0,
                         background: viewMode === "list" ? "rgba(249,66,58,0.14)" : "transparent",
                         color: viewMode === "list" ? "#f9423a" : "#666",
                       }}
@@ -3484,7 +3498,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                       style={{
                         width: 28,
                         height: 28,
-                        borderRadius: 6,
+                        borderRadius: 0,
                         background: viewMode === "slide" ? "rgba(249,66,58,0.14)" : "transparent",
                         color: viewMode === "slide" ? "#f9423a" : "#666",
                       }}
@@ -3671,7 +3685,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
           <button
             onClick={() => setLightboxSrc(null)}
             className="absolute top-4 right-4 w-8 h-8 bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"
-            style={{ borderRadius: 3 }}
+            style={{ borderRadius: 0 }}
           >
             <X className="w-4 h-4 text-white" />
           </button>
@@ -3680,7 +3694,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             alt="Original image"
             onClick={(e) => e.stopPropagation()}
             className="max-w-[90vw] max-h-[90vh] object-contain shadow-2xl cursor-default"
-            style={{ borderRadius: 4 }}
+            style={{ borderRadius: 0 }}
           />
         </div>
       )}

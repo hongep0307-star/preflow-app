@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useToast } from "@/hooks/use-toast";
-import { Clock, Send, Loader2, RotateCcw } from "lucide-react";
+import { Clock, Send, Loader2, RotateCcw, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -17,11 +17,11 @@ export const ConfirmScenesModal = ({ pendingCount, existingCount, onClose, onCon
       <p className="text-[13px] text-muted-foreground">You have {existingCount} existing scenes. How would you like to add the {pendingCount} draft scenes?</p>
       <div className="space-y-2 mt-1">
         {[
-          { mode: "replace" as const, icon: "↺", title: `Replace existing (start fresh with ${pendingCount})`, desc: "Delete all existing scenes and replace with draft" },
-          { mode: "append" as const, icon: "＋", title: `Append to existing (${existingCount + pendingCount} total)`, desc: "Append draft scenes after existing ones" },
+          { mode: "replace" as const, Icon: RotateCcw, title: `Replace existing (start fresh with ${pendingCount})`, desc: "Delete all existing scenes and replace with draft" },
+          { mode: "append" as const, Icon: Plus, title: `Append to existing (${existingCount + pendingCount} total)`, desc: "Append draft scenes after existing ones" },
         ].map((opt) => (
           <button key={opt.mode} onClick={() => { onConfirm(opt.mode); onClose(); }} className="w-full flex items-start gap-3 p-3 rounded-none border text-left transition-colors hover:border-[#f9423a] hover:bg-[rgba(249,66,58,0.04)]" style={{ borderColor: "hsl(var(--border))", background: "transparent" }}>
-            <span className="text-base mt-0.5">{opt.icon}</span>
+            <opt.Icon className="w-4 h-4 shrink-0 mt-0.5" style={{ color: "rgba(255,255,255,0.5)" }} strokeWidth={1.75} />
             <div><div className="text-[13px] font-semibold text-foreground">{opt.title}</div><div className="text-[11px] text-muted-foreground mt-0.5">{opt.desc}</div></div>
           </button>
         ))}
@@ -109,7 +109,7 @@ export const LoadVersionModal = ({ versions, onClose, onLoad }: {
         <p className="text-[12px] text-muted-foreground -mt-1">Loading will replace the current scene composition with the selected version.</p>
         <div className="space-y-2 max-h-[50vh] overflow-y-auto">
           {versions.map((v, idx) => (
-            <button key={v.id} disabled={loading} onClick={async () => { setLoading(true); await onLoad(v.scenes.filter((s: any) => s.is_transition !== true && !s.transition_type)); setLoading(false); onClose(); }} className="w-full flex items-center gap-3 p-3 rounded border text-left transition-colors hover:border-[#f9423a] hover:bg-[rgba(249,66,58,0.04)] disabled:opacity-50" style={{ borderColor: "hsl(var(--border))", background: "transparent" }}>
+            <button key={v.id} disabled={loading} onClick={async () => { setLoading(true); await onLoad(v.scenes.filter((s: any) => s.is_transition !== true && !s.transition_type)); setLoading(false); onClose(); }} className="w-full flex items-center gap-3 p-3 rounded-none border text-left transition-colors hover:border-[#f9423a] hover:bg-[rgba(249,66,58,0.04)] disabled:opacity-50" style={{ borderColor: "hsl(var(--border))", background: "transparent" }}>
               <span className="text-[11px] font-bold px-2 py-0.5 rounded-none text-white shrink-0" style={{ background: KR }}>{`ver.${idx + 1}`}</span>
               <div className="flex-1 min-w-0">
                 <div className="text-[13px] font-semibold text-foreground truncate">{v.version_name || `v${v.version_number}`}</div>

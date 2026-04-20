@@ -1,48 +1,51 @@
-import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
+import Database from "better-sqlite3";
 import path from "path";
 import { app } from "electron";
-import fs from "fs";
 
-let db: SqlJsDatabase | null = null;
+let db: Database.Database | null = null;
 let dbPath = "";
 
-export function getDb(): SqlJsDatabase {
+export function getDb(): Database.Database {
   if (!db) throw new Error("Database not initialized");
   return db;
 }
 
-export function saveDb() {
-  if (!db) return;
-  const data = db.export();
-  fs.writeFileSync(dbPath, Buffer.from(data));
+// Kept as a no-op for backwards compatibility with call sites that used to
+// flush the in-memory sql.js database. better-sqlite3 persists every write
+// synchronously, so there is nothing to do here.
+export function saveDb(): void {
+  // intentionally empty
 }
 
-export async function initDatabase() {
+export function closeDb(): void {
+  if (!db) return;
+  try {
+    db.close();
+  } catch (err) {
+    console.error("[DB] close failed:", err);
+  }
+  db = null;
+}
+
+export async function initDatabase(): Promise<void> {
   const userDataPath = app.getPath("userData");
   dbPath = path.join(userDataPath, "preflow.db");
   console.log("[DB] Path:", dbPath);
 
-  const SQL = await initSqlJs();
-
-  if (fs.existsSync(dbPath)) {
-    const buffer = fs.readFileSync(dbPath);
-    db = new SQL.Database(buffer);
-  } else {
-    db = new SQL.Database();
-  }
+  db = new Database(dbPath);
+  // WAL gives us crash-safe durability while keeping writes fast.
+  db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  db.pragma("foreign_keys = ON");
 
   createTables();
-  saveDb();
-  console.log("[DB] Initialized successfully");
-
-  // Auto-save every 5 seconds
-  setInterval(() => saveDb(), 5000);
+  console.log("[DB] Initialized successfully (better-sqlite3)");
 }
 
 function createTables() {
   const d = getDb();
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
       user_id TEXT DEFAULT 'local',
@@ -61,10 +64,10 @@ function createTables() {
   `);
 
   try {
-    d.run(`ALTER TABLE projects ADD COLUMN thumbnail_crop TEXT`);
+    d.exec(`ALTER TABLE projects ADD COLUMN thumbnail_crop TEXT`);
   } catch (_) { /* column already exists */ }
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS briefs (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -82,10 +85,10 @@ function createTables() {
   `);
 
   try {
-    d.run(`ALTER TABLE briefs ADD COLUMN raw_text TEXT`);
+    d.exec(`ALTER TABLE briefs ADD COLUMN raw_text TEXT`);
   } catch (_) { /* column already exists */ }
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS scenes (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -108,7 +111,7 @@ function createTables() {
     )
   `);
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS assets (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -128,10 +131,10 @@ function createTables() {
   `);
 
   try {
-    d.run(`ALTER TABLE assets ADD COLUMN source_type TEXT DEFAULT 'upload'`);
+    d.exec(`ALTER TABLE assets ADD COLUMN source_type TEXT DEFAULT 'upload'`);
   } catch (_) { /* column already exists */ }
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS scene_versions (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -145,7 +148,7 @@ function createTables() {
     )
   `);
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS style_presets (
       id TEXT PRIMARY KEY,
       user_id TEXT DEFAULT 'local',
@@ -159,7 +162,7 @@ function createTables() {
     )
   `);
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS chat_logs (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -170,7 +173,7 @@ function createTables() {
     )
   `);
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS folders (
       id TEXT PRIMARY KEY,
       user_id TEXT DEFAULT 'local',
@@ -179,7 +182,7 @@ function createTables() {
     )
   `);
 
-  d.run(`
+  d.exec(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, protocol, ipcMain } from "electron";
 import path from "path";
 import fs from "fs";
-import { initDatabase } from "./db";
+import { initDatabase, closeDb } from "./db";
 import { registerApiHandlers } from "./api-handlers";
 import { registerStorageHandlers, getStorageBasePath } from "./storage";
 import { registerDbHandlers } from "./db-handlers";
@@ -88,4 +88,8 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  closeDb();
 });

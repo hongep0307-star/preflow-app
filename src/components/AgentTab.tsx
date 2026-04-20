@@ -156,7 +156,7 @@ DO NOT use Korean in any field. ONLY exception: asset @tag_name (kept as registe
 
 `;
 
-const SYSTEM_PROMPT_BASE = `당신은 'YD'입니다. 광고 영상 기획 전문가이자 칸 광고제 수상 경력의 Creative Director입니다.
+const SYSTEM_PROMPT_BASE = `당신은 'Agent'입니다. 광고 영상 기획 전문가이자 칸 광고제 수상 경력의 Creative Director입니다.
 
 [역할]
 1인 영상 프로듀서를 위한 시나리오 개발을 돕는 AI 에이전트 디렉터입니다.
@@ -199,6 +199,14 @@ PHASE 2 — 씬 디벨롭
 \`\`\`scene
 { "scene_number": 1, "title": "", "description": "", "camera_angle": "", "location": "", "mood": "", "duration_sec": 8, "tagged_assets": [] }
 \`\`\`
+
+[Phase 2 전환 필수 규칙 — 절대 준수]
+- 사용자가 storylines 중 하나를 선택했다는 신호(예: "A안 ... 선택합니다", "이 안으로 진행", "1번으로 갈게요", "pick A", "go with option B")를 보내면 **반드시 같은 응답 안에 \`\`\`strategy 블록 1개 + \`\`\`scene 블록 여러 개를 포함**해서 응답할 것. 대화형 평문(prose)으로만 씬을 설명하고 code fence 를 생략하는 것은 금지이다.
+- scene 블록은 반드시 **각 씬마다 별도의 \`\`\`scene 펜스**로 감싸고, 내부는 유효한 JSON 이어야 한다. 하나의 펜스에 여러 씬을 배열로 묶지 말 것.
+- 씬 개수는 이 응답 앞쪽의 [페이싱 규칙] 의 scene_count.recommended 를 우선 기준으로 하되, min~max 범위 안에서만 조절한다. 사용자가 다른 숫자를 명시하지 않은 한 recommended 값을 선택한다.
+- Phase 2 진입 시 storylines 블록을 다시 출력하지 말 것. (사용자가 "다른 안 추가 제안" 같이 명시적으로 요청한 경우에만 재생성)
+- scene_number 는 1 부터 오름차순 정수, 중복 없이.
+- 씬 응답이 길어지더라도 \`\`\`scene 블록은 반드시 JSON 으로만 채우고 그 안에 주석·설명 문장을 넣지 말 것. 부가 설명은 블록 밖에 쓸 것.
 
 [duration_sec 규칙]
 - 반드시 모든 씬에 duration_sec을 숫자로 제안할 것
@@ -425,7 +433,7 @@ const buildBriefContextString = (a: Analysis): string => {
   return lines.join("\n");
 };
 
-const WELCOME_NO_BRIEF = `Hi, I'm YD.\nNo brief analysis found — you can describe your project directly.\nWhat kind of video are you planning?`;
+const WELCOME_NO_BRIEF = `Hi, I'm Agent.\nNo brief analysis found — you can describe your project directly.\nWhat kind of video are you planning?`;
 
 type StorylineOption = { id: string; title: string; synopsis: string; mood?: string };
 const isBriefAnalysisMsg = (content: string) =>
@@ -450,7 +458,7 @@ const StorylinesCard = ({ options, onSelect }: { options: StorylineOption[]; onS
           >
             <span
               className="text-[10px] font-bold w-5 h-5 flex items-center justify-center text-white shrink-0"
-              style={{ background: KR, borderRadius: 2 }}
+              style={{ background: KR, borderRadius: 0 }}
             >
               {label}
             </span>
@@ -468,7 +476,7 @@ const StorylinesCard = ({ options, onSelect }: { options: StorylineOption[]; onS
                 background: "rgba(249,66,58,0.1)",
                 color: KR,
                 border: `1px solid rgba(249,66,58,0.2)`,
-                borderRadius: 3,
+                borderRadius: 0,
               }}
             >
               SELECT →
@@ -605,7 +613,7 @@ const BriefAnalysisCard = ({ content }: { content: string }) => {
       <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <Sparkles size={13} style={{ color: KR }} />
-          <span style={{ fontSize: 11, fontWeight: 700, color: KR, letterSpacing: "0.04em" }}>BRIEF ANALYSIS</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: KR, letterSpacing: "0.01em" }}>Brief Analysis</span>
         </div>
         {contentTypeLabel && (
           <span
@@ -621,7 +629,7 @@ const BriefAnalysisCard = ({ content }: { content: string }) => {
             }}
           >
             {contentTypeLabel}
-            {contentTypeConf && <span style={{ opacity: 0.6, marginLeft: 4 }}>· {contentTypeConf}%</span>}
+            {contentTypeConf && <span style={{ marginLeft: 4 }}>· {contentTypeConf}%</span>}
           </span>
         )}
       </div>
@@ -779,7 +787,7 @@ const MessageContent = ({
                 <h3 className="text-[15px] font-semibold text-foreground mt-2.5 mb-1 first:mt-0">{children}</h3>
               ),
               code: ({ children }) => (
-                <code className="bg-background/50 px-1 py-0.5 rounded text-[13px] font-mono text-muted-foreground">
+                <code className="bg-background/50 px-1 py-0.5 rounded-none text-[13px] font-mono text-muted-foreground">
                   {children}
                 </code>
               ),
@@ -1375,7 +1383,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       const { data } = await supabase.from("scenes").insert(toInsert).select();
       if (data) setScenes(data as Scene[]);
       setPendingScenes([]);
-      toast({ title: "Version loaded. Keep growing with YD." });
+      toast({ title: "Version loaded. Keep growing with Agent." });
     },
     [projectId, setPendingScenes, toast],
   );
@@ -1751,6 +1759,17 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
         ]);
       }
       const extracted = extractScenesFromText(assistantContent);
+      // Storyline-selection 응답에서 씬이 하나도 추출되지 않으면 Phase 2 전환 실패일 가능성이 높다.
+      // 실제 어시스턴트가 어떤 포맷으로 응답했는지 디버깅할 수 있도록 로그를 남긴다.
+      const looksLikeStorylinePick =
+        /\b[A-Z]안\b[\s\S]*(선택|진행|결정|가자|갈게|갈래)/.test(text) ||
+        /\b(pick|go\s+with|choose|proceed)\b/i.test(text);
+      if (looksLikeStorylinePick && extracted.length === 0) {
+        console.warn(
+          "[AgentTab] 스토리라인 선택 후 ```scene``` 블록이 감지되지 않았습니다. 어시스턴트 응답:",
+          assistantContent,
+        );
+      }
       if (extracted.length > 0) {
         const needsReplaceConfirm = scenes.length > 0;
         if (mountedRef.current) {
@@ -1921,7 +1940,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
   const CdAvatar = ({ size = "w-8 h-8", iconSize = 18 }: { size?: string; iconSize?: number }) => (
     <div
       className={`${size} flex items-center justify-center text-white font-bold shrink-0`}
-      style={{ background: KR, borderRadius: 3 }}
+      style={{ background: KR, borderRadius: 0 }}
     >
       <svg
         width={iconSize}
@@ -1957,7 +1976,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
     >
       {isDragOver && (
         <div
-          className="absolute inset-0 z-50 flex flex-col items-center justify-center rounded pointer-events-none"
+          className="absolute inset-0 z-50 flex flex-col items-center justify-center rounded-none pointer-events-none"
           style={{ background: KR_BG, border: `2px dashed ${KR}` }}
         >
           <ImagePlus className="w-10 h-10 mb-2" style={{ color: KR }} />
@@ -2055,7 +2074,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
           <div className="flex justify-start">
             <CdAvatar size="w-6 h-6" iconSize={14} />
             <div className="ml-2">
-              <div className="bg-secondary rounded rounded-tl-none border border-border px-4 py-3 flex items-center gap-1">
+              <div className="bg-secondary rounded-none border border-border px-4 py-3 flex items-center gap-1">
                 {[0, 1, 2].map((j) => (
                   <span
                     key={j}
@@ -2064,7 +2083,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
                   />
                 ))}
               </div>
-              <div className="text-[11px] text-muted-foreground mt-1">YD is crafting your scenario...</div>
+              <div className="text-[11px] text-muted-foreground mt-1">Agent is crafting your scenario...</div>
             </div>
           </div>
         )}
@@ -2379,13 +2398,14 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
             {briefAnalysis && (
               <AgentAbcdPanel
+                projectId={projectId}
                 scenes={scenes}
                 briefAnalysis={briefAnalysis}
                 lang={briefLang}
               />
             )}
             {pendingScenes.length > 0 && (
-              <div className="rounded border-2 overflow-visible" style={{ borderColor: KR, background: KR_BG }}>
+              <div className="rounded-none border-2 overflow-visible" style={{ borderColor: KR, background: KR_BG }}>
                 <div
                   className="flex items-center justify-between px-4 py-2.5"
                   style={{ borderBottom: `1px solid ${KR_BORDER2}` }}
@@ -2431,7 +2451,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
               <div className="flex flex-col items-center justify-center h-full min-h-[300px]">
                 <Clapperboard className="w-10 h-10 text-border mb-3" />
                 <p className="text-sm text-muted-foreground">No scenes yet</p>
-                <p className="text-xs text-muted-foreground/60 mt-1">Chat with YD to start building scenes</p>
+                <p className="text-xs text-muted-foreground/60 mt-1">Chat with Agent to start building scenes</p>
               </div>
             ) : scenes.length > 0 ? (
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -2666,14 +2686,15 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
               <DialogTitle>Replace with new draft?</DialogTitle>
             </DialogHeader>
             <p className="text-[13px] text-muted-foreground leading-relaxed">
-              YD has proposed <strong className="text-foreground">{replaceConfirmBuffer.length}</strong> new
+              Agent has proposed <strong className="text-foreground">{replaceConfirmBuffer.length}</strong> new
               draft scene{replaceConfirmBuffer.length > 1 ? "s" : ""}.
               <br />
               Your <strong className="text-foreground">{scenes.length}</strong> currently confirmed scene
               {scenes.length > 1 ? "s" : ""} will be deleted.
             </p>
-            <div className="text-[11px] text-muted-foreground/60 bg-muted rounded-none px-3 py-2 mt-1">
-              💡 Final commit happens when you turn the draft into scene cards.
+            <div className="flex items-start gap-2 text-[11px] text-muted-foreground/60 bg-muted rounded-none px-3 py-2 mt-1">
+              <Lightbulb className="w-3.5 h-3.5 shrink-0 mt-px" strokeWidth={1.75} />
+              <span>Final commit happens when you turn the draft into scene cards.</span>
             </div>
             <DialogFooter className="gap-2 mt-1">
               <Button variant="ghost" onClick={() => setReplaceConfirmBuffer(null)}>
@@ -2713,7 +2734,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
           <img
             src={moodLightboxUrl}
             alt="mood"
-            style={{ maxWidth: "90vw", maxHeight: "90vh", objectFit: "contain", borderRadius: 8 }}
+            style={{ maxWidth: "90vw", maxHeight: "90vh", objectFit: "contain", borderRadius: 0 }}
             onClick={(e) => e.stopPropagation()}
           />
         </div>

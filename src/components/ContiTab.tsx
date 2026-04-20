@@ -401,11 +401,16 @@ const NewVersionModal = ({
   const methods = [
     {
       id: "copy" as const,
-      icon: "📋",
+      Icon: Copy,
       title: "Copy current scenes",
       desc: "Duplicate scene structure, regenerate conti",
     },
-    { id: "fresh" as const, icon: "✨", title: "Start fresh", desc: "Develop a new scenario from Agent tab" },
+    {
+      id: "fresh" as const,
+      Icon: Sparkles,
+      title: "Start fresh",
+      desc: "Develop a new scenario from Agent tab",
+    },
   ];
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -421,31 +426,30 @@ const NewVersionModal = ({
           <div>
             <label className="text-xs text-muted-foreground mb-2 block">Start method</label>
             <div className="space-y-2">
-              {methods.map((m) => (
-                <div
-                  key={m.id}
-                  onClick={() => setCreateMethod(m.id)}
-                  className="flex items-start gap-3 p-3 rounded-none cursor-pointer transition-colors border"
-                  style={{
-                    borderColor: createMethod === m.id ? KR : "hsl(var(--border))",
-                    background: createMethod === m.id ? KR_BG : "transparent",
-                  }}
-                >
-                  <span className="text-lg">{m.icon}</span>
-                  <div>
-                    <div className="text-[13px] font-semibold">{m.title}</div>
-                    <div className="text-[11px] text-muted-foreground mt-0.5">{m.desc}</div>
-                  </div>
-                  {createMethod === m.id && (
-                    <div
-                      className="w-4 h-4 rounded-none flex items-center justify-center shrink-0 mt-0.5 ml-auto"
-                      style={{ background: KR }}
-                    >
-                      <div className="w-1.5 h-1.5 rounded-none bg-white" />
+              {methods.map((m) => {
+                const isSelected = createMethod === m.id;
+                return (
+                  <div
+                    key={m.id}
+                    onClick={() => setCreateMethod(m.id)}
+                    className="flex items-start gap-3 p-3 rounded-none cursor-pointer transition-colors border"
+                    style={{
+                      borderColor: isSelected ? KR : "hsl(var(--border))",
+                      background: isSelected ? KR_BG : "transparent",
+                    }}
+                  >
+                    <m.Icon
+                      className="w-4 h-4 shrink-0 mt-0.5"
+                      style={{ color: isSelected ? KR : "rgba(255,255,255,0.5)" }}
+                      strokeWidth={1.75}
+                    />
+                    <div>
+                      <div className="text-[13px] font-semibold">{m.title}</div>
+                      <div className="text-[11px] text-muted-foreground mt-0.5">{m.desc}</div>
                     </div>
-                  )}
-                </div>
-              ))}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -776,6 +780,7 @@ const StylePickerModal = ({
   const [saving, setSaving] = useState(false);
   const [selected, setSelected] = useState<string>(currentStyleId ?? NONE_ID);
   const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
 
   const fetchStyles = useCallback(async () => {
@@ -882,14 +887,6 @@ const StylePickerModal = ({
                 className="relative flex-1 min-h-0 overflow-hidden flex items-center justify-center"
                 style={{ background: "rgba(255,255,255,0.03)" }}
               >
-                {selected === NONE_ID && (
-                  <div
-                    className="absolute top-1.5 left-1.5 w-4 h-4 flex items-center justify-center"
-                    style={{ background: KR, borderRadius: 2 }}
-                  >
-                    <div className="w-1.5 h-1.5 rounded-none bg-white" />
-                  </div>
-                )}
                 <div className="flex flex-col items-center gap-1.5">
                   <div
                     className="w-8 h-8 flex items-center justify-center"
@@ -911,10 +908,10 @@ const StylePickerModal = ({
               </div>
               <div className="p-2 h-16 flex flex-col justify-start">
                 <div
-                  className="text-[11px] font-mono font-bold uppercase tracking-wider"
-                  style={{ color: selected === NONE_ID ? KR : "rgba(255,255,255,0.6)" }}
+                  className="text-[11px] font-bold"
+                  style={{ color: selected === NONE_ID ? KR : "#f0f0f0" }}
                 >
-                  NONE
+                  None
                 </div>
                 <div className="text-[10px] mt-0.5 line-clamp-2" style={{ color: "rgba(255,255,255,0.3)" }}>
                   Default photorealistic
@@ -991,14 +988,6 @@ const StylePickerModal = ({
                           <Palette className="w-5 h-5" style={{ color: "rgba(255,255,255,0.15)" }} />
                         </div>
                       )}
-                      {isSel && (
-                        <div
-                          className="absolute top-1.5 left-1.5 w-4 h-4 flex items-center justify-center"
-                          style={{ background: KR, borderRadius: 2 }}
-                        >
-                          <div className="w-1.5 h-1.5 rounded-none bg-white" />
-                        </div>
-                      )}
                       {preset.is_default && (
                         <div
                           className="absolute bottom-1 left-1 font-mono text-[8px] font-bold uppercase px-1.5 py-0.5"
@@ -1024,11 +1013,49 @@ const StylePickerModal = ({
             })()}
             <div
               onClick={() => !uploading && uploadRef.current?.click()}
+              onDragOver={(e) => {
+                if (uploading) return;
+                e.preventDefault();
+                e.stopPropagation();
+                if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+                if (!dragOver) setDragOver(true);
+              }}
+              onDragEnter={(e) => {
+                if (uploading) return;
+                e.preventDefault();
+                e.stopPropagation();
+                setDragOver(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                // 자식 요소로 포인터가 들어가는 dragleave 는 무시
+                const related = e.relatedTarget as Node | null;
+                if (related && (e.currentTarget as Node).contains(related)) return;
+                setDragOver(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setDragOver(false);
+                if (uploading) return;
+                const file = Array.from(e.dataTransfer?.files ?? []).find((f) =>
+                  f.type.startsWith("image/"),
+                );
+                if (file) {
+                  handleUploadStyle(file);
+                } else {
+                  toast({
+                    title: "이미지 파일만 업로드 가능합니다.",
+                    variant: "destructive",
+                  });
+                }
+              }}
               className="overflow-hidden cursor-pointer transition-all h-52 flex flex-col"
               style={{
                 borderRadius: 0,
-                border: "1px dashed rgba(255,255,255,0.15)",
-                background: "rgba(255,255,255,0.02)",
+                border: dragOver ? `2px solid ${KR}` : "1px dashed rgba(255,255,255,0.15)",
+                background: dragOver ? KR_BG : "rgba(255,255,255,0.02)",
                 opacity: uploading ? 0.5 : 1,
               }}
             >
@@ -1044,23 +1071,26 @@ const StylePickerModal = ({
               />
               <div
                 className="relative flex-1 min-h-0 overflow-hidden flex items-center justify-center"
-                style={{ background: "rgba(255,255,255,0.03)" }}
+                style={{ background: dragOver ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.03)" }}
               >
                 {uploading ? (
                   <Loader2 className="w-5 h-5 animate-spin" style={{ color: "rgba(255,255,255,0.3)" }} />
                 ) : (
-                  <Upload className="w-5 h-5" style={{ color: "rgba(255,255,255,0.2)" }} />
+                  <Upload
+                    className="w-5 h-5"
+                    style={{ color: dragOver ? KR : "rgba(255,255,255,0.2)" }}
+                  />
                 )}
               </div>
               <div className="p-2 h-16 flex flex-col justify-start">
                 <div
-                  className="text-[11px] font-mono font-bold uppercase tracking-wider"
-                  style={{ color: "rgba(255,255,255,0.6)" }}
+                  className="text-[11px] font-bold"
+                  style={{ color: dragOver ? KR : "#f0f0f0" }}
                 >
-                  {uploading ? "UPLOADING..." : "UPLOAD"}
+                  {uploading ? "Uploading..." : dragOver ? "Drop image" : "Upload"}
                 </div>
                 <div className="text-[10px] mt-0.5 line-clamp-2" style={{ color: "rgba(255,255,255,0.3)" }}>
-                  Add custom style
+                  {dragOver ? "Release to upload" : "Drag & drop or click"}
                 </div>
               </div>
             </div>
@@ -2522,14 +2552,18 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                     exportCrop.x,
                     exportCrop.y,
                   );
-                  const imgDiv = document.createElement("div");
-                  imgDiv.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;background-image:url(${scene.conti_image_url});background-size:cover;background-repeat:no-repeat;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
-                  imgWrap.appendChild(imgDiv);
+                  const imgEl = document.createElement("img");
+                  imgEl.crossOrigin = "anonymous";
+                  imgEl.src = scene.conti_image_url;
+                  imgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;object-fit:fill;display:block;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
+                  imgWrap.appendChild(imgEl);
                 } else {
-                  imgWrap.style.backgroundImage = `url(${scene.conti_image_url})`;
-                  imgWrap.style.backgroundSize = "cover";
-                  imgWrap.style.backgroundPosition = "center";
-                  imgWrap.style.backgroundRepeat = "no-repeat";
+                  const imgEl = document.createElement("img");
+                  imgEl.crossOrigin = "anonymous";
+                  imgEl.src = scene.conti_image_url;
+                  imgEl.style.cssText =
+                    "position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;display:block;";
+                  imgWrap.appendChild(imgEl);
                 }
               } else if (scene.is_transition) {
                 const flow = document.createElement("div");
@@ -2740,14 +2774,18 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                       exportCrop.x,
                       exportCrop.y,
                     );
-                    const imgDiv = document.createElement("div");
-                    imgDiv.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;background-image:url(${scene.conti_image_url});background-size:cover;background-repeat:no-repeat;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
-                    imgWrap.appendChild(imgDiv);
+                    const imgEl = document.createElement("img");
+                    imgEl.crossOrigin = "anonymous";
+                    imgEl.src = scene.conti_image_url;
+                    imgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;object-fit:fill;display:block;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
+                    imgWrap.appendChild(imgEl);
                   } else {
-                    imgWrap.style.backgroundImage = `url(${scene.conti_image_url})`;
-                    imgWrap.style.backgroundSize = "cover";
-                    imgWrap.style.backgroundPosition = "center";
-                    imgWrap.style.backgroundRepeat = "no-repeat";
+                    const imgEl = document.createElement("img");
+                    imgEl.crossOrigin = "anonymous";
+                    imgEl.src = scene.conti_image_url;
+                    imgEl.style.cssText =
+                      "position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;display:block;";
+                    imgWrap.appendChild(imgEl);
                   }
                 } else if (scene.is_transition) {
                   const flow = document.createElement("div");
@@ -2888,14 +2926,18 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                   exportCrop.x,
                   exportCrop.y,
                 );
-                const imgDiv = document.createElement("div");
-                imgDiv.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;background-image:url(${scene.conti_image_url});background-size:cover;background-repeat:no-repeat;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
-                imgWrap.appendChild(imgDiv);
+                const imgEl = document.createElement("img");
+                imgEl.crossOrigin = "anonymous";
+                imgEl.src = scene.conti_image_url;
+                imgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;object-fit:fill;display:block;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
+                imgWrap.appendChild(imgEl);
               } else {
-                imgWrap.style.backgroundImage = `url(${scene.conti_image_url})`;
-                imgWrap.style.backgroundSize = "cover";
-                imgWrap.style.backgroundPosition = "center";
-                imgWrap.style.backgroundRepeat = "no-repeat";
+                const imgEl = document.createElement("img");
+                imgEl.crossOrigin = "anonymous";
+                imgEl.src = scene.conti_image_url;
+                imgEl.style.cssText =
+                  "position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;display:block;";
+                imgWrap.appendChild(imgEl);
               }
             } else if (scene.is_transition) {
               const flow = document.createElement("div");
@@ -3362,7 +3404,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                   borderRadius: 0,
                 }}
               >
-                <Wand2 className="w-3.5 h-3.5" style={{ color: KR }} />
+                <Wand2 className="w-3.5 h-3.5" />
                 {MODEL_OPTIONS.find((m) => m.id === contiModel)?.name ?? "Dev"}
               </button>
               {showModelMenu && (

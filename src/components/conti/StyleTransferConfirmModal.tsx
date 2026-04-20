@@ -1,4 +1,4 @@
-import { Palette } from "lucide-react";
+import { Palette, Lightbulb } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { KR } from "./contiTypes";
@@ -51,8 +51,9 @@ export const StyleTransferConfirmModal = ({
             <br />
             Original images are auto-saved to history.
           </p>
-          <div className="rounded-none bg-muted/50 px-3 py-2 text-[12px] text-muted-foreground">
-            💡 Composition and layout are preserved — only the visual style changes.
+          <div className="flex items-start gap-2 rounded-none bg-muted/50 px-3 py-2 text-[12px] text-muted-foreground">
+            <Lightbulb className="w-3.5 h-3.5 shrink-0 mt-px" strokeWidth={1.75} />
+            <span>Composition and layout are preserved — only the visual style changes.</span>
           </div>
         </div>
         <DialogFooter className="gap-2 sm:flex-row sm:flex-wrap sm:justify-end sm:space-x-0">

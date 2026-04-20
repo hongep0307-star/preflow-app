@@ -12,13 +12,14 @@ import type {
 /**
  * ABCD Framework Scorer (Google)
  *   Attract — 첫 3초 몰입도
- *   Brand   — 브랜드/제품 노출 타이밍과 배치
+ *   Brand   — 브랜드/제품 노출 타이밍·빈도·지속시간
  *   Connect — 감정·내러티브 연결
- *   Direct  — CTA 명확성
+ *   Direct  — CTA 명확성 및 노출 지속시간
  *
- * 순수 TS 함수. 룰 기반으로 0-10 점을 매기고, 부족한 항목은 notes 로 피드백.
- * 브리프 분석 직후에는 "예측 스코어" 로, 콘티 생성 후에는 "실제 씬 기반"
- * 으로 재호출될 수 있도록 입력을 모두 optional 하게 받는다.
+ * 채점 모드:
+ *   1) scenes === undefined               → 브리프 설계 체크리스트 (pre-composition)
+ *   2) scenes !== undefined, filled === 0 → 반환 null (호출측에서 마지막 점수 동결/회색 표시)
+ *   3) scenes !== undefined, filled > 0   → 씬 기반 실시간 채점
  */
 
 interface Rule {
@@ -37,15 +38,147 @@ export interface ABCDInput {
   audience_insight?: AudienceInsight;
   visual_direction?: { lighting?: string };
   reference_mood?: string;
-  /** 실제 생성된 씬 배열이 있으면 더 정확한 채점 */
   scenes?: Array<{
     scene_number: number;
+    title?: string | null;
     description?: string | null;
     camera_angle?: string | null;
     tagged_assets?: string[];
+    duration_sec?: number | null;
   }>;
   total_scene_count?: number;
 }
+
+type SceneLike = NonNullable<ABCDInput["scenes"]>[number];
+
+/* ─────────── 시간/키워드 유틸 ──────────────────────────── */
+
+const DEFAULT_SCENE_SEC = 3;
+
+function sceneDuration(s: SceneLike): number {
+  return typeof s.duration_sec === "number" && s.duration_sec > 0
+    ? s.duration_sec
+    : DEFAULT_SCENE_SEC;
+}
+
+function totalDuration(scenes: SceneLike[]): number {
+  return scenes.reduce((a, s) => a + sceneDuration(s), 0);
+}
+
+function sceneText(s: SceneLike): string {
+  return `${s.title ?? ""} ${s.description ?? ""} ${(s.tagged_assets ?? []).join(" ")}`.toLowerCase();
+}
+
+function sceneHasAnyKeyword(s: SceneLike, keywords: string[]): boolean {
+  if (!keywords.length) return false;
+  const txt = sceneText(s);
+  return keywords.some((k) => txt.includes(k));
+}
+
+/** 키워드가 처음 등장한 씬의 누적 시작 시각(초). 없으면 null */
+function firstKeywordRevealSec(scenes: SceneLike[], keywords: string[]): number | null {
+  if (!keywords.length) return null;
+  let cum = 0;
+  for (const s of scenes) {
+    if (sceneHasAnyKeyword(s, keywords)) return cum;
+    cum += sceneDuration(s);
+  }
+  return null;
+}
+
+/** 키워드가 등장하는 씬들의 duration 총합(초) */
+function keywordExposureSec(scenes: SceneLike[], keywords: string[]): number {
+  if (!keywords.length) return 0;
+  return scenes.reduce(
+    (a, s) => a + (sceneHasAnyKeyword(s, keywords) ? sceneDuration(s) : 0),
+    0,
+  );
+}
+
+/** 키워드가 등장하는 씬의 개수 */
+function sceneHitCount(scenes: SceneLike[], keywords: string[]): number {
+  if (!keywords.length) return 0;
+  return scenes.filter((s) => sceneHasAnyKeyword(s, keywords)).length;
+}
+
+/** 타임라인 마지막 pct (0~1) 구간과 교차하는 씬들 반환 */
+function lastPortionScenes(scenes: SceneLike[], pct: number): SceneLike[] {
+  const total = totalDuration(scenes);
+  if (total <= 0) return [];
+  const cutoff = total * (1 - pct);
+  let acc = 0;
+  const out: SceneLike[] = [];
+  for (const s of scenes) {
+    const end = acc + sceneDuration(s);
+    if (end > cutoff) out.push(s);
+    acc = end;
+  }
+  return out.length ? out : [scenes[scenes.length - 1]];
+}
+
+function extractProductKeywords(productWhat?: string, mustShow?: string[]): string[] {
+  const out: string[] = [];
+  const push = (raw?: string) => {
+    if (!raw) return;
+    raw
+      .split(/[\s,/\\·\-·|]+/)
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.length >= 2)
+      .forEach((t) => out.push(t));
+  };
+  push(productWhat);
+  (mustShow ?? []).forEach(push);
+  return [...new Set(out)];
+}
+
+const CTA_KEYWORDS = [
+  "cta",
+  "구매",
+  "다운로드",
+  "참여",
+  "클릭",
+  "지금",
+  "방문",
+  "시작",
+  "pre-register",
+  "buy",
+  "download",
+  "tap",
+  "click",
+  "join",
+  "play",
+  "get",
+  "start",
+  "now",
+  "subscribe",
+  "sign up",
+];
+
+const PATTERN_INTERRUPT_MOTION = [
+  "줌",
+  "컷",
+  "회전",
+  "폭발",
+  "충격",
+  "번쩍",
+  "스플래시",
+  "변신",
+  "플래시",
+  "슬로우",
+  "whip",
+  "zoom",
+  "cut",
+  "slam",
+  "flash",
+  "explode",
+  "burst",
+  "dash",
+  "rush",
+  "quick",
+  "match cut",
+];
+
+/* ─────────── runRules ──────────────────────────────────── */
 
 function runRules(rules: Rule[]): ABCDScore {
   let earned = 0;
@@ -69,57 +202,9 @@ function runRules(rules: Rule[]): ABCDScore {
   return { score: normalized, notes: notes.join(" · ") };
 }
 
-/** product_info.what / must_show 에서 검색 가능한 토큰(2자 이상) 을 추출 */
-function extractProductKeywords(productWhat?: string, mustShow?: string[]): string[] {
-  const out: string[] = [];
-  const push = (raw?: string) => {
-    if (!raw) return;
-    raw
-      .split(/[\s,/\\·\-·|]+/)
-      .map((t) => t.trim().toLowerCase())
-      .filter((t) => t.length >= 2)
-      .forEach((t) => out.push(t));
-  };
-  push(productWhat);
-  (mustShow ?? []).forEach(push);
-  return [...new Set(out)];
-}
+/* ─────────── scoreABCD ─────────────────────────────────── */
 
-type SceneLike = NonNullable<ABCDInput["scenes"]>[number];
-
-function sceneText(s: SceneLike): string {
-  return `${s.description ?? ""} ${(s.tagged_assets ?? []).join(" ")}`.toLowerCase();
-}
-
-function sceneHasAnyKeyword(s: SceneLike, keywords: string[]): boolean {
-  if (!keywords.length) return false;
-  const txt = sceneText(s);
-  return keywords.some((k) => txt.includes(k));
-}
-
-/**
- * 키워드가 처음 등장하는 씬의 "시작 시각(초)" 를 반환.
- * 반환값: { idx, revealSec } | null
- *   revealSec = 해당 씬이 시작되기 전까지의 누적 duration.
- *   duration_sec 미지정 씬은 기본 3초로 간주.
- */
-function firstKeywordAppearance(
-  sceneArr: SceneLike[],
-  keywords: string[],
-): { idx: number; revealSec: number } | null {
-  if (!keywords.length) return null;
-  let cum = 0;
-  for (let i = 0; i < sceneArr.length; i++) {
-    const s = sceneArr[i];
-    if (sceneHasAnyKeyword(s, keywords)) {
-      return { idx: i, revealSec: cum };
-    }
-    cum += typeof s.duration_sec === "number" ? s.duration_sec : 3;
-  }
-  return null;
-}
-
-export function scoreABCD(input: ABCDInput): ABCDCompliance {
+export function scoreABCD(input: ABCDInput): ABCDCompliance | null {
   const {
     hook_strategy,
     hero_visual,
@@ -131,56 +216,92 @@ export function scoreABCD(input: ABCDInput): ABCDCompliance {
     scenes,
   } = input;
 
-  // ── 씬 기반 신호 추출 (씬이 있을 때만 사용) ─────────────
+  const hasSceneInput = scenes !== undefined;
   const sceneArrAll = scenes ?? [];
   const filledScenes = sceneArrAll.filter(
     (s) => !!s.description && s.description.trim().length > 0,
   );
+
+  // 씬 모드로 호출되었지만 실제로 채점할 씬이 없는 경우
+  // → 호출측이 마지막 점수를 동결(회색)로 처리하도록 null 반환
+  if (hasSceneInput && filledScenes.length === 0) {
+    return null;
+  }
+
   const hasScenes = filledScenes.length > 0;
+
+  // ── 씬 기반 신호 사전 계산 ───────────────────────────────
   const productKeywords = extractProductKeywords(product_info?.what, hero_visual?.must_show);
-  const firstReveal = hasScenes ? firstKeywordAppearance(filledScenes, productKeywords) : null;
+  const totalSec = hasScenes ? totalDuration(filledScenes) : 0;
+  const firstRevealSec = hasScenes ? firstKeywordRevealSec(filledScenes, productKeywords) : null;
+  const brandExposureSec = hasScenes ? keywordExposureSec(filledScenes, productKeywords) : 0;
+  const brandSceneHits = hasScenes ? sceneHitCount(filledScenes, productKeywords) : 0;
+  const ctaPortion = hasScenes ? lastPortionScenes(filledScenes, 0.3) : [];
+  const ctaHitInLastPortion = ctaPortion.some((s) => sceneHasAnyKeyword(s, CTA_KEYWORDS));
+  const ctaExposureInLastPortion = keywordExposureSec(ctaPortion, CTA_KEYWORDS);
   const firstSceneFilled = filledScenes[0];
   const firstSceneTextLen = firstSceneFilled?.description?.trim().length ?? 0;
+  const firstSceneDur = firstSceneFilled ? sceneDuration(firstSceneFilled) : 0;
+  const firstSceneHasMotion = firstSceneFilled
+    ? sceneHasAnyKeyword(firstSceneFilled, PATTERN_INTERRUPT_MOTION)
+    : false;
 
-  // ── A: Attract ────────────────────────────────────────────
-  // 씬이 있으면 씬 기반 규칙, 없으면 브리프 설계값 기반.
+  const emotionalHookTypes = new Set([
+    "power_fantasy",
+    "fail_solve",
+    "testimonial",
+    "before_after",
+  ]);
+
+  /* ───────── A: Attract ───────── */
   const attract = runRules(
     hasScenes
       ? [
           {
             check: () => firstSceneTextLen >= 20,
             weight: 2,
-            fail_message: "첫 씬 description 이 비었거나 너무 짧음 — 구체적 샷 서술 필요",
+            fail_message: "첫 씬 description 이 비었거나 너무 짧음 — 훅 샷 구체화 필요",
             pass_message: "첫 씬 description 구체적",
           },
           {
-            check: () => !!firstSceneFilled?.camera_angle && firstSceneFilled.camera_angle.trim().length > 0,
+            check: () =>
+              !!firstSceneFilled?.camera_angle && firstSceneFilled.camera_angle.trim().length > 0,
             weight: 1,
-            fail_message: "첫 씬 camera_angle 미지정 — 훅 샷 의도 모호",
-            pass_message: "첫 씬 camera_angle 지정됨",
+            fail_message: "첫 씬 camera_angle 미지정",
           },
           {
-            check: () => firstReveal !== null && firstReveal.revealSec < 3,
+            check: () => firstSceneDur >= 1 && firstSceneDur <= 5,
+            weight: 1,
+            fail_message:
+              firstSceneDur < 1
+                ? "첫 씬 duration 이 너무 짧음 — 훅 인지 불가"
+                : firstSceneDur > 5
+                  ? `첫 씬 duration ${firstSceneDur}s — 초반 스크롤 이탈 위험 (1-5s 권장)`
+                  : "첫 씬 duration 미지정",
+            pass_message: "첫 씬 duration 훅 구간에 적합",
+          },
+          {
+            check: () => firstRevealSec !== null && firstRevealSec < 3,
             weight: 3,
             fail_message:
-              firstReveal === null
-                ? `씬 description 에 제품/브랜드 키워드 노출 없음${productKeywords.length ? ` (검색어: ${productKeywords.slice(0, 4).join(", ")})` : ""}`
-                : `첫 제품/브랜드 노출이 ${firstReveal.revealSec.toFixed(1)}s — 3초를 넘김`,
+              firstRevealSec === null
+                ? `씬에 제품/브랜드 키워드 노출 없음${productKeywords.length ? ` (검색어: ${productKeywords.slice(0, 4).join(", ")})` : ""}`
+                : `첫 제품/브랜드 노출이 ${firstRevealSec.toFixed(1)}s — 3초 초과`,
             pass_message:
-              firstReveal !== null
-                ? `첫 ${firstReveal.revealSec.toFixed(1)}s 내 브랜드·제품 노출`
-                : undefined,
+              firstRevealSec !== null ? `첫 ${firstRevealSec.toFixed(1)}s 내 브랜드·제품 노출` : undefined,
           },
           {
-            check: () => hook_strategy?.pattern_interrupt === true,
+            check: () => hook_strategy?.pattern_interrupt === true || firstSceneHasMotion,
             weight: 2,
-            fail_message: "스크롤 멈춤(pattern_interrupt) 장치 없음",
-            pass_message: "pattern_interrupt 활성",
+            fail_message:
+              hook_strategy?.pattern_interrupt === true
+                ? "첫 씬에 모션/컷 키워드가 없어 pattern_interrupt 체감 약함"
+                : "스크롤 멈춤(pattern_interrupt) 장치 없음",
+            pass_message: "pattern_interrupt 신호 확인됨",
           },
           {
-            check: () =>
-              !!hero_visual?.first_frame && hero_visual.first_frame.trim().length > 0,
-            weight: 2,
+            check: () => !!hero_visual?.first_frame && hero_visual.first_frame.trim().length > 0,
+            weight: 1,
             fail_message: "hero_visual.first_frame 미정의",
           },
         ]
@@ -211,44 +332,50 @@ export function scoreABCD(input: ABCDInput): ABCDCompliance {
               !!hook_strategy?.first_3s_description &&
               hook_strategy.first_3s_description.length > 20,
             weight: 2,
-            fail_message: "훅 첫 3초 묘사가 비었거나 너무 짧음 — 구체적 샷 서술 필요",
+            fail_message: "훅 첫 3초 묘사가 비었거나 너무 짧음",
           },
         ],
   );
 
-  // ── B: Brand ──────────────────────────────────────────────
-  // 씬이 있으면 실제 씬의 브랜드·제품 노출 시점과 빈도를 채점.
+  /* ───────── B: Brand ───────── */
   const brand = runRules(
     hasScenes
       ? [
           {
-            check: () => firstReveal !== null && firstReveal.revealSec < 5,
-            weight: 4,
-            fail_message:
-              firstReveal === null
-                ? `어떤 씬에도 제품/브랜드 키워드가 없음${productKeywords.length ? ` (검색어: ${productKeywords.slice(0, 4).join(", ")})` : ""}`
-                : `브랜드·제품 노출이 ${firstReveal.revealSec.toFixed(1)}s — 5초를 넘김`,
-            pass_message:
-              firstReveal !== null
-                ? `5초 이내 (${firstReveal.revealSec.toFixed(1)}s) 브랜드 노출`
-                : undefined,
-          },
-          {
-            check: () => {
-              if (!productKeywords.length) return false;
-              // 제품/브랜드 키워드가 2개 이상의 씬에 걸쳐 반복 노출되는지
-              const hits = filledScenes.filter((s) => sceneHasAnyKeyword(s, productKeywords)).length;
-              return hits >= 2;
-            },
+            check: () => firstRevealSec !== null && firstRevealSec < 3,
             weight: 3,
-            fail_message: "제품/브랜드가 1개 이하 씬에만 등장 — 반복 노출 부족",
-            pass_message: "복수 씬에 걸쳐 브랜드·제품 반복 노출",
+            fail_message:
+              firstRevealSec === null
+                ? "어떤 씬에도 제품/브랜드 키워드가 없음"
+                : `브랜드·제품 노출이 ${firstRevealSec.toFixed(1)}s — 3초 초과`,
+            pass_message:
+              firstRevealSec !== null ? `3초 이내 (${firstRevealSec.toFixed(1)}s) 브랜드 노출` : undefined,
           },
           {
-            check: () =>
-              Array.isArray(hero_visual?.must_show) && (hero_visual?.must_show.length ?? 0) >= 2,
+            check: () => firstRevealSec !== null && firstRevealSec < 5,
             weight: 1,
-            fail_message: "hero_visual.must_show 자산 2개 미만",
+            fail_message: "브랜드 노출이 5초 초과 — Hook 구간 내 진입 필요",
+          },
+          {
+            check: () => brandSceneHits >= 2,
+            weight: 2,
+            fail_message:
+              brandSceneHits === 1
+                ? "브랜드·제품이 1개 씬에만 등장 — 분산 노출 부족"
+                : "브랜드·제품 분산 노출 없음",
+            pass_message: `${brandSceneHits}개 씬에 걸쳐 브랜드·제품 반복 노출`,
+          },
+          {
+            check: () => totalSec > 0 && brandExposureSec / totalSec >= 0.2,
+            weight: 2,
+            fail_message:
+              totalSec > 0
+                ? `브랜드·제품 총 노출 ${brandExposureSec.toFixed(1)}s / ${totalSec.toFixed(1)}s (${Math.round((brandExposureSec / totalSec) * 100)}%) — 20% 미만`
+                : "총 러닝타임 산출 불가",
+            pass_message:
+              totalSec > 0
+                ? `브랜드 노출 비중 ${Math.round((brandExposureSec / totalSec) * 100)}%`
+                : undefined,
           },
           {
             check: () => !!product_info?.what && product_info.what.length > 2,
@@ -263,7 +390,7 @@ export function scoreABCD(input: ABCDInput): ABCDCompliance {
               hero_visual?.brand_reveal_timing === "3-5s",
             weight: 4,
             fail_message: "브랜드 노출 타이밍이 5초 이내에 설계되지 않음",
-            pass_message: "5초 이내 브랜드 노출",
+            pass_message: "5초 이내 브랜드 노출 (설계)",
           },
           {
             check: () => !!hero_visual?.logo_placement,
@@ -274,100 +401,160 @@ export function scoreABCD(input: ABCDInput): ABCDCompliance {
             check: () =>
               Array.isArray(hero_visual?.must_show) && (hero_visual?.must_show.length ?? 0) >= 2,
             weight: 2,
-            fail_message: "hero_visual.must_show 요소가 2개 미만 — 브랜드 자산 최소 2개 강제 필요",
+            fail_message: "hero_visual.must_show 자산 2개 미만",
           },
           {
             check: () => !!product_info?.what && product_info.what.length > 2,
             weight: 2,
-            fail_message: "product_info.what 누락 — 판매/홍보 대상이 명확하지 않음",
+            fail_message: "product_info.what 누락",
           },
         ],
   );
 
-  // ── C: Connect ────────────────────────────────────────────
-  const connect = runRules([
-    {
-      check: () =>
-        !!audience_insight?.pain_point && audience_insight.pain_point.length > 5,
-      weight: 3,
-      fail_message: "audience_insight.pain_point 미정의 — 타겟 페인 포인트 구체화 필요",
-    },
-    {
-      check: () =>
-        !!hook_strategy?.primary &&
-        ["power_fantasy", "fail_solve", "testimonial", "before_after"].includes(
-          hook_strategy.primary,
-        ),
-      weight: 3,
-      fail_message: "훅이 감정 비트를 강조하는 유형이 아님 — connect 보강 여지",
-      pass_message: "감정 연결형 훅 선택됨",
-    },
-    {
-      check: () => !!visual_direction?.lighting && visual_direction.lighting.length > 10,
-      weight: 2,
-      fail_message: "visual_direction.lighting 이 감정 톤을 구체화하지 못함",
-    },
-    {
-      check: () => !!reference_mood && reference_mood.length > 30,
-      weight: 2,
-      fail_message: "reference_mood 가 센서리 디테일로 묘사되지 않음 (너무 짧음)",
-    },
-  ]);
+  /* ───────── C: Connect ───────── */
+  const connect = runRules(
+    hasScenes
+      ? [
+          {
+            check: () =>
+              !!audience_insight?.pain_point && audience_insight.pain_point.length > 5,
+            weight: 2,
+            fail_message: "audience_insight.pain_point 미정의 — 타겟 페인 포인트 구체화 필요",
+          },
+          {
+            check: () =>
+              !!hook_strategy?.primary && emotionalHookTypes.has(hook_strategy.primary),
+            weight: 2,
+            fail_message: "훅이 감정 비트를 강조하는 유형이 아님",
+            pass_message: "감정 연결형 훅 유형",
+          },
+          {
+            check: () =>
+              (!!visual_direction?.lighting && visual_direction.lighting.length > 10) ||
+              (!!reference_mood && reference_mood.length > 30),
+            weight: 2,
+            fail_message: "감정 톤을 구체화할 lighting·reference_mood 서술 부족",
+          },
+          {
+            check: () => filledScenes.length >= 3,
+            weight: 2,
+            fail_message:
+              filledScenes.length < 2
+                ? `필드 씬 ${filledScenes.length}개 — 스토리 비트 구성 불가 (3+ 권장)`
+                : `필드 씬 ${filledScenes.length}개 — 감정 빌드업 공간 부족`,
+            pass_message: `${filledScenes.length}개 씬으로 내러티브 구성 가능`,
+          },
+          {
+            check: () => {
+              if (filledScenes.length < 2) return false;
+              // CTA 구간에 들어가기 전에 최소 1개 빌드업 씬 존재
+              const buildupCandidates = filledScenes.slice(0, Math.max(1, filledScenes.length - 1));
+              return buildupCandidates.some(
+                (s) => !sceneHasAnyKeyword(s, CTA_KEYWORDS) && (s.description?.trim().length ?? 0) >= 15,
+              );
+            },
+            weight: 2,
+            fail_message: "CTA 이전 빌드업 씬이 없음 — 감정 곡선 부재",
+            pass_message: "CTA 이전 빌드업 씬 존재",
+          },
+        ]
+      : [
+          {
+            check: () =>
+              !!audience_insight?.pain_point && audience_insight.pain_point.length > 5,
+            weight: 3,
+            fail_message: "audience_insight.pain_point 미정의",
+          },
+          {
+            check: () =>
+              !!hook_strategy?.primary && emotionalHookTypes.has(hook_strategy.primary),
+            weight: 3,
+            fail_message: "훅이 감정 비트를 강조하는 유형이 아님",
+            pass_message: "감정 연결형 훅 선택됨",
+          },
+          {
+            check: () => !!visual_direction?.lighting && visual_direction.lighting.length > 10,
+            weight: 2,
+            fail_message: "visual_direction.lighting 이 감정 톤을 구체화하지 못함",
+          },
+          {
+            check: () => !!reference_mood && reference_mood.length > 30,
+            weight: 2,
+            fail_message: "reference_mood 가 센서리 디테일로 묘사되지 않음",
+          },
+        ],
+  );
 
-  // ── D: Direct ─────────────────────────────────────────────
-  // filledScenes 는 이미 상단에서 계산됨 (description 채워진 씬만 대상, 빈 placeholder 무시)
-  const totalFilled = filledScenes.length;
-  // 항상 최소 1개의 씬은 포함되도록 (기존 ceil(n*0.8) 은 total<=4 에서 빈 배열을 만들었음)
-  const takeN = Math.max(1, Math.ceil(totalFilled * 0.2));
-  const last20pct = totalFilled > 0 ? filledScenes.slice(Math.max(0, totalFilled - takeN)) : [];
-  const ctaKeywords = [
-    "cta", "구매", "다운로드", "참여", "클릭", "지금", "방문", "시작",
-    "buy", "download", "tap", "click", "join", "play", "get", "start", "now",
-  ];
-  const ctaHitInLastScenes = last20pct.some((s) => {
-    const txt = `${s.description ?? ""}`.toLowerCase();
-    return ctaKeywords.some((k) => txt.includes(k));
-  });
+  /* ───────── D: Direct ───────── */
+  const direct = runRules(
+    hasScenes
+      ? [
+          {
+            check: () =>
+              !!product_info?.cta_action &&
+              /^(지금|참여|구매|다운|클릭|방문|[A-Za-z])/u.test(product_info.cta_action) &&
+              product_info.cta_action.length <= 10,
+            weight: 2,
+            fail_message: "cta_action 이 동사형 10자 이내가 아님",
+            pass_message: "cta_action 구체적 동사형",
+          },
+          {
+            check: () => !!product_info?.cta_destination && product_info.cta_destination.length > 3,
+            weight: 2,
+            fail_message: "cta_destination (구체적 경로) 누락",
+          },
+          {
+            check: () => !!product_info?.urgency?.type && product_info.urgency.type !== "none",
+            weight: 1,
+            fail_message: "urgency 'none' — 긴박감 장치 없음",
+            pass_message: "긴박감(urgency) 설계됨",
+          },
+          {
+            check: () => ctaHitInLastPortion,
+            weight: 2,
+            fail_message: "마지막 30% 구간 씬에 CTA 키워드 없음",
+            pass_message: "마지막 구간 씬에 CTA 반영",
+          },
+          {
+            check: () => ctaExposureInLastPortion >= 2,
+            weight: 3,
+            fail_message: ctaHitInLastPortion
+              ? `CTA 노출 ${ctaExposureInLastPortion.toFixed(1)}s — 2초 미만, 인지 어려움`
+              : "CTA 노출 없음",
+            pass_message: `CTA 마지막 구간 ${ctaExposureInLastPortion.toFixed(1)}s 노출`,
+          },
+        ]
+      : [
+          {
+            check: () =>
+              !!product_info?.cta_action &&
+              /^(지금|참여|구매|다운|클릭|방문|[A-Za-z])/u.test(product_info.cta_action) &&
+              product_info.cta_action.length <= 10,
+            weight: 3,
+            fail_message: "cta_action 이 동사형 3-6자 짧은 문구가 아님",
+            pass_message: "cta_action 구체적 동사형",
+          },
+          {
+            check: () => !!product_info?.cta_destination && product_info.cta_destination.length > 3,
+            weight: 3,
+            fail_message: "cta_destination 누락",
+          },
+          {
+            check: () => !!product_info?.urgency?.type && product_info.urgency.type !== "none",
+            weight: 2,
+            fail_message: "urgency 'none'",
+            pass_message: "긴박감 설계됨",
+          },
+          {
+            check: () => !!pacing && pacing.scene_count.recommended >= 3,
+            weight: 2,
+            fail_message: "권장 씬 수 3 미만 — 마지막 CTA 구간 확보 어려움",
+          },
+        ],
+  );
 
-  const direct = runRules([
-    {
-      check: () =>
-        !!product_info?.cta_action && /^(지금|참여|구매|다운|클릭|방문|[A-Za-z])/u.test(product_info.cta_action) &&
-        product_info.cta_action.length <= 10,
-      weight: 3,
-      fail_message: "cta_action 이 동사형 3-6자 짧은 문구가 아님",
-      pass_message: "cta_action 구체적 동사형",
-    },
-    {
-      check: () => !!product_info?.cta_destination && product_info.cta_destination.length > 3,
-      weight: 3,
-      fail_message: "cta_destination (구체적 경로) 누락",
-    },
-    {
-      check: () => !!product_info?.urgency?.type && product_info.urgency.type !== "none",
-      weight: 2,
-      fail_message: "urgency 가 'none' — 긴박감 장치 없음",
-      pass_message: "긴박감(urgency) 설계됨",
-    },
-    {
-      check: () => {
-        // 빈 씬만 있거나 씬이 아직 없으면 pacing 기반 fallback
-        if (totalFilled === 0) {
-          return !!pacing && pacing.scene_count.recommended >= 3;
-        }
-        return ctaHitInLastScenes;
-      },
-      weight: 2,
-      fail_message: totalFilled
-        ? `마지막 씬 description 에 CTA 키워드 없음 (구매/다운로드/참여/클릭/지금/방문/시작/buy/download/tap/click/join/play/get/start/now)`
-        : "마지막 20% 씬에 CTA 비주얼/액션이 포함되지 않음",
-      pass_message: totalFilled ? "마지막 씬 description 에 CTA 반영됨" : undefined,
-    },
-  ]);
-
-  const total_score = attract.score + brand.score + connect.score + direct.score;
-
-  return { attract, brand, connect, direct, total: total_score };
+  const total = attract.score + brand.score + connect.score + direct.score;
+  return { attract, brand, connect, direct, total };
 }
 
 /** 4개 영역 합산 0-40 을 5-grade 텍스트로 변환 */

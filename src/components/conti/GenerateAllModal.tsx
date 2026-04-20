@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Plus, RotateCcw } from "lucide-react";
 import { KR } from "./contiTypes";
 
 export const GenerateAllModal = ({
@@ -34,11 +35,16 @@ export const GenerateAllModal = ({
             {[
               {
                 mode: "missing" as const,
-                icon: "✦",
+                Icon: Plus,
                 title: `Generate missing only (${missingCount})`,
                 desc: "Keep existing conti",
               },
-              { mode: "all" as const, icon: "↺", title: `Regenerate all (${totalCount})`, desc: "Replace existing conti" },
+              {
+                mode: "all" as const,
+                Icon: RotateCcw,
+                title: `Regenerate all (${totalCount})`,
+                desc: "Replace existing conti",
+              },
             ].map((opt) => (
               <button
                 key={opt.mode}
@@ -46,7 +52,11 @@ export const GenerateAllModal = ({
                 className="w-full flex items-start gap-3 p-3 rounded-none border text-left transition-colors hover:border-[#f9423a] hover:bg-[rgba(249,66,58,0.04)]"
                 style={{ borderColor: "hsl(var(--border))" }}
               >
-                <span className="text-base mt-0.5">{opt.icon}</span>
+                <opt.Icon
+                  className="w-4 h-4 shrink-0 mt-0.5"
+                  style={{ color: "rgba(255,255,255,0.5)" }}
+                  strokeWidth={1.75}
+                />
                 <div>
                   <div className="text-[13px] font-semibold">{opt.title}</div>
                   <div className="text-[11px] text-muted-foreground mt-0.5">{opt.desc}</div>

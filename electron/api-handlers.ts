@@ -28,15 +28,92 @@ export async function handleClaudeProxy(body: any) {
 export async function handleEnhanceInpaintPrompt(body: any) {
   const settings = getSettings();
   ensureGoogleCredentials(settings);
-  const { prompt, hasMask, assetDescriptions } = body;
+  const { prompt, hasMask, assetDescriptions, sourceImageBase64, tagImageBase64 } = body;
   if (!prompt) return { error: "prompt is required" };
-  const systemPrompt = `You are an expert prompt writer for high-precision image inpainting/editing.\n\nYour job:\n1. If the input is not in English, translate it to natural English first.\n2. Classify the request as one of: REMOVAL, REPLACEMENT, ADDITION, or MODIFICATION.\n3. Rewrite it into a SHORT, EXTREMELY SPECIFIC editing prompt optimized for image editing AI.\n\n═══ REMOVAL REQUESTS ═══\nDetection: words like "remove", "delete", "erase", "없애", "제거", "삭제", "지워"\nRules:\n- Primary instruction: "Completely remove [object] from the image."\n- Secondary instruction: "Fill the area with the natural continuation of the surrounding background."\n- CRITICAL: "Do NOT replace the removed object with any other object."\n- CRITICAL: "Do NOT add anything new. The area should look as if the object was never there."\n\n═══ UNIVERSAL RULES ═══\n- Keep the prompt SHORT (3-6 sentences max).\n- The FIRST sentence must be the primary action.\n- Never introduce creative additions the user didn't ask for.\n- Always end with: Preserve all unmasked content exactly as-is.\n${assetDescriptions ? `\nAsset references:\n${assetDescriptions}` : ""}${hasMask ? "\n[User painted a brush mask on the target area.]" : "\n[No brush mask. Full-image edit.]"}\n\nReturn ONLY the final prompt. No explanations. No markdown.`;
+
+  // Gemini 가 SOURCE (보존용) + TAG (정체성 묘사용) 두 장을 직접 보고
+  // 1) PRESERVE: 원본에서 보존해야 할 요소 목록
+  // 2) TAG_IDENTITY: 태그 에셋의 구체적 식별 특징
+  // 두 블록을 프롬프트에 주입 → 이후 NB2 가 "인물 날리기" / "일반화" 실수 둘 다 줄어듦.
+  const hasSourceImage = !!sourceImageBase64 && hasMask;
+  const hasTagImage = !!tagImageBase64 && hasMask;
+
+  const systemPrompt = `You are an expert prompt writer for high-precision image inpainting/editing.
+
+Your job:
+1. If the input is not in English, translate it to natural English first.
+2. Classify the request as one of: REMOVAL, REPLACEMENT, ADDITION, or MODIFICATION.
+3. Rewrite it into a SHORT, EXTREMELY SPECIFIC editing prompt optimized for image editing AI.
+${hasSourceImage ? `
+═══ SCENE PRESERVATION (CRITICAL) ═══
+You will be given the SOURCE scene image. Study it first and silently identify every element that must be preserved OUTSIDE the masked region:
+ - all people (count, pose, clothing, facial features, gaze direction, position)
+ - background environment and layout
+ - other objects (furniture, props, vehicles, etc.)
+ - lighting direction, color temperature, shadows
+ - camera angle, framing, depth of field, color grading
+
+Then include a concise "PRESERVE:" block in the output prompt that explicitly lists these elements so the downstream image model does not drop or alter them. Example:
+  PRESERVE: 1 male character on the left wearing a navy suit, facing camera; industrial warehouse interior; cool blue-teal color grading; low-angle shot.
+` : ""}${hasTagImage ? `
+═══ TAG IDENTITY (CRITICAL) ═══
+You will also be given the TAG reference image — the exact object to place inside the masked region. Study it and write a "TAG_IDENTITY:" block that lists every visually distinctive feature the downstream model MUST reproduce so the object is immediately recognizable:
+ - object category and specific model/type (e.g., "AR-15 carbine", "Hermès Birkin bag 30cm", "Porsche 911 Carrera")
+ - overall shape and proportions
+ - dominant colors and color distribution (be specific: "matte black polymer body with tan FDE grip and handguard")
+ - materials and surface finish (matte/glossy/brushed/leather/etc.)
+ - markings, logos, stickers, text, serial patterns
+ - distinguishing attachments or details (e.g., "red-dot sight on top rail", "angled foregrip", "bronze hardware")
+
+The output prompt must instruct the image model to match ALL of these identity features exactly, while adapting only viewing angle, lighting, and scale to blend with SOURCE. Do NOT let the model generate a generic version of the object.
+
+Example TAG_IDENTITY block:
+  TAG_IDENTITY: AR-15 carbine with matte black upper/lower receiver, 16" barrel, tan FDE furniture (grip, handguard, stock), black picatinny top rail with red-dot optic, angled foregrip under handguard, black 30-round polymer magazine.
+` : ""}
+═══ REMOVAL REQUESTS ═══
+Detection: words like "remove", "delete", "erase", "없애", "제거", "삭제", "지워"
+Rules:
+- Primary instruction: "Completely remove [object] from the image."
+- Secondary instruction: "Fill the area with the natural continuation of the surrounding background."
+- CRITICAL: "Do NOT replace the removed object with any other object."
+- CRITICAL: "Do NOT add anything new. The area should look as if the object was never there."
+
+═══ UNIVERSAL RULES ═══
+- Keep the prompt FOCUSED (up to ~14 sentences including PRESERVE and TAG_IDENTITY blocks).
+- The FIRST sentence must be the primary action on the masked region.
+- Never introduce creative additions the user didn't ask for.
+- Always end with: Preserve all unmasked content exactly as-is — same people, same background, same lighting, same composition. Match the tag identity exactly inside the masked region.
+${assetDescriptions ? `\nAdditional asset notes (supplementary — the TAG reference image is authoritative):\n${assetDescriptions}` : ""}${hasMask ? "\n[User painted a brush mask on the target area.]" : "\n[No brush mask. Full-image edit.]"}
+
+Return ONLY the final prompt. No explanations. No markdown.`;
+
   try {
+    // Multimodal parts: [SOURCE label + image] + [TAG label + image] + [user request text]
+    const userParts: any[] = [];
+    if (hasSourceImage) {
+      userParts.push({ text: "[SOURCE scene image — everything OUTSIDE the mask must be preserved]" });
+      userParts.push({ inlineData: { mimeType: "image/png", data: sourceImageBase64 } });
+    }
+    if (hasTagImage) {
+      userParts.push({ text: "[TAG reference image — the object to place INSIDE the masked region; reproduce its identity exactly]" });
+      userParts.push({ inlineData: { mimeType: "image/png", data: tagImageBase64 } });
+    }
+    userParts.push({ text: `User edit request: ${prompt}` });
+
     const data = await callVertexGemini(settings, "gemini-2.0-flash", {
       system_instruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ parts: [{ text: prompt }] }],
+      contents: [{ parts: userParts }],
     });
-    return { enhanced: data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || prompt };
+    const enhanced = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || prompt;
+    console.log(
+      "[enhance-inpaint] hasSourceImage:",
+      hasSourceImage,
+      "| hasTagImage:",
+      hasTagImage,
+      "| enhanced length:",
+      enhanced.length,
+    );
+    return { enhanced };
   } catch (e) {
     console.error("Vertex Gemini enhance error:", e);
     return { enhanced: prompt, fallback: true };
@@ -170,21 +247,65 @@ export async function handleOpenaiImage(body: any) {
   const bucket = folder === "mood" ? "mood" : "contis";
   let imageBytes: Buffer | undefined;
   let suffix: string = "";
-  console.log("[openai-image] Request:", { mode, model, size, bucket, sceneNumber, promptLen: prompt?.length });
-
-  if (mode === "inpaint" && useNanoBanana && sourceImageUrl) {
-    try { const nbUrls = [sourceImageUrl, ...referenceImageUrls].filter(Boolean); imageBytes = await callVertexNB2(settings, prompt, nbUrls, sizeToNB2Aspect(size)); const fp = saveToStorage(storagePath, "contis", projectId, `scene_${sceneNumber}_${Date.now()}.png`, imageBytes); return { publicUrl: storageFileUrl(fp), usedModel: "nano-banana-2" }; }
-    catch (e) { console.error("[openai-image] NB2 inpaint failed:", (e as Error).message); if (!imageBase64) return { error: "NB2 failed and no imageBase64 for GPT fallback", usedModel: "nano-banana-2-failed" }; }
+  console.log("[openai-image] Request:", {
+    mode,
+    model,
+    size,
+    bucket,
+    sceneNumber,
+    promptLen: prompt?.length,
+    useNanoBanana,
+    hasSourceImageUrl: !!sourceImageUrl,
+    hasImageBase64: !!imageBase64,
+    hasMaskBase64: !!maskBase64,
+    refCount: referenceImageUrls.length,
+  });
+  if (referenceImageUrls.length > 0) {
+    console.log(
+      "[openai-image] referenceImageUrls:",
+      referenceImageUrls.map((u: string) => (u?.length > 120 ? u.slice(0, 117) + "..." : u)),
+    );
   }
 
-  if (mode === "inpaint" && imageBase64 && (maskBase64 || forceGpt || useNanoBanana)) {
+  // ── Inpaint 라우팅 ──
+  //   · NB2 primary (마스크 유무 무관). 브러시 영역은 클라이언트에서 만든 "마스크 오버레이" 레퍼런스로 NB2 에 지시.
+  //   · NB2 실패 or sourceImageUrl 없음 → GPT edits 폴백 (이때만 maskBase64 를 실제 인페인팅 마스크로 사용).
+  if (mode === "inpaint") {
+    const hasMask = !!maskBase64;
+    console.log("[inpaint] routing:", { hasMask, useNanoBanana, forceGpt, refCount: referenceImageUrls.length });
+
     if (useNanoBanana && sourceImageUrl) {
-      try { const nbUrls = [sourceImageUrl, ...referenceImageUrls].filter(Boolean); imageBytes = await callVertexNB2(settings, prompt, nbUrls, sizeToNB2Aspect(size)); const fp = saveToStorage(storagePath, "contis", projectId, `scene_${sceneNumber}_${Date.now()}.png`, imageBytes); return { publicUrl: storageFileUrl(fp), usedModel: "nano-banana-2" }; }
-      catch { console.error("[openai-image] NB2 inpaint fallback to GPT"); }
+      // NB2 primary — 원본 + (브러시 있으면) 마스크 오버레이 + 태그 에셋 refs
+      try {
+        const nbUrls = [sourceImageUrl, ...referenceImageUrls].filter(Boolean);
+        console.log(
+          "[inpaint] NB2 image layout:",
+          nbUrls.map((u, i) => {
+            const role =
+              i === 0
+                ? "[1]SOURCE"
+                : hasMask && i === 1
+                  ? "[2]MASK_HINT"
+                  : `[${i + 1}]${hasMask ? "TAG_ASSET" : "REF"}`;
+            return `${role} ${u.length > 80 ? u.slice(0, 77) + "..." : u}`;
+          }),
+        );
+        imageBytes = await callVertexNB2(settings, prompt, nbUrls, sizeToNB2Aspect(size));
+        suffix = hasMask ? "inpaint-nb2-masked" : "inpaint-nb2";
+      } catch (e) {
+        console.error("[inpaint] NB2 failed, falling back to GPT edits:", (e as Error).message);
+      }
     }
-    if (!openaiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다.");
-    imageBytes = await callGptInpaint(openaiKey, imageBase64, maskBase64 ?? null, prompt, size, referenceImageUrls);
-    suffix = "inpaint-gpt";
+
+    if (!imageBytes) {
+      // GPT edits 폴백. 브러시 있을 때는 native mask 로 인페인팅, 없을 때는 forceGpt 필요
+      if (!imageBase64 || (!maskBase64 && !forceGpt)) {
+        return { error: "GPT edits 폴백에 imageBase64 가 필요합니다 (마스크 없을 때는 forceGpt=true 필요)", usedModel: "inpaint-failed" };
+      }
+      if (!openaiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다.");
+      imageBytes = await callGptInpaint(openaiKey, imageBase64, maskBase64 ?? null, prompt, size, referenceImageUrls);
+      suffix = hasMask ? "inpaint-gpt-masked-fallback" : "inpaint-gpt-fallback";
+    }
   } else if (model === "gpt") {
     if (!openaiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다. Settings에서 OpenAI API Key를 입력하세요.");
     if (openaiKey.startsWith("sk-ant-")) throw new Error("OpenAI 필드에 Anthropic 키가 입력되어 있습니다. Settings에서 올바른 OpenAI API Key(sk-proj-...)를 입력하세요.");

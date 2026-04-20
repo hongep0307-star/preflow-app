@@ -666,21 +666,12 @@ export const generateMoodImages = async (
 
   if (!urls.length) throw new Error("모든 이미지 생성 실패");
 
-  const { data: brief } = await supabase
-    .from("briefs")
-    .select("id, mood_image_urls")
-    .eq("project_id", opts.projectId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single();
-
-  if (brief) {
-    const existing = (brief.mood_image_urls as string[]) ?? [];
-    await supabase
-      .from("briefs")
-      .update({ mood_image_urls: [...existing, ...urls] } as any)
-      .eq("id", brief.id);
-  }
+  // NOTE: 여기서 DB 에 직접 append 하지 않는다.
+  //       MoodIdeationPanel 쪽의 persistMoodGenResultToDB 가
+  //       skeletonIds 와 arrivedUrls 를 기반으로 최종 merge 를 책임진다.
+  //       과거에 이 곳에서 [...existing, ...urls] 로 문자열을 append 했더니
+  //       persist 단계에서 skel ID 기반 객체가 또 prepend 되어 같은 URL 이
+  //       맨 위·맨 아래 모두에 중복 저장되던 버그가 있었음.
 
   return urls;
 };

@@ -110,7 +110,7 @@ const MoodCard = ({
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          borderRadius: 7,
+          borderRadius: 0,
         }}
       >
         <div
@@ -154,7 +154,7 @@ const MoodCard = ({
       }}
       style={{
         position: "relative",
-        borderRadius: 7,
+        borderRadius: 0,
         overflow: "hidden",
         cursor: "pointer",
         aspectRatio: imgAspect,
@@ -248,7 +248,7 @@ const MoodCard = ({
             right: 7,
             width: 31,
             height: 31,
-            borderRadius: 7,
+            borderRadius: 0,
             background: img.liked ? KR : "rgba(0,0,0,0.45)",
             border: "none",
             cursor: "pointer",
@@ -1436,7 +1436,7 @@ export const MoodIdeationPanel = ({
               <img
                 src={lightboxUrl}
                 alt="mood lightbox"
-                style={{ maxWidth: "85vw", maxHeight: "90vh", objectFit: "contain", borderRadius: 8 }}
+                style={{ maxWidth: "85vw", maxHeight: "90vh", objectFit: "contain", borderRadius: 0 }}
                 onClick={(e) => e.stopPropagation()}
               />
               {currentIdx >= 0 && (

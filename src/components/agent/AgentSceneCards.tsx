@@ -34,7 +34,7 @@ export const TagChip = ({ name, assetType }: { name: string; assetType: string }
         textTransform: "uppercase" as const,
         letterSpacing: "0.04em",
         padding: "1px 6px 1px 5px",
-        borderRadius: 2,
+        borderRadius: 0,
         background: cfg.bg,
         color: cfg.color,
         border: `1px solid ${cfg.bd}`,
@@ -914,7 +914,7 @@ export const EditablePendingSceneCard = ({
       <div className="flex items-center gap-2 mb-2.5">
         <span
           className="font-mono text-[9px] font-bold px-1.5 py-0.5 text-white shrink-0"
-          style={{ background: KR, borderRadius: 2 }}
+          style={{ background: KR, borderRadius: 0 }}
         >
           S{String(scene.scene_number).padStart(2, "0")}
         </span>
@@ -1276,7 +1276,7 @@ export const SortableSceneCard = ({
               fontWeight: 700,
               fontFamily: "monospace",
               padding: "2px 6px",
-              borderRadius: 2,
+              borderRadius: 0,
               background: KR,
               color: "#fff",
               letterSpacing: "0.05em",
