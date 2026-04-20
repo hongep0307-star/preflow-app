@@ -66,6 +66,10 @@ import {
   savePendingToLS,
   getMoodGen,
   subscribeMoodGen,
+  getChatGen,
+  setChatGen,
+  patchChatGen,
+  subscribeChatGen,
   parseMessageSegments,
   remapMessageForHistory,
   type MessageSegment,
@@ -73,7 +77,9 @@ import {
   ASSET_ICON,
 } from "./agent/agentTypes";
 import { KNOWLEDGE_SCENE_DESIGN, KNOWLEDGE_GENRE_CONVENTIONS } from "@/lib/directorKnowledgeBase";
+import { buildHookExecutionGuide } from "@/lib/hookLibrary";
 import { MoodIdeationPanel } from "./agent/MoodIdeationPanel";
+import AgentAbcdPanel from "./agent/AgentAbcdPanel";
 import {
   SortableSceneCard,
   EditablePendingSceneCard,
@@ -264,6 +270,114 @@ const buildCharacterContext = (assets: Asset[]): string => {
   return secs.length ? `\n\n[에셋 라이브러리]\n${secs.join("\n\n")}` : "";
 };
 
+// ── v2 brief 필드 컨텍스트 빌더 ──
+// BriefAnalysis v2 의 product_info / hero_visual / hook_strategy / pacing / constraints
+// 를 시스템 프롬프트에 주입해서 스토리보드 드래프트 단계부터 광고 연출 규칙이 지켜지도록 한다.
+const buildV2BriefContext = (a: Analysis): string => {
+  const blocks: string[] = [];
+
+  if (a.content_type) {
+    const conf = typeof a.classification_confidence === "number" ? ` (신뢰도 ${Math.round(a.classification_confidence * 100)}%)` : "";
+    blocks.push(`[콘텐츠 타입] ${a.content_type}${conf}${a.classification_reasoning ? ` — ${a.classification_reasoning}` : ""}`);
+  }
+
+  if (a.product_info) {
+    const p = a.product_info;
+    const urg = p.urgency?.type && p.urgency.type !== "none" ? ` / 긴박감(${p.urgency.type}): ${p.urgency.description ?? ""}` : "";
+    blocks.push(
+      [
+        `[상품/이벤트 정보]`,
+        `- what: ${p.what}`,
+        `- 핵심 혜택: ${p.key_benefit}${urg}`,
+        `- CTA 목적지: ${p.cta_destination}`,
+        `- CTA 문구: "${p.cta_action}"`,
+      ].join("\n"),
+    );
+  }
+
+  if (a.hero_visual) {
+    const h = a.hero_visual;
+    const must = Array.isArray(h.must_show) && h.must_show.length ? h.must_show.join(", ") : "(없음)";
+    blocks.push(
+      [
+        `[비주얼 히어로 — 씬 설계 시 필수 반영]`,
+        `- must_show (반드시 노출): ${must}`,
+        `- 첫 프레임 시각: ${h.first_frame}`,
+        `- 브랜드 노출 타이밍: ${h.brand_reveal_timing} / 제품 노출 타이밍: ${h.product_reveal_timing}`,
+        `- 로고 배치: ${h.logo_placement}`,
+      ].join("\n"),
+    );
+  }
+
+  if (a.hook_strategy) {
+    const hs = a.hook_strategy;
+    const alts = hs.alternatives?.length ? hs.alternatives.join(", ") : "(없음)";
+    blocks.push(
+      [
+        `[훅 전략]`,
+        `- primary: ${hs.primary} / 대안: ${alts}`,
+        hs.first_3s_description ? `- 첫 3초 의도: ${hs.first_3s_description}` : "",
+        `- pattern_interrupt: ${hs.pattern_interrupt ? "포함" : "미포함"}`,
+        "",
+        buildHookExecutionGuide(hs.primary),
+      ].filter(Boolean).join("\n"),
+    );
+  }
+
+  if (a.pacing) {
+    const pc = a.pacing;
+    blocks.push(
+      [
+        `[페이싱 규칙 — 씬 수/편집 리듬 준수]`,
+        `- 포맷 ${pc.format} · 길이 ${pc.duration}`,
+        `- 씬 수: ${pc.scene_count.recommended} (범위 ${pc.scene_count.min}~${pc.scene_count.max})`,
+        `- 편집 리듬: ${pc.edit_rhythm}`,
+        `- 무성 시청 가능: ${pc.silent_viewable ? "YES (자막 필수)" : "NO"}${pc.captions_required ? " / captions_required: true" : ""}`,
+      ].join("\n"),
+    );
+  }
+
+  if (a.audience_insight && (a.audience_insight.pain_point || a.audience_insight.motivation)) {
+    blocks.push(
+      [
+        `[타겟 인사이트]`,
+        a.audience_insight.pain_point ? `- 페인 포인트: ${a.audience_insight.pain_point}` : "",
+        a.audience_insight.motivation ? `- 동기: ${a.audience_insight.motivation}` : "",
+      ].filter(Boolean).join("\n"),
+    );
+  }
+
+  if (a.constraints) {
+    const c = a.constraints;
+    const avoid = c.avoid?.length ? c.avoid.map((v) => `- ${v}`).join("\n") : "";
+    const brand = c.brand_guidelines?.length ? c.brand_guidelines.map((v) => `- ${v}`).join("\n") : "";
+    const plat = c.platform_policies?.length ? c.platform_policies.map((v) => `- ${v}`).join("\n") : "";
+    const parts: string[] = [`[제약 조건 — 절대 위반 금지]`];
+    if (avoid) parts.push(`avoid (네거티브 프롬프트 소스):\n${avoid}`);
+    if (brand) parts.push(`브랜드 가이드라인:\n${brand}`);
+    if (plat) parts.push(`플랫폼 정책:\n${plat}`);
+    if (parts.length > 1) blocks.push(parts.join("\n"));
+  }
+
+  if (a.narrative && a.content_type === "brand_film") {
+    const n = a.narrative;
+    const beats = n.emotional_beats?.length
+      ? n.emotional_beats.map((b) => `  - [${b.timestamp}] ${b.emotion} (강도 ${b.intensity})`).join("\n")
+      : "";
+    blocks.push(
+      [
+        `[브랜드 필름 서사 구조]`,
+        `- controlling_idea: ${n.controlling_idea}`,
+        `- story_structure: ${n.story_structure}`,
+        `- protagonist: ${n.protagonist?.identity} / 욕망 ${n.protagonist?.desire} / 변화 ${n.protagonist?.transformation}`,
+        beats ? `- emotional_beats:\n${beats}` : "",
+      ].filter(Boolean).join("\n"),
+    );
+  }
+
+  return blocks.join("\n\n");
+};
+
 // ✅ [FIX] buildSystemPrompt — goal/target/usp/tone_manner 핵심 필드 주입 추가
 const buildSystemPrompt = (vf: string, assets?: Asset[], analysis?: Analysis | null, lang: "ko" | "en" = "ko") => {
   const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
@@ -283,6 +397,12 @@ const buildSystemPrompt = (vf: string, assets?: Asset[], analysis?: Analysis | n
     if (lines) parts.push(`[브리프 핵심]\n${lines}`);
   }
 
+  // v2 필드 주입 (content_type / product_info / hero_visual / hook_strategy / pacing / constraints / narrative)
+  if (analysis) {
+    const v2 = buildV2BriefContext(analysis);
+    if (v2) parts.push(v2);
+  }
+
   if (analysis?.idea_note) parts.push(`[아이디어 메모]\n${analysis.idea_note}`);
   if (analysis?.image_analysis) parts.push(`[레퍼런스 이미지 분석]\n${analysis.image_analysis}`);
   if (analysis?.creative_gap?.recommendation) parts.push(`[디렉터 방향성]\n${analysis.creative_gap.recommendation}`);
@@ -300,6 +420,8 @@ const buildBriefContextString = (a: Analysis): string => {
   if (a.idea_note) lines.push(`\n아이디어 메모: ${a.idea_note}`);
   if (a.creative_gap?.recommendation) lines.push(`디렉터 추천: ${a.creative_gap.recommendation}`);
   if (a.image_analysis) lines.push(`레퍼런스 이미지: ${a.image_analysis}`);
+  const v2 = buildV2BriefContext(a);
+  if (v2) lines.push("", v2);
   return lines.join("\n");
 };
 
@@ -401,66 +523,213 @@ const StrategyCard = ({ content }: { content: string }) => {
 };
 
 const BRIEF_PREFIX = "[브리프 분석 결과]";
+const CONTENT_TYPE_META: Record<string, { ko: string; color: string }> = {
+  product_launch: { ko: "상품 런칭", color: "#f59e0b" },
+  event: { ko: "이벤트", color: "#8b5cf6" },
+  update: { ko: "업데이트", color: "#06b6d4" },
+  community: { ko: "커뮤니티", color: "#10b981" },
+  brand_film: { ko: "브랜드 필름", color: "#f9423a" },
+};
+const HOOK_LABEL_KO: Record<string, string> = {
+  gameplay_first: "게임플레이 우선",
+  fail_solve: "실패→해결",
+  power_fantasy: "파워 판타지",
+  unboxing_reveal: "언박싱 공개",
+  before_after: "전/후 비교",
+  mystery_tease: "미스터리 티저",
+  testimonial: "증언",
+  pattern_interrupt: "패턴 인터럽트",
+};
 const BriefAnalysisCard = ({ content }: { content: string }) => {
-  const lines = content
+  const raw = content
     .replace(/^\[브리프 분석 결과\]\s*/i, "")
-    .replace(/^\[Brief Analysis\]\s*/i, "")
-    .split("\n")
-    .filter((l) => l.trim());
-  const sections: { label: string; value: string }[] = [];
-  const requestLine = lines.findIndex((l) => l.includes("시놉시스") || l.includes("storylines") || l.includes("제안"));
-  for (const line of lines.slice(0, requestLine === -1 ? lines.length : requestLine)) {
-    const m = line.match(/^(.+?):\s*(.+)$/);
-    if (m) sections.push({ label: m[1].trim(), value: m[2].trim() });
-  }
-  const labelColors: Record<string, string> = { 목표: "#f9423a", 타겟: "#6366f1", USP: "#d97706", 톤앤매너: "#059669" };
+    .replace(/^\[Brief Analysis\]\s*/i, "");
+
+  // label: value (공백 필수) — "9:16" 같이 공백 없는 콜론은 label로 해석되지 않음
+  const extract = (label: string): string | null => {
+    const esc = label.replace(/([.*+?^=!:${}()|[\]\\])/g, "\\$1");
+    const re = new RegExp(`^${esc}:\\s+(.+)$`, "m");
+    const m = raw.match(re);
+    return m ? m[1].trim() : null;
+  };
+
+  const goal = extract("목표");
+  const target = extract("타겟");
+  const usp = extract("USP");
+  const tone = extract("톤앤매너");
+  const ideaNote = extract("아이디어 메모");
+  const directorRec = extract("디렉터 추천");
+
+  const ctMatch = raw.match(/\[콘텐츠 타입\]\s*(\w+)(?:\s*\(신뢰도\s*(\d+)%\))?/);
+  const contentType = ctMatch?.[1];
+  const contentTypeConf = ctMatch?.[2];
+  const contentTypeMeta = contentType ? CONTENT_TYPE_META[contentType] : null;
+  const contentTypeLabel = contentTypeMeta?.ko ?? contentType ?? null;
+  const contentTypeColor = contentTypeMeta?.color ?? KR;
+
+  const formatMatch = raw.match(/-\s*포맷\s+(\S+)\s*·\s*길이\s+(\S+)/);
+  const format = formatMatch?.[1];
+  const duration = formatMatch?.[2];
+
+  const sceneMatch = raw.match(/-\s*씬 수:\s*(\d+)(?:\s*\(범위\s*(\d+)~(\d+)\))?/);
+  const scenesRec = sceneMatch?.[1];
+
+  const hookMatch = raw.match(/-\s*primary:\s*(\w+)/);
+  const hook = hookMatch?.[1];
+  const hookLabel = hook ? (HOOK_LABEL_KO[hook] ?? hook) : null;
+
+  // 끝에 붙어 있는 자유 서술 (예: "이 브리프를 바탕으로 ...") 을 추출
+  const blocks = raw.split(/\n\n+/);
+  const lastBlock = blocks[blocks.length - 1]?.trim() ?? "";
+  const isStructured =
+    lastBlock.startsWith("[") ||
+    lastBlock.startsWith("- ") ||
+    /^[A-Za-z가-힣 ]+:\s/.test(lastBlock);
+  const requestText = !isStructured && lastBlock.length > 0 ? lastBlock : null;
+
+  const coreFields = [
+    { key: "목표", value: goal, color: "#f9423a" },
+    { key: "타겟", value: target, color: "#6366f1" },
+    { key: "USP", value: usp, color: "#d97706" },
+    { key: "톤앤매너", value: tone, color: "#059669" },
+  ].filter((f) => f.value);
+
+  const metaPills: { label: string; value: string }[] = [];
+  if (format) metaPills.push({ label: "포맷", value: duration ? `${format} · ${duration}` : format });
+  if (scenesRec) metaPills.push({ label: "씬", value: `${scenesRec}개` });
+  if (hookLabel) metaPills.push({ label: "훅", value: hookLabel });
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-        <Sparkles size={13} style={{ color: KR }} />
-        <span style={{ fontSize: 11, fontWeight: 700, color: KR, letterSpacing: "0.04em" }}>BRIEF ANALYSIS</span>
-      </div>
-      {sections.map((sec, i) => {
-        const color = labelColors[sec.label] ?? "#888";
-        return (
-          <div
-            key={i}
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <Sparkles size={13} style={{ color: KR }} />
+          <span style={{ fontSize: 11, fontWeight: 700, color: KR, letterSpacing: "0.04em" }}>BRIEF ANALYSIS</span>
+        </div>
+        {contentTypeLabel && (
+          <span
             style={{
-              background: "rgba(255,255,255,0.03)",
-              border: "1px solid rgba(255,255,255,0.06)",
-              borderRadius: 6,
-              padding: "8px 12px",
+              fontSize: 10,
+              fontWeight: 700,
+              padding: "2px 8px",
+              background: `${contentTypeColor}22`,
+              color: contentTypeColor,
+              border: `1px solid ${contentTypeColor}55`,
+              letterSpacing: "0.03em",
+              whiteSpace: "nowrap",
             }}
           >
+            {contentTypeLabel}
+            {contentTypeConf && <span style={{ opacity: 0.6, marginLeft: 4 }}>· {contentTypeConf}%</span>}
+          </span>
+        )}
+      </div>
+
+      {/* Core 4-field grid */}
+      {coreFields.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          {coreFields.map((f) => (
             <div
+              key={f.key}
               style={{
-                fontSize: 12,
-                fontWeight: 700,
-                color,
-                letterSpacing: "0.04em",
-                textTransform: "uppercase" as const,
-                marginBottom: 4,
+                background: "rgba(255,255,255,0.03)",
+                border: "1px solid rgba(255,255,255,0.06)",
+                padding: "7px 10px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 3,
+                minHeight: 56,
               }}
             >
-              {sec.label}
+              <div
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: f.color,
+                  letterSpacing: "0.05em",
+                  textTransform: "uppercase" as const,
+                }}
+              >
+                {f.key}
+              </div>
+              <div style={{ fontSize: 12.5, color: "hsl(var(--foreground))", lineHeight: 1.45, opacity: 0.9 }}>
+                {f.value}
+              </div>
             </div>
-            <div style={{ fontSize: 14, color: "hsl(var(--foreground))", lineHeight: 1.6, opacity: 0.85 }}>
-              {sec.value}
-            </div>
-          </div>
-        );
-      })}
-      {requestLine !== -1 && (
+          ))}
+        </div>
+      )}
+
+      {/* Meta line: format · scenes · hook */}
+      {metaPills.length > 0 && (
         <div
           style={{
-            fontSize: 13,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            background: "rgba(255,255,255,0.02)",
+            border: "1px solid rgba(255,255,255,0.05)",
+            padding: "6px 10px",
+          }}
+        >
+          {metaPills.map((p, i) => (
+            <span key={p.label} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              {i > 0 && <span style={{ color: "rgba(255,255,255,0.12)" }}>·</span>}
+              <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", opacity: 0.7, letterSpacing: "0.04em", textTransform: "uppercase" as const }}>
+                {p.label}
+              </span>
+              <span style={{ fontSize: 11.5, color: "hsl(var(--foreground))", fontWeight: 600 }}>{p.value}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Notes (idea + director rec combined) */}
+      {(ideaNote || directorRec) && (
+        <div
+          style={{
+            padding: "7px 10px",
+            background: "rgba(255,255,255,0.02)",
+            borderLeft: "2px solid rgba(249,66,58,0.4)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          {ideaNote && (
+            <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", lineHeight: 1.5 }}>
+              <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", opacity: 0.55, marginRight: 6, textTransform: "uppercase" as const }}>
+                아이디어
+              </span>
+              {ideaNote}
+            </div>
+          )}
+          {directorRec && (
+            <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", lineHeight: 1.5 }}>
+              <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", opacity: 0.55, marginRight: 6, textTransform: "uppercase" as const }}>
+                디렉터
+              </span>
+              {directorRec}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Trailing request text (e.g. "이 브리프를 바탕으로 ...") */}
+      {requestText && (
+        <div
+          style={{
+            fontSize: 12.5,
             color: "hsl(var(--muted-foreground))",
             marginTop: 2,
             fontStyle: "italic",
-            opacity: 0.7,
+            opacity: 0.65,
+            lineHeight: 1.5,
           }}
         >
-          {lines.slice(requestLine).join(" ")}
+          {requestText}
         </div>
       )}
     </div>
@@ -842,11 +1111,60 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [replaceConfirmBuffer, setReplaceConfirmBuffer] = useState<ParsedScene[] | null>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
-  const [rightPanel, setRightPanel] = useState<RightPanel>("scenes");
+  // 탭 이동 후 복귀 시 마지막 우측 패널 상태(scenes / mood / split) 가 유지되도록 프로젝트별 localStorage 에 기록.
+  const rightPanelKey = `ff_agent_right_panel_${projectId}`;
+  const splitViewKey = `ff_agent_split_view_${projectId}`;
+  const [rightPanel, setRightPanelState] = useState<RightPanel>(() => {
+    try {
+      const raw = typeof window !== "undefined" ? window.localStorage.getItem(rightPanelKey) : null;
+      if (raw === "scenes" || raw === "mood") return raw;
+    } catch {}
+    return "scenes";
+  });
+  const setRightPanel = useCallback(
+    (val: RightPanel | ((prev: RightPanel) => RightPanel)) => {
+      setRightPanelState((prev) => {
+        const next = typeof val === "function" ? (val as (p: RightPanel) => RightPanel)(prev) : val;
+        try {
+          window.localStorage.setItem(rightPanelKey, next);
+        } catch {}
+        return next;
+      });
+    },
+    [rightPanelKey],
+  );
   const [chatCollapsed, setChatCollapsed] = useState(false);
-  const [splitView, setSplitView] = useState(false);
+  const [splitView, setSplitViewState] = useState<boolean>(() => {
+    try {
+      const raw = typeof window !== "undefined" ? window.localStorage.getItem(splitViewKey) : null;
+      if (raw === "1") return true;
+      if (raw === "0") return false;
+    } catch {}
+    return false;
+  });
+  const setSplitView = useCallback(
+    (val: boolean | ((prev: boolean) => boolean)) => {
+      setSplitViewState((prev) => {
+        const next = typeof val === "function" ? (val as (p: boolean) => boolean)(prev) : val;
+        try {
+          window.localStorage.setItem(splitViewKey, next ? "1" : "0");
+        } catch {}
+        return next;
+      });
+    },
+    [splitViewKey],
+  );
   const prevScenesLenRef = useRef<number | null>(null);
   const pendingOrderNotice = useRef<string | null>(null);
+  // 탭 이동 시 AgentTab 이 언마운트 되므로, 진행 중인 LLM 호출이 언마운트 이후에
+  // 로컬 state 를 건드리지 않도록 mountedRef 로 가드.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [versions, setVersions] = useState<
     { id: string; version_name: string | null; version_number: number; scenes: any[] }[]
@@ -1172,7 +1490,10 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       }
       setInitialLoaded(true);
       if (analysis) {
+        // 이미 다른 마운트에서 auto-init 이 돌고 있다면 중복 호출 방지
+        if (getChatGen(projectId)?.inFlight) return;
         setIsLoading(true);
+        setChatGen(projectId, { inFlight: true, startedAt: Date.now() });
         try {
           const briefCtx = buildBriefContextString(analysis);
           const autoPrompt = `[브리프 분석 결과]\n${briefCtx}\n\n이 브리프를 바탕으로 방향성이 다른 시놉시스 2~3안을 storylines 블록으로 제안해주세요. 아직 씬은 짜지 마세요.`;
@@ -1194,20 +1515,111 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
           const msg = data.content[0].text;
           await supabase.from("chat_logs").insert({ project_id: projectId, role: "assistant", content: msg });
           const extracted = extractScenesFromText(msg);
-          if (extracted.length > 0) setPendingScenes(extracted);
-          setChatHistory([
-            { project_id: projectId, role: "user", content: autoPrompt, created_at: new Date().toISOString() },
-            { project_id: projectId, role: "assistant", content: msg, created_at: new Date().toISOString() },
-          ]);
+          if (extracted.length > 0) {
+            if (mountedRef.current) {
+              setPendingScenes(extracted);
+            } else {
+              patchChatGen(projectId, {
+                pendingExtractedScenes: extracted,
+                pendingExtractedNeedsReplaceConfirm: false,
+              });
+            }
+          }
+          if (mountedRef.current) {
+            setChatHistory([
+              { project_id: projectId, role: "user", content: autoPrompt, created_at: new Date().toISOString() },
+              { project_id: projectId, role: "assistant", content: msg, created_at: new Date().toISOString() },
+            ]);
+          }
         } catch (err) {
           console.error("Auto-init error:", err);
         } finally {
-          setIsLoading(false);
+          if (mountedRef.current) {
+            setIsLoading(false);
+          }
+          const cur = getChatGen(projectId);
+          if (cur?.pendingExtractedScenes && cur.pendingExtractedScenes.length) {
+            patchChatGen(projectId, { inFlight: false });
+          } else {
+            setChatGen(projectId, null);
+          }
         }
       }
     };
     load();
   }, [projectId, fetchScenes, fetchBrief, fetchAssets]);
+
+  // ✅ 탭 이동 후 복귀 시, 모듈 스토어에 남아있는 in-flight LLM 호출 상태를 복원한다.
+  //    - inFlight 중이면 로딩 인디케이터를 켜두고,
+  //    - 완료(스토어가 비워짐)되면 chat_logs 를 재조회해 어시스턴트 응답을 반영,
+  //    - 완료 시점에 보관된 pendingExtractedScenes 가 있으면 소비.
+  useEffect(() => {
+    const hydrateFromStore = () => {
+      const state = getChatGen(projectId);
+      if (!state) return;
+      if (state.inFlight) {
+        setIsLoading(true);
+      }
+      if (state.pendingExtractedScenes && state.pendingExtractedScenes.length > 0) {
+        const extracted = state.pendingExtractedScenes;
+        const needsReplace = !!state.pendingExtractedNeedsReplaceConfirm;
+        if (needsReplace) {
+          setReplaceConfirmBuffer(extracted);
+        } else {
+          setPendingScenes((prev) => {
+            if (prev.length === 0) return extracted;
+            const updated = [...prev];
+            for (const ext of extracted) {
+              const idx = updated.findIndex((p) => p.scene_number === ext.scene_number);
+              if (idx >= 0) updated[idx] = ext;
+              else updated.push(ext);
+            }
+            if (extracted.length >= prev.length && extracted.length > 1) return extracted;
+            return updated.sort((a, b) => a.scene_number - b.scene_number);
+          });
+        }
+        // 소비 후 정리
+        if (state.inFlight) {
+          patchChatGen(projectId, {
+            pendingExtractedScenes: undefined,
+            pendingExtractedNeedsReplaceConfirm: undefined,
+          });
+        } else {
+          setChatGen(projectId, null);
+        }
+      }
+    };
+
+    hydrateFromStore();
+
+    const unsub = subscribeChatGen(projectId, () => {
+      const state = getChatGen(projectId);
+      if (!state) {
+        // 완전히 비워짐 → 완료. 로딩 해제 + chat_logs 재조회.
+        if (mountedRef.current) {
+          setIsLoading(false);
+          supabase
+            .from("chat_logs")
+            .select("*")
+            .eq("project_id", projectId)
+            .order("created_at", { ascending: true })
+            .then(({ data }) => {
+              if (data && mountedRef.current) setChatHistory(data as ChatLog[]);
+            });
+        }
+        return;
+      }
+      if (state.inFlight && mountedRef.current) {
+        setIsLoading(true);
+      }
+      if (!state.inFlight && state.pendingExtractedScenes && state.pendingExtractedScenes.length > 0) {
+        // 완료됐지만 extracted scenes 가 아직 소비되지 않은 상태 → 소비.
+        hydrateFromStore();
+      }
+    });
+
+    return unsub;
+  }, [projectId, setPendingScenes]);
 
   useEffect(() => {
     const container = chatContainerRef.current;
@@ -1272,7 +1684,10 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
     pendingOrderNotice.current = null;
     const text = orderNotice ? `${orderNotice}\n\n${rawText}`.trim() : rawText.trim();
     if (!text || isLoading) return;
+    // 모듈 스토어 레벨에서도 중복 전송 가드 (탭 복귀 직후 in-flight 중인 경우)
+    if (getChatGen(projectId)?.inFlight) return;
     setIsLoading(true);
+    setChatGen(projectId, { inFlight: true, startedAt: Date.now() });
     const createdAt = new Date().toISOString();
     const currentImages = [...chatImages];
     // NOTE: chat UI / chat_logs DB 에는 사용자가 타이핑한 원본 `text` 그대로 저장.
@@ -1329,32 +1744,54 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       });
       const assistantContent = data.content[0].text;
       await supabase.from("chat_logs").insert({ project_id: projectId, role: "assistant", content: assistantContent });
-      setChatHistory((prev) => [
-        ...prev,
-        { project_id: projectId, role: "assistant", content: assistantContent, created_at: new Date().toISOString() },
-      ]);
+      if (mountedRef.current) {
+        setChatHistory((prev) => [
+          ...prev,
+          { project_id: projectId, role: "assistant", content: assistantContent, created_at: new Date().toISOString() },
+        ]);
+      }
       const extracted = extractScenesFromText(assistantContent);
       if (extracted.length > 0) {
-        if (scenes.length > 0) {
-          setReplaceConfirmBuffer(extracted);
+        const needsReplaceConfirm = scenes.length > 0;
+        if (mountedRef.current) {
+          if (needsReplaceConfirm) {
+            setReplaceConfirmBuffer(extracted);
+          } else {
+            setPendingScenes((prev) => {
+              if (prev.length === 0) return extracted;
+              const updated = [...prev];
+              for (const ext of extracted) {
+                const idx = updated.findIndex((p) => p.scene_number === ext.scene_number);
+                if (idx >= 0) updated[idx] = ext;
+                else updated.push(ext);
+              }
+              if (extracted.length >= prev.length && extracted.length > 1) return extracted;
+              return updated.sort((a, b) => a.scene_number - b.scene_number);
+            });
+          }
         } else {
-          setPendingScenes((prev) => {
-            if (prev.length === 0) return extracted;
-            const updated = [...prev];
-            for (const ext of extracted) {
-              const idx = updated.findIndex((p) => p.scene_number === ext.scene_number);
-              if (idx >= 0) updated[idx] = ext;
-              else updated.push(ext);
-            }
-            if (extracted.length >= prev.length && extracted.length > 1) return extracted;
-            return updated.sort((a, b) => a.scene_number - b.scene_number);
+          // 언마운트 상태라면 모듈 스토어에 보관, 리마운트 시 반영
+          patchChatGen(projectId, {
+            pendingExtractedScenes: extracted,
+            pendingExtractedNeedsReplaceConfirm: needsReplaceConfirm,
           });
         }
       }
     } catch (err: any) {
-      toast({ title: "Failed to send message", description: err.message, variant: "destructive" });
+      if (mountedRef.current) {
+        toast({ title: "Failed to send message", description: err.message, variant: "destructive" });
+      }
     } finally {
-      setIsLoading(false);
+      if (mountedRef.current) {
+        setIsLoading(false);
+      }
+      // in-flight 플래그 해제 — 단, pendingExtractedScenes 가 남아있으면 리마운트가 소비할 때까지 유지
+      const cur = getChatGen(projectId);
+      if (cur?.pendingExtractedScenes && cur.pendingExtractedScenes.length) {
+        patchChatGen(projectId, { inFlight: false });
+      } else {
+        setChatGen(projectId, null);
+      }
     }
   };
 
@@ -1516,6 +1953,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
+      style={{ background: "#000" }}
     >
       {isDragOver && (
         <div
@@ -1528,55 +1966,44 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
           </span>
         </div>
       )}
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          <CdAvatar />
-          <div>
-            <div className="text-[12px] font-bold tracking-wide text-foreground">YD</div>
-            <div className="font-mono text-[9px] text-muted-foreground/50">Creative Direction Agent · Active</div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className="font-mono text-[9px] text-muted-foreground/30 uppercase border border-border px-2 py-0.5"
-            style={{ borderRadius: 2 }}
+      {/* 채팅 상단: 우측 패널 탭 바와 높이 맞춤
+          우측 탭 바 = outer padding(10 + 10) + tablist(padding 3×2 + border 1×2 + 탭버튼 32) = 60 */}
+      <div
+        className="flex items-center justify-end shrink-0"
+        style={{
+          padding: "10px 14px",
+          height: 60,
+          borderBottom: "1px solid hsl(var(--border))",
+        }}
+      >
+        {!isMobile && (
+          <button
+            onClick={() => setChatCollapsed(true)}
+            title="채팅 접기"
+            style={{
+              width: 24,
+              height: 24,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
+              border: "1px solid hsl(var(--border))",
+              color: "rgba(255,255,255,0.55)",
+              cursor: "pointer",
+              transition: "all 0.15s",
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLElement).style.color = "#fff";
+              (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.06)";
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.55)";
+              (e.currentTarget as HTMLElement).style.background = "transparent";
+            }}
           >
-            V 4.2.0
-          </span>
-          <span className="relative flex h-1.5 w-1.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-none bg-green-400 opacity-75" />
-            <span className="relative inline-flex rounded-none h-1.5 w-1.5 bg-green-500" />
-          </span>
-          {!isMobile && (
-            <button
-              onClick={() => setChatCollapsed(true)}
-              title="채팅 접기"
-              style={{
-                marginLeft: 4,
-                width: 24,
-                height: 24,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "transparent",
-                border: "1px solid hsl(var(--border))",
-                color: "rgba(255,255,255,0.55)",
-                cursor: "pointer",
-                transition: "all 0.15s",
-              }}
-              onMouseEnter={(e) => {
-                (e.currentTarget as HTMLElement).style.color = "#fff";
-                (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.06)";
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.55)";
-                (e.currentTarget as HTMLElement).style.background = "transparent";
-              }}
-            >
-              <PanelLeftClose style={{ width: 13, height: 13 }} />
-            </button>
-          )}
-        </div>
+            <PanelLeftClose style={{ width: 13, height: 13 }} />
+          </button>
+        )}
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-4" ref={chatContainerRef}>
         {(() => {
@@ -1718,13 +2145,12 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
           role="tablist"
           aria-label="Right panel"
           style={{
-            display: "inline-flex",
+            display: splitView ? "none" : "inline-flex",
             gap: 4,
             padding: 3,
             background: "rgba(255,255,255,0.04)",
             border: "1px solid hsl(var(--border))",
             flexShrink: 0,
-            opacity: splitView ? 0.55 : 1,
             transition: "opacity 0.15s",
           }}
         >
@@ -1745,10 +2171,10 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: 8,
-                  height: 36,
-                  padding: "0 14px",
-                  fontSize: 13.5,
+                  gap: 7,
+                  height: 32,
+                  padding: "0 12px",
+                  fontSize: 12.5,
                   fontWeight: 700,
                   letterSpacing: "0.02em",
                   color: active ? "#fff" : "rgba(255,255,255,0.55)",
@@ -1768,8 +2194,8 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
               >
                 <Icon
                   style={{
-                    width: 14,
-                    height: 14,
+                    width: 13,
+                    height: 13,
                     color: active ? KR : "currentColor",
                   }}
                 />
@@ -1777,9 +2203,9 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
                 <span
                   className="font-mono"
                   style={{
-                    fontSize: 11,
+                    fontSize: 10,
                     fontWeight: 700,
-                    padding: "1px 6px",
+                    padding: "1px 5px",
                     background: active ? "rgba(249,66,58,0.22)" : "rgba(255,255,255,0.08)",
                     color: active ? KR : "rgba(255,255,255,0.5)",
                   }}
@@ -1843,7 +2269,6 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
               justifyContent: "space-between",
               padding: "8px 12px",
               borderBottom: "0.5px solid hsl(var(--border))",
-              background: "hsl(var(--background))",
               flexShrink: 0,
             }}
           >
@@ -1952,6 +2377,13 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
             </div>
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {briefAnalysis && (
+              <AgentAbcdPanel
+                scenes={scenes}
+                briefAnalysis={briefAnalysis}
+                lang={briefLang}
+              />
+            )}
             {pendingScenes.length > 0 && (
               <div className="rounded border-2 overflow-visible" style={{ borderColor: KR, background: KR_BG }}>
                 <div
@@ -2136,20 +2568,63 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
         />
       );
       if (splitView && !isMobile) {
-        return (
-          <ResizablePanelGroup direction="vertical" className="flex-1">
-            <ResizablePanel defaultSize={58} minSize={20}>
-              <div className="h-full flex flex-col overflow-hidden">{scenesBody}</div>
-            </ResizablePanel>
-            <ResizableHandle
-              className="!bg-transparent h-1"
+        const renderSplitHeader = (kind: RightPanel) => {
+          const Icon = kind === "scenes" ? Layers : Palette;
+          const label = kind === "scenes" ? "Scene Composition" : "Mood Ideation";
+          const count = kind === "scenes" ? scenes.length : moodImages.length;
+          return (
+            <div
               style={{
-                background:
-                  "linear-gradient(to right, transparent, hsl(var(--border)) 20%, hsl(var(--border)) 80%, transparent)",
+                display: "flex",
+                alignItems: "center",
+                gap: 7,
+                height: 40,
+                padding: "0 14px",
+                borderBottom: "0.5px solid hsl(var(--border))",
+                background: "rgba(255,255,255,0.02)",
+                flexShrink: 0,
               }}
-            />
-            <ResizablePanel defaultSize={42} minSize={20}>
-              <div className="h-full flex flex-col overflow-hidden">{moodBody}</div>
+            >
+              <Icon style={{ width: 13, height: 13, color: KR }} />
+              <span
+                style={{
+                  fontSize: 12.5,
+                  fontWeight: 700,
+                  letterSpacing: "0.02em",
+                  color: "#fff",
+                }}
+              >
+                {label}
+              </span>
+              <span
+                className="font-mono"
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  padding: "1px 5px",
+                  background: "rgba(249,66,58,0.22)",
+                  color: KR,
+                }}
+              >
+                {count}
+              </span>
+            </div>
+          );
+        };
+        return (
+          <ResizablePanelGroup direction="horizontal" className="flex-1">
+            <ResizablePanel defaultSize={58} minSize={25}>
+              <div className="h-full flex flex-col overflow-hidden">
+                {renderSplitHeader("scenes")}
+                {scenesBody}
+              </div>
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={42} minSize={25}>
+              <div className="h-full flex flex-col overflow-hidden">
+                {renderSplitHeader("mood")}
+                {moodBody}
+              </div>
             </ResizablePanel>
           </ResizablePanelGroup>
         );
@@ -2251,18 +2726,20 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       style={{
         width: 44,
         flexShrink: 0,
-        background: "rgba(255,255,255,0.02)",
+        // 확장 상태의 채팅 패널(#000)과 동일 톤 — "chat = 검정" 일관성 유지
+        background: "#000",
         borderRight: "1px solid hsl(var(--border))",
         display: "flex",
         flexDirection: "column",
       }}
     >
+      {/* 상단: 우측 패널 탭 바(60px) 와 높이 정렬 */}
       <button
         onClick={() => setChatCollapsed(false)}
         title="채팅 펼치기"
         style={{
           width: "100%",
-          height: 44,
+          height: 60,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -2284,6 +2761,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       >
         <PanelLeftOpen style={{ width: 16, height: 16 }} />
       </button>
+      {/* 중단: 채팅 히스토리 인디케이터 — 클릭 시 채팅 펼치기 */}
       <button
         onClick={() => setChatCollapsed(false)}
         title="채팅 펼치기"
@@ -2293,32 +2771,19 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
-          justifyContent: "center",
-          gap: 12,
+          justifyContent: "flex-start",
+          gap: 8,
           background: "transparent",
           border: "none",
-          color: "rgba(255,255,255,0.55)",
+          color: "rgba(255,255,255,0.45)",
           cursor: "pointer",
-          padding: "16px 0",
+          padding: "18px 0",
           transition: "color 0.15s",
         }}
         onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.95)")}
-        onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.55)")}
+        onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.45)")}
       >
         <MessageSquare style={{ width: 14, height: 14 }} />
-        <span
-          className="font-mono"
-          style={{
-            writingMode: "vertical-rl",
-            transform: "rotate(180deg)",
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: "0.22em",
-            textTransform: "uppercase",
-          }}
-        >
-          Chat with YD
-        </span>
         {chatHistory.length > 0 && (
           <span
             className="font-mono"
@@ -2329,6 +2794,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
               background: "rgba(249,66,58,0.14)",
               color: KR,
               border: "1px solid rgba(249,66,58,0.3)",
+              lineHeight: 1,
             }}
           >
             {chatHistory.length}

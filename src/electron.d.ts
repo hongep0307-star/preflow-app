@@ -19,7 +19,6 @@ interface ElectronAPI {
   api: {
     claudeProxy: (body: any) => Promise<any>;
     openaiImage: (body: any) => Promise<any>;
-    analyzeBrief: (body: any) => Promise<any>;
     enhanceInpaintPrompt: (body: any) => Promise<any>;
     translateAnalysis: (body: any) => Promise<any>;
     analyzeReferenceImages: (body: any) => Promise<any>;

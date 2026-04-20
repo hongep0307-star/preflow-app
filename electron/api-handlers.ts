@@ -25,40 +25,6 @@ export async function handleClaudeProxy(body: any) {
   return await response.json();
 }
 
-export async function handleAnalyzeBrief(body: any) {
-  const settings = getSettings();
-  ensureGoogleCredentials(settings);
-  const { briefText, lang } = body;
-  if (!briefText || briefText.trim().length === 0) return { error: "브리프 텍스트가 비어있습니다." };
-  const langDirective = lang === "en"
-    ? "CRITICAL LANGUAGE RULE: ALL output fields must be written in English. Do NOT use Korean in any field.\n\n"
-    : "CRITICAL LANGUAGE RULE: ALL output fields must be written in Korean (한국어). This includes visual_direction (camera, lighting, color_grade, editing), reference_mood, scene_count_hint descriptions, usp comparisons, and every other text field. Do NOT mix English into Korean analysis. Only use English for proper nouns, technical terms (e.g. POV, HUD, CCTV), or universally understood abbreviations.\n\n";
-  const briefKnowledge = `
-[연출 지식 베이스 — 분석 참조]
-포맷별 구조: 6초(1~2씬,HOOK+CTA) / 15초(3~4씬,HOOK0~2s,BODY2~11s,CTA11~15s) / 30초(5~7씬,HOOK0~5s,BODY5~22s,CTA22~30s) / 45초(7~10씬) / 60초(8~12씬) / 2~3분(15~25씬)
-HOOK 유형: Question/In Medias Res/Contrast/Statement/Visual/Mystery/Empathy — 첫 프레임부터 움직임, 소리없이 이해 가능, 궁금증 생성
-서사 유형: Hero's Journey(60초+) / Problem-Solution(15~30초) / Before-After(30초) / Demonstration(30~60초) / Emotional Resonance(60초+) / Testimonial(30~60초) / Contrast-Unexpected(30~60초)
-조명 매칭: 밝음/긍정→High Key / 드라마틱→Mid Key / 긴장/럭셔리→Low Key / 영웅→Rim Light / 갈등→Side Light / 낭만→Golden Hour
-색온도: 따뜻함→앰버3200K / 프리미엄→골든4500K / 현대→중성5500K / 미래→쿨블루7000K+ / 도시→틸네온
-게임장르 컬러: RPG=에메랄드+골드+딥퍼플 / FPS=올리브+브라운+낮은채도 / SF=네온블루+핫핑크 / 배틀로얄=틸+오렌지 / 캐주얼=고채도원색
-편집페이스: 0.5~1초=초고속(범퍼) / 1~2초=고속(액션) / 2~4초=중간(서사) / 4~8초=느림(감성) / 8초+=브랜드필름
-분석 자동 도출: ①포맷→씬수+타이밍 ②장르→색채+편집페이스 ③감정목표→조명+숏사이즈 ④타겟→카메라친숙도(MZ=빠른편집/40대+=중간) ⑤USP→노출방식
-CTA: 감정피크 직후 배치 / 구체적 행동지시 / 로고+제품+핵심메시지 동시(마지막3~5초)
-`;
-  const systemPrompt = langDirective + briefKnowledge + `\n당신은 칸 광고제 황금사자상 수상 경력의 시니어 아트 디렉터 겸 크리에이티브 디렉터입니다. 위의 연출 지식 베이스를 기반으로 주어진 광고 브리프를 철저히 분석하여 실제 제작에 바로 활용할 수 있는 심층 전략 리포트를 작성하세요.\n\n반드시 아래 JSON 형식으로만 응답하세요. JSON 외 텍스트는 절대 포함하지 마세요.\n\n{"goal":{"summary":"핵심 목표 한 줄 요약","items":["구체적 목표1","목표2","목표3"],"kpi_hint":"KPI 제안","core_message":"이 캠페인이 전달해야 할 단 하나의 핵심 메시지 (15단어 이내, 태그라인처럼)","success_criteria":"구체적 수치 포함 성공 기준 2-3개","desired_action":"시청자가 취해야 할 구체적 행동 단계 2-3단계 퍼널"},"target":{"summary":"타겟 한 줄 요약","primary":["1차 타겟 항목1","항목2","항목3"],"insight":"심리적 욕구와 페인 포인트","media_behavior":"미디어/플랫폼 행동 패턴"},"usp":{"summary":"핵심 차별점 한 줄","items":[{"keyword":"2-4 word differentiator","comparison":"기존/경쟁 콘텐츠는 ~인데, 이건 ~라서 다르다"}],"competitive_edge":"독보적 강점","message_hierarchy":"1순위 → 2순위 → 3순위"},"tone_manner":{"summary":"톤앤매너 한 줄","keywords":["키워드1","키워드2","키워드3","키워드4"],"visual_direction":{"camera":"숏 사이즈/앵글/무빙 조합 (지식 베이스 기반)","lighting":"조명 유형/비율/방향 (지식 베이스 기반)","color_grade":"색온도/팔레트/채도 방향 (지식 베이스 기반)","editing":"컷 유형/페이스/리듬 (지식 베이스 기반)"},"reference_mood":"레퍼런스 무드","do_not":"절대 피해야 할 요소"},"production_notes":{"format_recommendation":"권장 포맷과 길이","shooting_style":"촬영 스타일","scene_count_hint":{"structure":"HOOK → BODY → CTA","total_scenes":"3-5개 씬","hook":{"duration":"3-5초","description":"구체적 오프닝 장면 묘사 (HOOK 유형 명시)"},"body":{"duration":"15-20초","description":"핵심 내러티브 비트와 구체적 샷 제안"},"cta":{"duration":"5-8초","description":"구체적 엔딩 비주얼/액션 묘사"}},"budget_efficiency":"제작 효율 조언","narrative_type":"서사 유형 (Hero Journey/Problem-Solution/Before-After 등)"}}\n\nCRITICAL QUALITY RULES:\nFor visual_direction, use the cinematography knowledge base to provide specific, professional camera/lighting/color/editing direction — not generic descriptions.\nFor usp.items, each item MUST include keyword + comparison.\nFor reference_mood, describe specific visual/audio moods.\nFor scene_count_hint, provide structured per-section guidance aligned with the format's HOOK-BODY-CTA timing from the knowledge base.\nFor goal.core_message, write a punchy one-liner (15 words max).\nFor goal.success_criteria, include 2-3 measurable benchmarks.\nFor goal.desired_action, write a clear 2-3 step funnel using → arrows.\nFor production_notes.narrative_type, select the most appropriate narrative structure from the knowledge base.\n각 항목은 구체적이고 실무에 바로 쓸 수 있도록 작성하세요.`;
-  const data = await callVertexGemini(settings, "gemini-2.5-flash", {
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    contents: [{ parts: [{ text: `다음 브리프를 분석해주세요:\n\n${briefText}` }] }],
-    generationConfig: { maxOutputTokens: 2048, temperature: 0.3 },
-  });
-  const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!content) throw new Error("AI 응답이 비어있습니다.");
-  let jsonStr = content.trim();
-  const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (jsonMatch) jsonStr = jsonMatch[1].trim();
-  return { analysis: JSON.parse(jsonStr) };
-}
-
 export async function handleEnhanceInpaintPrompt(body: any) {
   const settings = getSettings();
   ensureGoogleCredentials(settings);
@@ -77,17 +43,54 @@ export async function handleEnhanceInpaintPrompt(body: any) {
   }
 }
 
+// v2 fields: enum/literal/numeric/boolean values that must NOT be translated
+// (translate-analysis 는 자연어만 번역하고 이 필드들은 원본 그대로 보존해야 함)
+const TRANSLATE_KEEP_AS_IS_KEYS = [
+  "content_type",
+  "secondary_type",
+  "classification_confidence",
+  "hook_strategy.primary",
+  "hook_strategy.alternatives",
+  "hook_strategy.pattern_interrupt",
+  "pacing.format",
+  "pacing.duration",
+  "pacing.edit_rhythm",
+  "pacing.scene_count",
+  "pacing.silent_viewable",
+  "pacing.captions_required",
+  "hero_visual.brand_reveal_timing",
+  "hero_visual.product_reveal_timing",
+  "hero_visual.logo_placement",
+  "product_info.urgency.type",
+  "abcd_compliance.attract.score",
+  "abcd_compliance.brand.score",
+  "abcd_compliance.connect.score",
+  "abcd_compliance.direct.score",
+  "abcd_compliance.total",
+  "narrative.story_structure",
+  "narrative.emotional_beats[].intensity",
+];
+
 export async function handleTranslateAnalysis(body: any) {
   const settings = getSettings();
   ensureGoogleCredentials(settings);
   const { mode, analysis, fieldValue, fieldPath, direction } = body;
   if (mode === "full") {
     const directionText = direction === "ko_to_en" ? "Korean to English" : "English to Korean";
-    const systemPrompt = `You are a professional translator for advertising/marketing analysis.\nRULES:\n- Translate ALL text values in the JSON\n- Preserve the EXACT JSON structure\n- Keep proper nouns, brand names, game titles as-is\n- Return ONLY valid JSON, no markdown fences`;
+    const systemPrompt = `You are a professional translator for advertising/marketing analysis.
+RULES:
+- Translate ALL natural-language text values in the JSON
+- Preserve the EXACT JSON structure and key names
+- Keep proper nouns, brand names, game titles as-is
+- DO NOT translate enum/literal values. Keep these fields EXACTLY as-is (values are enums or numbers, not natural language):
+${TRANSLATE_KEEP_AS_IS_KEYS.map((k) => `  - ${k}`).join("\n")}
+- Any field whose value looks like a timing token ("0-3s", "3-5s", "5-10s"), format token ("9:16", "16:9", "1:1", "4:5"), duration token ("6s", "15s", "30s", "45s", "60s"), or an identifier with underscores (e.g. "product_launch", "unboxing_reveal", "time_limited", "first_frame") must also be kept as-is.
+- Numbers and booleans are never translated.
+- Return ONLY valid JSON, no markdown fences.`;
     const data = await callVertexGemini(settings, "gemini-2.5-flash", {
       system_instruction: { parts: [{ text: systemPrompt }] },
       contents: [{ parts: [{ text: `Translate this analysis JSON from ${directionText}. Return ONLY valid JSON:\n\n${JSON.stringify(analysis)}` }] }],
-      generationConfig: { maxOutputTokens: 4000, temperature: 0.1 },
+      generationConfig: { maxOutputTokens: 6000, temperature: 0.1 },
     });
     const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!content) throw new Error("Empty AI response");
@@ -95,6 +98,10 @@ export async function handleTranslateAnalysis(body: any) {
     return { translated: JSON.parse(jsonStr) };
   }
   if (mode === "field") {
+    // field-level translation: skip if fieldPath is in the enum keep-as-is list
+    if (fieldPath && TRANSLATE_KEEP_AS_IS_KEYS.some((k) => fieldPath === k || fieldPath.startsWith(`${k}.`))) {
+      return { translated: fieldValue };
+    }
     const directionText = direction === "ko_to_en" ? "Korean to natural English" : "English to natural Korean";
     const data = await callVertexGemini(settings, "gemini-2.0-flash", {
       contents: [{ parts: [{ text: `Translate from ${directionText}. ${fieldPath ? `This is the "${fieldPath}" field of a marketing analysis. ` : ""}Keep proper nouns as-is. Return ONLY the translated text:\n\n${fieldValue}` }] }],
@@ -200,7 +207,6 @@ export async function handleOpenaiImage(body: any) {
 export function registerApiHandlers() {
   registerSettingsHandlers();
   ipcMain.handle("api:claude-proxy", (_e, body) => handleClaudeProxy(body));
-  ipcMain.handle("api:analyze-brief", (_e, body) => handleAnalyzeBrief(body));
   ipcMain.handle("api:enhance-inpaint-prompt", (_e, body) => handleEnhanceInpaintPrompt(body));
   ipcMain.handle("api:translate-analysis", (_e, body) => handleTranslateAnalysis(body));
   ipcMain.handle("api:analyze-reference-images", (_e, body) => handleAnalyzeReferenceImages(body));

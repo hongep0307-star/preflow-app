@@ -30,7 +30,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   api: {
     claudeProxy: (body: any) => ipcRenderer.invoke("api:claude-proxy", body),
     openaiImage: (body: any) => ipcRenderer.invoke("api:openai-image", body),
-    analyzeBrief: (body: any) => ipcRenderer.invoke("api:analyze-brief", body),
     enhanceInpaintPrompt: (body: any) => ipcRenderer.invoke("api:enhance-inpaint-prompt", body),
     translateAnalysis: (body: any) => ipcRenderer.invoke("api:translate-analysis", body),
     analyzeReferenceImages: (body: any) => ipcRenderer.invoke("api:analyze-reference-images", body),

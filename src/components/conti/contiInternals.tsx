@@ -82,6 +82,44 @@ export const resolveAsset = (raw: string, assets: Asset[]): { asset: Asset; name
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// getCaretOffsetFromPoint — 뷰(span)에서 편집(input/textarea) 모드 전환 시
+// 클릭한 위치에 해당하는 문자열 오프셋을 구한다. 실패 시 fallbackLength 반환.
+// 각 필드에서 onMouseDown 시 이 함수를 호출해 clickOffsetRef 에 저장하고,
+// editing 전환 후 input 포커스 시 해당 오프셋으로 selectionRange 를 세팅한다.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+export const getCaretOffsetFromPoint = (
+  container: HTMLElement,
+  clientX: number,
+  clientY: number,
+  fallbackLength: number,
+): number => {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+
+  const getOffsetFromNode = (targetNode: Node, targetOffset: number) => {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let charCount = 0;
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      if (node === targetNode) return charCount + targetOffset;
+      charCount += node.textContent?.length ?? 0;
+    }
+    return fallbackLength;
+  };
+
+  let offset = fallbackLength;
+  const caretPos = doc.caretPositionFromPoint?.(clientX, clientY);
+  if (caretPos) offset = getOffsetFromNode(caretPos.offsetNode, caretPos.offset);
+  else {
+    const range = doc.caretRangeFromPoint?.(clientX, clientY);
+    if (range) offset = getOffsetFromNode(range.startContainer, range.startOffset);
+  }
+  return Math.min(Math.max(offset, 0), fallbackLength);
+};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // InlineField — uncontrolled(defaultValue+ref)로 한글 IME 버그 수정
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const InlineField = ({
@@ -97,14 +135,18 @@ export const InlineField = ({
 }) => {
   const [editing, setEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // 클릭한 위치의 문자열 오프셋. editing 전환 후 해당 위치에 커서를 둔다.
+  const clickOffsetRef = useRef<number | null>(null);
 
-  // editing 전환 시 autoFocus + 커서 끝으로
+  // editing 전환 시 autoFocus + 저장된 클릭 위치(없으면 끝)로 커서 이동
   useEffect(() => {
     if (editing && inputRef.current) {
       const el = inputRef.current;
       el.focus();
       const len = el.value.length;
-      el.setSelectionRange(len, len);
+      const pos = Math.min(clickOffsetRef.current ?? len, len);
+      el.setSelectionRange(pos, pos);
+      clickOffsetRef.current = null;
     }
   }, [editing]);
 
@@ -150,7 +192,16 @@ export const InlineField = ({
 
   return (
     <span
-      onClick={() => setEditing(true)}
+      onClick={(e) => {
+        // 클릭 위치 캡처 → editing 전환 후 해당 위치에 커서 배치
+        clickOffsetRef.current = getCaretOffsetFromPoint(
+          e.currentTarget as HTMLElement,
+          e.clientX,
+          e.clientY,
+          value.length,
+        );
+        setEditing(true);
+      }}
       onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
       onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
       style={{
@@ -187,11 +238,20 @@ export const LocationField = ({
   const [mentionStart, setMentionStart] = useState(0);
   const [selIdx, setSelIdx] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
+  // 클릭 위치 오프셋 — editing 전환 후 커서 배치용
+  const clickOffsetRef = useRef<number | null>(null);
   // ✅ IME 조합 중 여부 추적
   const isComposing = useRef(false);
 
   useEffect(() => {
-    if (editing && inputRef.current) inputRef.current.focus();
+    if (editing && inputRef.current) {
+      const el = inputRef.current;
+      el.focus();
+      const len = el.value.length;
+      const pos = Math.min(clickOffsetRef.current ?? len, len);
+      el.setSelectionRange(pos, pos);
+      clickOffsetRef.current = null;
+    }
   }, [editing]);
   useEffect(() => {
     if (!editing) setVal(value);
@@ -259,7 +319,15 @@ export const LocationField = ({
     const hasContent = value && value.trim().length > 0;
     return (
       <span
-        onClick={() => setEditing(true)}
+        onClick={(e) => {
+          clickOffsetRef.current = getCaretOffsetFromPoint(
+            e.currentTarget as HTMLElement,
+            e.clientX,
+            e.clientY,
+            value.length,
+          );
+          setEditing(true);
+        }}
         onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
         onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
         style={{
@@ -426,6 +494,8 @@ export const MetaRows = ({
   // ✅ 각 필드 input ref — commit 시점에 값 읽기
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const containerRef = useRef<HTMLDivElement>(null);
+  // 클릭 위치 오프셋 — editing 전환 후 커서 배치용
+  const clickOffsetRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!ek) return;
@@ -438,6 +508,19 @@ export const MetaRows = ({
     return () => document.removeEventListener("mousedown", fn);
   }, [ek]);
 
+  // ek 이 바뀔 때 input 에 포커스 + 클릭 위치(없으면 끝)로 커서 이동
+  // (setTimeout 대신 useEffect 로 처리 → autoFocus 와의 타이밍 충돌 방지)
+  useEffect(() => {
+    if (!ek) return;
+    const el = inputRefs.current[ek];
+    if (!el) return;
+    el.focus();
+    const len = el.value.length;
+    const pos = Math.min(clickOffsetRef.current ?? len, len);
+    el.setSelectionRange(pos, pos);
+    clickOffsetRef.current = null;
+  }, [ek]);
+
   // ✅ blur/Enter 시에만 부모 onUpdate 호출
   const commitField = (k: string) => {
     const newVal = inputRefs.current[k]?.value ?? (fields as any)[k] ?? "";
@@ -445,17 +528,9 @@ export const MetaRows = ({
     onUpdate(k, newVal);
   };
 
-  const startEdit = (k: string) => {
+  const startEdit = (k: string, offset?: number) => {
+    clickOffsetRef.current = offset ?? null;
     setEk(k);
-    // defaultValue 세팅 후 포커스 + 커서 끝
-    setTimeout(() => {
-      const el = inputRefs.current[k];
-      if (el) {
-        el.focus();
-        const len = el.value.length;
-        el.setSelectionRange(len, len);
-      }
-    }, 0);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, k: string) => {
@@ -529,7 +604,17 @@ export const MetaRows = ({
               />
             ) : (
               <span
-                onClick={() => startEdit(k)}
+                onClick={(e) => {
+                  const offset = val
+                    ? getCaretOffsetFromPoint(
+                        e.currentTarget as HTMLElement,
+                        e.clientX,
+                        e.clientY,
+                        val.length,
+                      )
+                    : 0;
+                  startEdit(k, offset);
+                }}
                 onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
                 onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
                 style={{

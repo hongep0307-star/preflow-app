@@ -96,7 +96,19 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
           [썸네일] [● 상태] | [제목 flex-1] [포맷] [owner] | [deadline] [···] [›]
       */}
       <div
-        onClick={() => navigate(`/project/${project.id}${sceneStats && sceneStats.total > 0 ? "?tab=storyboard" : ""}`)}
+        onClick={() => {
+          // 라우팅 우선순위:
+          //  1) 콘티 작업 있음  → storyboard (Conti) 탭
+          //  2) Agent 씬카드 / 드래프트 있음 → agent 탭
+          //  3) 그 외 → brief (기본)
+          let target = `/project/${project.id}`;
+          if (sceneStats?.hasContiScenes) {
+            target = `/project/${project.id}?tab=storyboard`;
+          } else if (sceneStats?.hasAgentScenes || sceneStats?.hasDraftVersion) {
+            target = `/project/${project.id}?tab=agent`;
+          }
+          navigate(target);
+        }}
         className="group flex items-stretch bg-card border border-border hover:border-primary/25 hover:bg-surface-elevated cursor-pointer transition-all duration-150"
         style={{ borderRadius: 0 }}
       >

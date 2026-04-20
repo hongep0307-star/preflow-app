@@ -61,6 +61,106 @@ export interface Scene {
 
 export type BriefField = string[] | { summary: string; detail?: string; memo_link?: string | null };
 
+// ─────────────────────────────────────────────────────────────
+// Brief Analysis v2 — content-type branched schema
+// (영상 전문가 관점의 실무 필드. 모든 필드 optional — 기존 브리프와 하위호환)
+// ─────────────────────────────────────────────────────────────
+
+export type ContentType = "product_launch" | "event" | "update" | "community" | "brand_film";
+
+export type HookType =
+  | "gameplay_first"
+  | "fail_solve"
+  | "power_fantasy"
+  | "unboxing_reveal"
+  | "before_after"
+  | "mystery_tease"
+  | "testimonial"
+  | "pattern_interrupt";
+
+export type VideoAspect = "9:16" | "16:9" | "1:1" | "4:5";
+export type VideoDuration = "6s" | "15s" | "30s" | "45s" | "60s";
+export type EditRhythm = "fast" | "medium" | "slow";
+export type RevealTiming = "0-3s" | "3-5s" | "5-10s";
+export type LogoPlacement = "first_frame" | "last_frame" | "persistent_corner";
+
+export interface ProductInfo {
+  what: string;
+  key_benefit: string;
+  urgency: {
+    type: "time_limited" | "quantity_limited" | "exclusive" | "none";
+    description: string;
+  };
+  cta_destination: string;
+  cta_action: string;
+}
+
+export interface HeroVisual {
+  must_show: string[];
+  first_frame: string;
+  brand_reveal_timing: "0-3s" | "3-5s";
+  product_reveal_timing: RevealTiming;
+  logo_placement: LogoPlacement;
+}
+
+export interface HookStrategy {
+  primary: HookType;
+  alternatives: HookType[];
+  first_3s_description: string;
+  pattern_interrupt: boolean;
+}
+
+export interface Pacing {
+  format: VideoAspect;
+  duration: VideoDuration;
+  scene_count: {
+    min: number;
+    max: number;
+    recommended: number;
+  };
+  edit_rhythm: EditRhythm;
+  silent_viewable: boolean;
+  captions_required: boolean;
+}
+
+export interface Constraints {
+  brand_guidelines: string[];
+  avoid: string[];
+  platform_policies: string[];
+}
+
+export interface AudienceInsight {
+  pain_point?: string;
+  motivation?: string;
+}
+
+export interface ABCDScore {
+  score: number;
+  notes: string;
+}
+export interface ABCDCompliance {
+  attract: ABCDScore;
+  brand: ABCDScore;
+  connect: ABCDScore;
+  direct: ABCDScore;
+  total?: number;
+}
+
+export interface NarrativeAnalysis {
+  controlling_idea: string;
+  story_structure: "hero_journey" | "before_after" | "vignette" | "demonstration";
+  protagonist: {
+    identity: string;
+    desire: string;
+    transformation: string;
+  };
+  emotional_beats: Array<{
+    timestamp: string;
+    emotion: string;
+    intensity: number;
+  }>;
+}
+
 export interface Analysis {
   goal: BriefField;
   target: BriefField;
@@ -86,6 +186,23 @@ export interface Analysis {
         cta?: { duration?: string; description?: string };
       }
     | string;
+
+  // ── v2 fields (all optional; classifier-driven) ──
+  content_type?: ContentType;
+  classification_confidence?: number;
+  classification_reasoning?: string;
+  secondary_type?: ContentType;
+
+  product_info?: ProductInfo;
+  hero_visual?: HeroVisual;
+  hook_strategy?: HookStrategy;
+  pacing?: Pacing;
+  constraints?: Constraints;
+  audience_insight?: AudienceInsight;
+  abcd_compliance?: ABCDCompliance;
+
+  // brand_film 전용
+  narrative?: NarrativeAnalysis;
 }
 
 export interface Asset {
@@ -393,6 +510,47 @@ export function subscribeMoodGen(pid: string, fn: () => void) {
   _moodGenListeners.get(pid)!.add(fn);
   return () => {
     _moodGenListeners.get(pid)?.delete(fn);
+  };
+}
+
+/* ─────────────────────────────────────────────────────────────
+ *  Chat (Agent) In-Flight 스토어
+ *   — AgentTab 이 언마운트 돼도 진행 중인 LLM 호출의 상태를 보관해
+ *     탭 복귀 시 로딩 인디케이터 복원 및 완료 후 chat_logs 재조회를 트리거.
+ * ───────────────────────────────────────────────────────────── */
+export type ChatGenState = {
+  /** 진행 중 여부 */
+  inFlight: boolean;
+  /** 시작 시각 */
+  startedAt: number;
+  /** 완료 후 draft 로 넘길 씬 — mount 복귀 시 반영 */
+  pendingExtractedScenes?: ParsedScene[];
+  /** pendingExtractedScenes 가 있을 때, 기존 확정 씬이 있으면 replace confirm 을 띄워야 함을 표시 */
+  pendingExtractedNeedsReplaceConfirm?: boolean;
+};
+
+export const _chatGenByProject = new Map<string, ChatGenState>();
+const _chatGenListeners = new Map<string, Set<() => void>>();
+
+export function getChatGen(pid: string): ChatGenState | undefined {
+  return _chatGenByProject.get(pid);
+}
+export function setChatGen(pid: string, next: ChatGenState | null) {
+  if (next === null) _chatGenByProject.delete(pid);
+  else _chatGenByProject.set(pid, next);
+  _chatGenListeners.get(pid)?.forEach((fn) => fn());
+}
+export function patchChatGen(pid: string, patch: Partial<ChatGenState>) {
+  const cur = _chatGenByProject.get(pid);
+  if (!cur) return;
+  _chatGenByProject.set(pid, { ...cur, ...patch });
+  _chatGenListeners.get(pid)?.forEach((fn) => fn());
+}
+export function subscribeChatGen(pid: string, fn: () => void) {
+  if (!_chatGenListeners.has(pid)) _chatGenListeners.set(pid, new Set());
+  _chatGenListeners.get(pid)!.add(fn);
+  return () => {
+    _chatGenListeners.get(pid)?.delete(fn);
   };
 }
 

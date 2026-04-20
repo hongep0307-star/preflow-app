@@ -2,7 +2,7 @@ import http from "http";
 import { getDb, saveDb } from "./db";
 import { getSettings, setSettings } from "./settings";
 import { getStorageBasePath } from "./storage";
-import { handleClaudeProxy, handleAnalyzeBrief, handleEnhanceInpaintPrompt, handleTranslateAnalysis, handleAnalyzeReferenceImages, handleOpenaiImage } from "./api-handlers";
+import { handleClaudeProxy, handleEnhanceInpaintPrompt, handleTranslateAnalysis, handleAnalyzeReferenceImages, handleOpenaiImage } from "./api-handlers";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
@@ -203,8 +203,6 @@ export function startLocalServer(): Promise<number> {
 
         } else if (url === "/api/claude-proxy") {
           result = await handleClaudeProxy(body);
-        } else if (url === "/api/analyze-brief") {
-          result = await handleAnalyzeBrief(body);
         } else if (url === "/api/enhance-inpaint-prompt") {
           result = await handleEnhanceInpaintPrompt(body);
         } else if (url === "/api/translate-analysis") {

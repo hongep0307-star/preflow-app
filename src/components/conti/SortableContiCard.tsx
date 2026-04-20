@@ -571,6 +571,7 @@ export const SortableContiCard = memo(
     isGeneratingAll,
     isUploading,
     isStyleTransferring,
+    isStyleTransferFlow,
     isQueued,
     aspectClass,
     assetMap,
@@ -604,6 +605,8 @@ export const SortableContiCard = memo(
     isGeneratingAll: boolean;
     isUploading: boolean;
     isStyleTransferring: boolean;
+    /** 스타일 트랜스퍼 작업이 전역적으로 진행 중인지 여부 (Queued 라벨 표기 분기용) */
+    isStyleTransferFlow?: boolean;
     isQueued: boolean;
     aspectClass: string;
     assetMap: Record<string, Asset>;
@@ -686,12 +689,23 @@ export const SortableContiCard = memo(
       generating: "Generating...",
       uploading: "Uploading...",
     };
+    // 일반 generate-all 플로우의 스테이지 번호 (Queued 는 사전 단계로 번호 미부여, 유지)
     const STAGE_STEPS: Partial<Record<GeneratingStage, string>> = {
       translating: "1/4",
       building: "2/4",
       generating: "3/4",
       uploading: "4/4",
     };
+    // 스타일 트랜스퍼 플로우의 스테이지 번호
+    // 4단계: Queued(1) → Style transfer...(2) → Generating...(3) → Uploading...(4)
+    const STYLE_TRANSFER_STAGE_STEPS: Partial<Record<GeneratingStage, string>> = {
+      generating: "3/4",
+      uploading: "4/4",
+    };
+
+    // 스타일 트랜스퍼 컨텍스트: 실제 트랜스퍼 중이거나, 전역 트랜스퍼 작업의 큐 대기 중인 경우
+    const isInStyleTransferContext = isStyleTransferring || (isQueued && !!isStyleTransferFlow);
+
     const busyLabel = generatingStage
       ? STAGE_LABELS[generatingStage]
       : isQueued
@@ -707,9 +721,17 @@ export const SortableContiCard = memo(
       ? generatingStage
         ? "1/1"
         : null
-      : generatingStage
-        ? (STAGE_STEPS[generatingStage] ?? null)
-        : null;
+      : isInStyleTransferContext
+        ? generatingStage
+          ? (STYLE_TRANSFER_STAGE_STEPS[generatingStage] ?? null)
+          : isQueued
+            ? "1/4"
+            : isStyleTransferring
+              ? "2/4"
+              : null
+        : generatingStage
+          ? (STAGE_STEPS[generatingStage] ?? null)
+          : null;
 
     const saveField = async (fields: Partial<Scene>) => {
       await onSceneUpdate(scene.scene_number, fields);
@@ -833,10 +855,10 @@ export const SortableContiCard = memo(
             className={`relative ${aspectClass} overflow-hidden shrink-0`}
             style={{
               background: imgSrc ? "#0a0a0a" : "rgba(255,255,255,0.03)",
-              cursor: hasImage ? "pointer" : "default",
+              cursor: "pointer",
             }}
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={hasImage ? onClickImage : undefined}
+            onClick={onClickImage}
           >
             {isBusy ? (
               <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-10 gap-2">

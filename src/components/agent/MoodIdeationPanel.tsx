@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { generateMoodImages } from "@/lib/moodIdeation";
+import { supabase } from "@/lib/supabase";
 import { Trash2, Loader2, X, Check, ExternalLink, Sparkles, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -14,11 +15,54 @@ import {
   getMoodGen,
   setMoodGen,
   patchMoodGen,
+  toMoodImages,
+  genMoodId,
   type Asset,
   type Scene,
   type Analysis,
   type MoodImage,
+  type MoodGenState,
 } from "./agentTypes";
+
+/* ━━━━━ Mood generation result persistence ━━━━━
+ * AgentTab(부모) 이 언마운트된 상태에서 generation 이 끝날 수 있으므로
+ * React state 를 거치지 않고 DB 에 직접 저장하는 경로가 필요하다.
+ * 모듈 store 의 arrivedUrls + skeletonIds 를 기준으로
+ * 현재 DB 의 mood_image_urls 와 머지해 persist 한다.
+ */
+async function persistMoodGenResultToDB(projectId: string, gen: MoodGenState | undefined | null) {
+  if (!gen || gen.skeletonIds.length === 0) return;
+  try {
+    const { data: brief } = await supabase
+      .from("briefs")
+      .select("id,mood_image_urls")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+    if (!brief) return;
+    const skelIdSet = new Set(gen.skeletonIds);
+    const dbImages = toMoodImages(((brief as any).mood_image_urls as (string | MoodImage)[]) ?? []);
+    const dbWithoutSkel = dbImages.filter((img) => !skelIdSet.has(img.id));
+    const arrivedImages: MoodImage[] = gen.skeletonIds
+      .map((id, i) => ({
+        id,
+        url: gen.arrivedUrls[i] ?? null,
+        liked: false,
+        sceneRef: null,
+        comment: "",
+        createdAt: new Date().toISOString(),
+      }))
+      .filter((img) => img.url !== null) as MoodImage[];
+    const merged = [...arrivedImages, ...dbWithoutSkel];
+    await supabase
+      .from("briefs")
+      .update({ mood_image_urls: merged } as any)
+      .eq("id", (brief as any).id);
+  } catch (e) {
+    console.error("[MoodGen] persistMoodGenResultToDB failed:", e);
+  }
+}
 
 /* ━━━━━ MoodCard ━━━━━ */
 const MoodCard = ({
@@ -404,11 +448,28 @@ export const MoodIdeationPanel = ({
 
   const [attachMenu, setAttachMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
-  const [includeAssetDesc, setIncludeAssetDesc] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState<{ ids: string[]; connectedScenes: number[] } | null>(null);
   const [generateCount, setGenerateCount] = useState(3);
   const defaultCols = FORMAT_DEFAULT_COLS[videoFormat] ?? 3;
-  const [thumbCols, setThumbCols] = useState(defaultCols);
+  // 탭 이동/언마운트 후 복귀 시에도 마지막 설정값이 유지되도록 프로젝트별 localStorage 에 저장.
+  const thumbColsKey = `ff_mood_thumb_cols_${projectId}`;
+  const [thumbCols, setThumbColsState] = useState<number>(() => {
+    try {
+      const raw = typeof window !== "undefined" ? window.localStorage.getItem(thumbColsKey) : null;
+      const parsed = raw ? parseInt(raw, 10) : NaN;
+      if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 12) return parsed;
+    } catch {}
+    return defaultCols;
+  });
+  const setThumbCols = useCallback(
+    (val: number) => {
+      setThumbColsState(val);
+      try {
+        window.localStorage.setItem(thumbColsKey, String(val));
+      } catch {}
+    },
+    [thumbColsKey],
+  );
   const [moodModel, setMoodModel] = useState<"creative" | "asset">("creative");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
@@ -498,18 +559,15 @@ export const MoodIdeationPanel = ({
               mood: s.mood,
               tagged_assets: s.tagged_assets,
             })),
-            assets:
-              includeAssetDesc || moodModel === "asset"
-                ? assets.map((a) => ({
-                    tag_name: a.tag_name,
-                    photo_url: a.photo_url,
-                    ai_description: a.ai_description,
-                    asset_type: a.asset_type,
-                    role_description: a.role_description,
-                    outfit_description: a.outfit_description,
-                    space_description: a.space_description,
-                  }))
-                : [],
+            assets: assets.map((a) => ({
+              tag_name: a.tag_name,
+              photo_url: a.photo_url,
+              ai_description: a.ai_description,
+              asset_type: a.asset_type,
+              role_description: a.role_description,
+              outfit_description: a.outfit_description,
+              space_description: a.space_description,
+            })),
             videoFormat,
             count: generateCount,
             targetSceneNumber: targetSceneNum,
@@ -530,18 +588,21 @@ export const MoodIdeationPanel = ({
             }
           },
         );
-        // 완료: 남아있는 null placeholder 제거 후 저장
-        setMoodImages((prev) => {
-          const next = prev.filter((img) => img.url !== null);
-          saveMoodImagesToDB(next);
-          return next;
-        });
         toast({ title: `${generateCount} mood images generated` });
       } catch (err: any) {
-        // Remove null placeholders on error
-        setMoodImages((prev) => prev.filter((img) => img.url !== null));
         toast({ title: "Mood generation failed", description: err.message, variant: "destructive" });
       } finally {
+        // ─── 언마운트-세이프 완료 처리 ───
+        // 탭 전환으로 AgentTab 이 unmount 된 상태에서도 DB 에 반드시 저장되어야 하므로,
+        // setMoodImages (React state) 가 아닌 모듈 store + supabase 를 직접 사용한다.
+        // 1) 모듈 store 의 arrivedUrls 기준으로 DB persist
+        const finalGen = getMoodGen(projectId);
+        await persistMoodGenResultToDB(projectId, finalGen);
+        // 2) mount 된 경우에만 로컬 state 정리 (null placeholder 제거).
+        //    unmount 상태면 no-op 이고, 재마운트 시 fetchBrief 가 DB 에서 새로 로드.
+        setMoodImages((prev) => prev.filter((img) => img.url !== null));
+        // 3) 모듈 store 정리 — 이 호출이 subscribeMoodGen listener 를 트리거하므로
+        //    위 setMoodImages 뒤에서 호출해 UI 가 최종 상태로 안정화되게 한다.
         setMoodGen(projectId, null);
         setIsGenerating(false);
       }
@@ -595,6 +656,138 @@ export const MoodIdeationPanel = ({
   const likedCount = moodImages.filter((img) => img.liked).length;
   const attachImg = attachMenu ? moodImages.find((i) => i.id === attachMenu.id) : null;
 
+  const modelSelector = (
+    <div ref={modelMenuRef} style={{ position: "relative" }}>
+      <button
+        onClick={() => setModelMenuOpen((p) => !p)}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          padding: "0 10px",
+          height: 28,
+          borderRadius: 0,
+          fontSize: 11,
+          cursor: "pointer",
+          border: `0.5px solid ${modelMenuOpen ? KR : "hsl(var(--border))"}`,
+          background: modelMenuOpen ? KR_BG : "hsl(var(--muted))",
+          color: modelMenuOpen ? KR : "hsl(var(--muted-foreground))",
+          transition: "all 0.15s",
+          fontWeight: 500,
+        }}
+      >
+        {moodModel === "creative" ? "Creative" : "Asset"}
+        <span style={{ fontSize: 9, opacity: 0.6 }}>{modelMenuOpen ? "▴" : "▾"}</span>
+      </button>
+      {modelMenuOpen && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            left: 0,
+            background: "hsl(var(--card))",
+            border: "0.5px solid hsl(var(--border))",
+            borderRadius: 0,
+            overflow: "hidden",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.1)",
+            zIndex: 100,
+            minWidth: 240,
+          }}
+        >
+          <button
+            onClick={() => {
+              setMoodModel("creative");
+              setModelMenuOpen(false);
+            }}
+            style={{
+              width: "100%",
+              display: "flex",
+              flexDirection: "column",
+              padding: "8px 12px",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              textAlign: "left",
+              fontFamily: "inherit",
+            }}
+            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span
+                style={{
+                  fontSize: 12,
+                  fontWeight: moodModel === "creative" ? 600 : 400,
+                  color: moodModel === "creative" ? KR : "hsl(var(--foreground))",
+                }}
+              >
+                Creative
+              </span>
+              {moodModel === "creative" && (
+                <Check className="w-3 h-3 ml-auto" style={{ color: "hsl(var(--muted-foreground))" }} />
+              )}
+            </div>
+            <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
+              Multiple angles, cinematic direction (Asset appearance not reflected)
+            </span>
+          </button>
+          <button
+            onClick={() => {
+              const hasPhotoAssets = assets.some((a) => a.photo_url);
+              if (!hasPhotoAssets) {
+                toast({
+                  title: "에셋을 먼저 등록하세요",
+                  description: "이미지가 있는 에셋이 필요합니다",
+                  variant: "destructive",
+                });
+                return;
+              }
+              setMoodModel("asset");
+              setModelMenuOpen(false);
+            }}
+            style={{
+              width: "100%",
+              display: "flex",
+              flexDirection: "column",
+              padding: "8px 12px",
+              background: "none",
+              border: "none",
+              cursor: assets.some((a) => a.photo_url) ? "pointer" : "not-allowed",
+              textAlign: "left",
+              fontFamily: "inherit",
+              opacity: assets.some((a) => a.photo_url) ? 1 : 0.4,
+            }}
+            onMouseEnter={(e) => {
+              if (assets.some((a) => a.photo_url))
+                (e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))";
+            }}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span
+                style={{
+                  fontSize: 12,
+                  fontWeight: moodModel === "asset" ? 600 : 400,
+                  color: moodModel === "asset" ? KR : "hsl(var(--foreground))",
+                }}
+              >
+                Asset
+              </span>
+              {moodModel === "asset" && (
+                <Check className="w-3 h-3 ml-auto" style={{ color: "hsl(var(--muted-foreground))" }} />
+              )}
+            </div>
+            <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
+              {assets.some((a) => a.photo_url)
+                ? "Actual asset implementation (Character/Environment)"
+                : "Register assets first"}
+            </span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
   const renderMasonryGrid = (images: MoodImage[]) => {
     // 스켈레톤 관련 계산은 여기서 미리
     const skelImages = images.filter((i) => i.url === null);
@@ -640,138 +833,8 @@ export const MoodIdeationPanel = ({
 
   return (
     <div className="flex flex-col h-full" onClick={() => setAttachMenu(null)}>
-      <div style={{ padding: "10px 12px 8px", borderBottom: "0.5px solid hsl(var(--border))", flexShrink: 0 }}>
+      <div style={{ padding: "8px 12px", borderBottom: "0.5px solid hsl(var(--border))", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap" }}>
-          {/* Model selector */}
-          <div ref={modelMenuRef} style={{ position: "relative" }}>
-            <button
-              onClick={() => setModelMenuOpen((p) => !p)}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "0 10px",
-                height: 28,
-                borderRadius: 0,
-                fontSize: 11,
-                cursor: "pointer",
-                border: `0.5px solid ${modelMenuOpen ? KR : "hsl(var(--border))"}`,
-                background: modelMenuOpen ? KR_BG : "hsl(var(--muted))",
-                color: modelMenuOpen ? KR : "hsl(var(--muted-foreground))",
-                transition: "all 0.15s",
-                fontWeight: 500,
-              }}
-            >
-              {moodModel === "creative" ? "Creative" : "Asset"}
-              <span style={{ fontSize: 9, opacity: 0.6 }}>{modelMenuOpen ? "▴" : "▾"}</span>
-            </button>
-            {modelMenuOpen && (
-              <div
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 4px)",
-                  left: 0,
-                  background: "hsl(var(--card))",
-                  border: "0.5px solid hsl(var(--border))",
-                  borderRadius: 0,
-                  overflow: "hidden",
-                  boxShadow: "0 4px 16px rgba(0,0,0,0.1)",
-                  zIndex: 100,
-                  minWidth: 240,
-                }}
-              >
-                <button
-                  onClick={() => {
-                    setMoodModel("creative");
-                    setModelMenuOpen(false);
-                  }}
-                  style={{
-                    width: "100%",
-                    display: "flex",
-                    flexDirection: "column",
-                    padding: "8px 12px",
-                    background: "none",
-                    border: "none",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontFamily: "inherit",
-                  }}
-                  onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
-                  onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span
-                      style={{
-                        fontSize: 12,
-                        fontWeight: moodModel === "creative" ? 600 : 400,
-                        color: moodModel === "creative" ? KR : "hsl(var(--foreground))",
-                      }}
-                    >
-                      Creative
-                    </span>
-                    {moodModel === "creative" && (
-                      <Check className="w-3 h-3 ml-auto" style={{ color: "hsl(var(--muted-foreground))" }} />
-                    )}
-                  </div>
-                  <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
-                    Multiple angles, cinematic direction (Asset appearance not reflected)
-                  </span>
-                </button>
-                <button
-                  onClick={() => {
-                    const hasPhotoAssets = assets.some((a) => a.photo_url);
-                    if (!hasPhotoAssets) {
-                      toast({
-                        title: "에셋을 먼저 등록하세요",
-                        description: "이미지가 있는 에셋이 필요합니다",
-                        variant: "destructive",
-                      });
-                      return;
-                    }
-                    setMoodModel("asset");
-                    setModelMenuOpen(false);
-                  }}
-                  style={{
-                    width: "100%",
-                    display: "flex",
-                    flexDirection: "column",
-                    padding: "8px 12px",
-                    background: "none",
-                    border: "none",
-                    cursor: assets.some((a) => a.photo_url) ? "pointer" : "not-allowed",
-                    textAlign: "left",
-                    fontFamily: "inherit",
-                    opacity: assets.some((a) => a.photo_url) ? 1 : 0.4,
-                  }}
-                  onMouseEnter={(e) => {
-                    if (assets.some((a) => a.photo_url))
-                      (e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))";
-                  }}
-                  onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span
-                      style={{
-                        fontSize: 12,
-                        fontWeight: moodModel === "asset" ? 600 : 400,
-                        color: moodModel === "asset" ? KR : "hsl(var(--foreground))",
-                      }}
-                    >
-                      Asset
-                    </span>
-                    {moodModel === "asset" && (
-                      <Check className="w-3 h-3 ml-auto" style={{ color: "hsl(var(--muted-foreground))" }} />
-                    )}
-                  </div>
-                  <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
-                    {assets.some((a) => a.photo_url)
-                      ? "Actual asset implementation (Character/Environment)"
-                      : "Register assets first"}
-                  </span>
-                </button>
-              </div>
-            )}
-          </div>
           {/* Context selector */}
           <div ref={ctxRef} style={{ position: "relative" }}>
             <button
@@ -938,29 +1001,9 @@ export const MoodIdeationPanel = ({
               +
             </button>
           </div>
+          {/* Model selector */}
+          {modelSelector}
           <div style={{ width: 1, height: 14, background: "hsl(var(--border))" }} />
-          {/* Asset desc toggle */}
-          <button
-            onClick={() => setIncludeAssetDesc((p) => !p)}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              padding: "0 10px",
-              height: 28,
-              borderRadius: 0,
-              fontSize: 11,
-              fontWeight: 500,
-              background: includeAssetDesc ? KR_BG : "hsl(var(--muted))",
-              color: includeAssetDesc ? KR : "hsl(var(--muted-foreground))",
-              border: `0.5px solid ${includeAssetDesc ? KR_BORDER : "transparent"}`,
-              cursor: "pointer",
-              transition: "all 0.15s",
-            }}
-          >
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
-            Asset Desc
-          </button>
           {/* Saved filter */}
           <button
             onClick={() => setShowLikedOnly((p) => !p)}
@@ -994,28 +1037,6 @@ export const MoodIdeationPanel = ({
             </svg>
             {likedCount > 0 ? `Saved ${likedCount}` : "Saved"}
           </button>
-          {/* Delete all */}
-          {moodImages.length > 0 && (
-            <button
-              onClick={() => requestDelete(moodImages.map((i) => i.id))}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "0 10px",
-                height: 28,
-                borderRadius: 0,
-                fontSize: 11,
-                fontWeight: 500,
-                background: "transparent",
-                color: "hsl(var(--muted-foreground))",
-                border: "0.5px solid transparent",
-                cursor: "pointer",
-              }}
-            >
-              Delete All
-            </button>
-          )}
           {/* Column slider + count */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{displayImages.length} imgs</span>
@@ -1135,6 +1156,26 @@ export const MoodIdeationPanel = ({
           >
             Delete
           </button>
+          {moodImages.length > 0 && (
+            <button
+              onClick={() => requestDelete(moodImages.map((i) => i.id))}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "4px 10px",
+                borderRadius: 0,
+                fontSize: 11,
+                fontWeight: 500,
+                background: "transparent",
+                color: "#fff",
+                border: "0.5px solid #dc2626",
+                cursor: "pointer",
+              }}
+            >
+              Delete All
+            </button>
+          )}
         </div>
       )}
 

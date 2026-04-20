@@ -1,6 +1,18 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { callClaude } from "@/lib/claude";
+import type {
+  ContentType,
+  ProductInfo,
+  HeroVisual,
+  HookStrategy,
+  Pacing,
+  Constraints,
+  AudienceInsight,
+  ABCDCompliance,
+  NarrativeAnalysis,
+} from "@/components/agent/agentTypes";
+import { scoreABCD, gradeABCD } from "@/lib/abcdScorer";
 import { useToast } from "@/hooks/use-toast";
 import { toast as sonnerToast } from "sonner";
 import {
@@ -184,6 +196,21 @@ interface DeepAnalysis {
   idea_note?: string;
   image_analysis?: string;
   creative_gap?: { synergy: string[]; gap: string[]; recommendation: string };
+
+  // ── v2 fields (all optional; populated when classifier runs) ──
+  content_type?: ContentType;
+  classification_confidence?: number;
+  classification_reasoning?: string;
+  secondary_type?: ContentType;
+
+  product_info?: ProductInfo;
+  hero_visual?: HeroVisual;
+  hook_strategy?: HookStrategy;
+  pacing?: Pacing;
+  constraints?: Constraints;
+  audience_insight?: AudienceInsight;
+  abcd_compliance?: ABCDCompliance;
+  narrative?: NarrativeAnalysis;
 }
 interface LegacyAnalysis {
   goal: string[];
@@ -218,82 +245,160 @@ const fileToBase64 = (file: File): Promise<string> =>
     r.readAsDataURL(file);
   });
 
-const DEEP_ANALYSIS_SYSTEM_PROMPT = `당신은 칸 광고제 황금사자상 수상 경력의 시니어 아트 디렉터 겸 크리에이티브 디렉터입니다. 주어진 광고 브리프를 철저히 분석하여 실제 제작에 바로 활용할 수 있는 심층 전략 리포트를 작성하세요.
+const DEEP_ANALYSIS_SYSTEM_PROMPT = `당신은 게임/프로모션 영상 제작을 돕는 시니어 CD 이자 Performance Creative 전문가입니다.
+1인 프로듀서가 이 분석만으로 씬을 바로 짤 수 있도록, 마케팅 수사보다 "무엇을/언제/어떻게 노출할지"에 집중하세요.
+기반 프레임워크: Meta Creative Best Practices · Google ABCD · Mobile UA Patterns.
 
-반드시 아래 JSON 형식으로만 응답하세요. JSON 외 텍스트는 절대 포함하지 마세요.
+═══ STAGE 1 — CONTENT TYPE CLASSIFICATION ═══
+먼저 브리프를 읽고 5개 타입 중 하나로 분류하세요:
 
+1. product_launch — 특정 인게임 상품/스킨/무기/번들/패스 출시·판매
+2. event — 기간 한정 이벤트·시즌·토너먼트·콜라보·보상
+3. update — 패치/신규 맵/밸런스/기능 업데이트 안내
+4. community — 크리에이터·UGC·스트리머·플레이어 토너먼트 중심
+5. brand_film — 세계관/철학/감성 서사 중심, 직접 판매 CTA 없음
+
+분류 기준:
+- 브리프에 "출시/런칭/구매/스킨/한정/번들" → product_launch
+- "이벤트/시즌/한정 기간/보상/콜라보" → event
+- "업데이트/패치/신규 맵/밸런스" → update
+- "크리에이터/UGC/스트리머/토너먼트" → community
+- "브랜드 필름/세계관/철학/감동/스토리" 명시 + 길이 45초 이상 → brand_film
+
+content_type 결정 후, classification_confidence (0.0–1.0), classification_reasoning (1문장) 을 함께 기록하세요.
+confidence < 0.6 이면 secondary_type 도 추가 제시.
+
+═══ STAGE 2 — TEMPLATE SELECTION ═══
+- content_type ∈ { product_launch, event, update, community } → Performance Creative 템플릿 (기본)
+- content_type === "brand_film" → Narrative Creative 추가 블록(narrative) 포함
+
+═══ OUTPUT JSON SCHEMA (반드시 이 형식만) ═══
+
+공통 + Performance 필드 (항상 포함):
 {
-  "goal": { "summary": "핵심 목표 한 줄 요약", "items": ["구체적 목표1", "목표2", "목표3"], "kpi_hint": "KPI 제안", "core_message": "이 캠페인이 전달해야 할 단 하나의 핵심 메시지 (15단어 이내, 태그라인처럼)", "success_criteria": "구체적 수치 포함 성공 기준 2-3개 (예: 영상 완주율 60% 이상, CTR 15% 이상)", "desired_action": "시청자가 취해야 할 구체적 행동 단계 2-3단계 퍼널 (예: 링크 클릭 → 페이지 방문 → 구매)" },
-  "target": { "summary": "타겟 한 줄 요약", "primary": ["1차 타겟 항목1", "항목2", "항목3"], "insight": "심리적 욕구와 페인 포인트", "media_behavior": "미디어/플랫폼 행동 패턴" },
-  "usp": {
-    "summary": "핵심 차별점 한 줄",
-    "items": [
-      { "keyword": "2-4 word differentiator", "comparison": "기존/경쟁 콘텐츠는 ~인데, 이건 ~라서 다르다 (구체적 비교 1문장)" },
-      { "keyword": "...", "comparison": "..." },
-      { "keyword": "...", "comparison": "..." }
-    ],
-    "competitive_edge": "독보적 강점",
-    "message_hierarchy": "1순위 → 2순위 → 3순위"
+  "content_type": "product_launch | event | update | community | brand_film",
+  "classification_confidence": 0.85,
+  "classification_reasoning": "브리프에 'WSUS 411 한정 스킨' 3회 언급, 판매 목적 명확",
+  "secondary_type": "event",
+
+  "goal": { "summary": "…", "items": ["…","…","…"], "kpi_hint": "…", "core_message": "15단어 이내 태그라인", "success_criteria": "수치 2-3개", "desired_action": "단계1 → 단계2 → 단계3" },
+  "target": { "summary": "…", "primary": ["…","…","…"], "insight": "페인포인트", "media_behavior": "미디어 행동" },
+  "audience_insight": { "pain_point": "이전 WSUS 시리즈를 놓친 경험", "motivation": "한정 희소성 + FOMO" },
+  "usp": { "summary": "…", "items": [{"keyword":"2-4단어","comparison":"…"}], "competitive_edge": "…", "message_hierarchy": "1순위 → 2순위 → 3순위" },
+  "tone_manner": { "summary": "…", "keywords": ["…","…","…","…"], "visual_direction": {"camera":"…","lighting":"…","color_grade":"…","editing":"…"}, "reference_mood": "…", "do_not": "…" },
+  "production_notes": { "format_recommendation": "…", "shooting_style": "…", "scene_count_hint": {"structure":"HOOK → BODY → CTA","total_scenes":"3-5개 씬","hook":{"duration":"…","description":"…"},"body":{"duration":"…","description":"…"},"cta":{"duration":"…","description":"…"}}, "budget_efficiency": "…" },
+
+  "product_info": {
+    "what": "구체적 상품/이벤트명 (예: WSUS 411 한정 스킨)",
+    "key_benefit": "핵심 혜택 1문장 (예: 출시 기념 30% 할인)",
+    "urgency": {"type":"time_limited|quantity_limited|exclusive|none","description":"3월 31일까지 등"},
+    "cta_destination": "인게임 상점 > 스킨 탭 같은 구체 경로",
+    "cta_action": "지금 구매하기 같은 동사형 구체 문구"
   },
-  "tone_manner": {
-    "summary": "톤앤매너 한 줄",
-    "keywords": ["키워드1", "키워드2", "키워드3", "키워드4"],
-    "visual_direction": {
-      "camera": "Specific camera techniques, movements, angles",
-      "lighting": "Light sources, quality, direction",
-      "color_grade": "Grading approach, saturation, contrast",
-      "editing": "Cut rhythm, transition style, pacing"
-    },
-    "reference_mood": "레퍼런스 무드",
-    "do_not": "절대 피해야 할 요소"
+
+  "hero_visual": {
+    "must_show": ["반드시 노출할 시각 요소 3개"],
+    "first_frame": "첫 프레임에 등장할 시각 요소의 구체 묘사",
+    "brand_reveal_timing": "0-3s | 3-5s",
+    "product_reveal_timing": "0-3s | 3-5s | 5-10s",
+    "logo_placement": "first_frame | last_frame | persistent_corner"
   },
-  "production_notes": {
-    "format_recommendation": "권장 포맷과 길이",
-    "shooting_style": "촬영 스타일",
-    "scene_count_hint": {
-      "structure": "HOOK → BODY → CTA",
-      "total_scenes": "3-5개 씬",
-      "hook": { "duration": "3-5초", "description": "구체적 오프닝 장면 묘사" },
-      "body": { "duration": "15-20초", "description": "핵심 내러티브 비트와 구체적 샷 제안" },
-      "cta": { "duration": "5-8초", "description": "구체적 엔딩 비주얼/액션 묘사" }
-    },
-    "budget_efficiency": "제작 효율 조언"
+
+  "hook_strategy": {
+    "primary": "gameplay_first | fail_solve | power_fantasy | unboxing_reveal | before_after | mystery_tease | testimonial | pattern_interrupt",
+    "alternatives": ["대안 Hook 타입 2개"],
+    "first_3s_description": "첫 3초에 실제로 일어날 일 구체 묘사 (무엇이 보이고, 어떤 소리/동작)",
+    "pattern_interrupt": true
+  },
+
+  "pacing": {
+    "format": "9:16 | 16:9 | 1:1 | 4:5",
+    "duration": "6s | 15s | 30s | 45s | 60s",
+    "scene_count": {"min":3,"max":5,"recommended":4},
+    "edit_rhythm": "fast | medium | slow",
+    "silent_viewable": true,
+    "captions_required": true
+  },
+
+  "constraints": {
+    "brand_guidelines": ["로고/컬러/폰트 규칙"],
+    "avoid": ["피해야 할 표현·이미지 — 네거티브 프롬프트로 직결됨"],
+    "platform_policies": ["YouTube/Meta/TikTok 플랫폼별 주의사항"]
   }
 }
 
-CRITICAL QUALITY RULES:
-
-For usp.items, each item MUST include:
-- keyword: 2-4 word differentiator
-- comparison: One concrete sentence explaining how existing/competing content does it differently, and why this approach is better. Be specific about the competitor behavior, not vague.
-Do NOT use generic words like "현장감" or "사실성" alone — always ground them in a specific competitive comparison.
-
-For visual_direction, you MUST provide 4 separate sub-fields:
-- camera: Specific camera techniques, movements, angles. NOT generic terms like "cinematic" — describe actual techniques.
-- lighting: Light sources, quality, direction. If natural light, specify conditions. If artificial, specify style.
-- color_grade: Grading approach, saturation, contrast. Reference specific looks if applicable.
-- editing: Cut rhythm, transition style, pacing. Mention specific editing techniques.
-Each sub-field must be 1-2 specific, actionable sentences.
-
-For reference_mood, do NOT list genre categories. Instead describe specific visual/audio moods as if directing a DP:
-Example BAD: "다큐멘터리 현장감, 브레이킹 뉴스"
-Example GOOD: "라이브 스트림 화면에 시청자 채팅이 겹치는 느낌. 현장 사이렌 소리+바람 소리가 그대로 깔린 무편집 오디오. CCTV 녹화본처럼 타임스탬프 오버레이가 있는 화면"
-Write 2-3 sentences of vivid, sensory mood description.
-
-For scene_count_hint (scene_flow), provide structured per-section guidance:
-- hook: Specific opening scene suggestion with visual description (what the audience sees first). Include duration.
-- body: Key narrative beats with specific shot suggestions. Include duration.
-- cta: Closing approach with specific visual/action description. Include duration.
-Each section's description must be a concrete visual scene suggestion, NOT abstract strategy. Write as if you're a director giving shot-by-shot guidance to a cinematographer.
-
-For goal.core_message, write a punchy, memorable one-liner (15 words max) that could work as a campaign tagline. NOT a description of the goal — a message TO the audience.
-
-For goal.success_criteria, include 2-3 specific measurable benchmarks with actual target numbers. NOT just KPI names — include values like "완주율 60% 이상, CTR 15% 이상". Separate each criterion with a comma.
-
-For goal.desired_action, write a clear 2-3 step funnel using → arrows. Example: "영상 내 링크 클릭 → 스킨 프리뷰 페이지 → 한정 스킨 구매 완료"
+brand_film 인 경우에만 추가:
+"narrative": {
+  "controlling_idea": "마지막 씬이 전달할 단 하나의 감정",
+  "story_structure": "hero_journey | before_after | vignette | demonstration",
+  "protagonist": {"identity":"…","desire":"…","transformation":"…"},
+  "emotional_beats": [{"timestamp":"0-5s","emotion":"호기심","intensity":5}]
+}
 
 아이디어 메모가 함께 제공된 경우 위 JSON에 추가:
-{ "idea_note": "원본 메모", "creative_gap": { "synergy": ["시너지 2~3개"], "gap": ["간극 (없으면 빈 배열)"], "recommendation": "CD 한마디 제언" } }`;
+"idea_note": "원본 메모",
+"creative_gap": { "synergy": ["시너지 2~3개"], "gap": ["간극 (없으면 빈 배열)"], "recommendation": "CD 한마디 제언" }
+
+═══ CRITICAL QUALITY RULES ═══
+
+[hook_strategy.primary 선택 기준]
+- unboxing_reveal: 스킨/아이템 판매(product_launch) 기본값
+- power_fantasy: RPG·배틀 product_launch / event 에 강함
+- before_after: update 필수 선택 (구버전 → 신버전 비교)
+- mystery_tease: 티저성 event 에 최적
+- testimonial: community / 이벤트 보상 체감 필요 시
+- gameplay_first: 판단 어려울 때의 안전한 기본값
+- fail_solve: 퍼즐/캐주얼 전용
+- pattern_interrupt: 바이럴 지향·플랫폼 알고리즘 노출 극대화
+
+[hero_visual.first_frame 규칙]
+- 첫 프레임 자체가 움직임 또는 궁금증 유발을 포함해야 한다 (정적 로고컷 금지)
+- product_launch / event 는 product_reveal_timing = "0-3s" 가 기본값
+- brand_film 은 product_reveal_timing = "5-10s" 도 허용
+
+[constraints.avoid 규칙]
+- 반드시 네거티브 프롬프트 형태 (예: "logo-only first frame", "flat product shot without motion", "generic stock footage cliché")
+- 최소 2개 이상 제공
+
+[pacing.scene_count 자동 결정]
+- 6s → 1~2 씬
+- 15s → 3~4 씬 (recommended 4)
+- 30s → 5~7 씬 (recommended 6)
+- 45s → 7~10 씬 (recommended 8)
+- 60s → 8~12 씬 (recommended 10)
+
+[pacing.silent_viewable]
+- 모바일·SNS (9:16, 1:1) 는 기본 true, captions_required = true
+- YouTube 가로 (16:9) 는 false 허용
+
+[product_info 규칙]
+- what: 상품명은 브리프에서 그대로 추출 (추측 금지)
+- cta_action: "지금 구매", "지금 다운로드", "참여하기" 같은 **동사 시작의 3-6자 짧은 문구**
+- urgency.type === "none" 은 brand_film 외 허용 X
+
+[visual_direction 4개 서브필드 의무]
+- camera, lighting, color_grade, editing 각각 1-2 문장의 실무 지시어
+- 추상적 "cinematic" 금지 → 실제 기법 (예: "handheld shaky cam at 120fps", "rim light from 45° back-left")
+
+[reference_mood 작성 규칙]
+- 장르 나열 금지. 시각/청각 디테일 2-3문장 센서리 묘사
+- BAD: "다큐멘터리 현장감"
+- GOOD: "라이브 스트림 채팅이 겹친 화면, 현장 사이렌+바람 소리 그대로의 무편집 오디오, 타임스탬프 오버레이"
+
+[goal.core_message]
+- 관객에게 던지는 15단어 이내 태그라인 (목표 설명 아님)
+
+[goal.success_criteria]
+- 수치 포함 2-3개 (예: "완주율 60% 이상, CTR 15% 이상")
+
+[goal.desired_action]
+- → 화살표로 연결한 2-3단계 퍼널
+
+[usp.items]
+- 각 item: { keyword: 2-4단어, comparison: "기존/경쟁 콘텐츠는 ~인데 이건 ~라서 다르다" 구체 비교 1문장 }
+- 모호한 단어(현장감/사실성) 단독 금지
+
+반드시 위 JSON 형식만 응답. JSON 외 텍스트 절대 포함 금지.`;
 
 const LANG_DIRECTIVE_KO = `CRITICAL LANGUAGE RULE: ALL output fields must be written in Korean (한국어). This includes visual_direction (camera, lighting, color_grade, editing), reference_mood, scene_count_hint descriptions, usp comparisons, and every other text field. Do NOT mix English into Korean analysis. Only use English for proper nouns, technical terms (e.g. POV, HUD, CCTV), or universally understood abbreviations.\n\n`;
 const LANG_DIRECTIVE_EN = `CRITICAL LANGUAGE RULE: ALL output fields must be written in English. Do NOT use Korean in any field.\n\n`;
@@ -302,7 +407,7 @@ const analyzeBriefText = async (briefText: string, lang: Lang = "ko"): Promise<D
   const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
   const data = await callClaude({
     model: "claude-sonnet-4-20250514",
-    max_tokens: 3000,
+    max_tokens: 4500,
     system: langDirective + DEEP_ANALYSIS_SYSTEM_PROMPT,
     messages: [{ role: "user", content: `다음 브리프를 분석해주세요:\n\n${briefText}` }],
   });
@@ -326,7 +431,7 @@ const analyzeBriefWithImages = async (
   });
   const data = await callClaude({
     model: "claude-sonnet-4-20250514",
-    max_tokens: 3000,
+    max_tokens: 4500,
     system:
       langDirective + DEEP_ANALYSIS_SYSTEM_PROMPT + "\n\n이미지 안의 모든 시각적 정보를 빠짐없이 읽고 분석하세요.",
     messages: [{ role: "user", content: contentArray }],
@@ -360,6 +465,37 @@ const L: Record<string, Record<Lang, string>> = {
   shooting_style: { ko: "촬영 스타일", en: "Shooting Style" },
   scene_flow: { ko: "씬 흐름", en: "Scene Flow" },
   budget_efficiency: { ko: "예산 효율", en: "Budget Efficiency" },
+  abcd_effectiveness: { ko: "ABCD 효과성 스코어", en: "ABCD Effectiveness Score" },
+  abcd_design_checklist: { ko: "ABCD 설계 체크리스트", en: "ABCD Design Checklist" },
+  abcd_measured_effectiveness: { ko: "ABCD 효과성 점검", en: "ABCD Effectiveness Check" },
+  abcd_source_plan: { ko: "예측 · 브리프 설계 기반", en: "Predicted · plan-based" },
+  abcd_source_scenes: { ko: "실측 · 씬 {n}개 반영", en: "Measured · {n} scenes applied" },
+  abcd_preview_plan: {
+    ko: "브리프 설계값을 기준으로 ABCD 4축이 얼마나 탄탄히 준비됐는지 예측합니다.",
+    en: "Predicts ABCD 4-axis readiness from the current brief plan values.",
+  },
+  abcd_preview_scenes: {
+    ko: "Agent 씬을 반영한 ABCD 4축 실측 점검 — 씬이 갱신되면 D축이 재계산됩니다.",
+    en: "ABCD 4-axis check measured against Agent scenes — D-axis re-scores as scenes evolve.",
+  },
+  abcd_attract: { ko: "Attract · 첫 3초 몰입도", en: "Attract · First 3s Hook" },
+  abcd_brand: { ko: "Brand · 브랜드·제품 노출", en: "Brand · Brand/Product Exposure" },
+  abcd_connect: { ko: "Connect · 감정 연결", en: "Connect · Emotional Link" },
+  abcd_direct: { ko: "Direct · CTA 명확성", en: "Direct · CTA Clarity" },
+  abcd_total: { ko: "종합", en: "Total" },
+  narrative_structure: { ko: "서사 구조 (브랜드 필름)", en: "Narrative Structure (Brand Film)" },
+  controlling_idea: { ko: "Controlling Idea", en: "Controlling Idea" },
+  protagonist: { ko: "주인공 · 욕망 · 변화", en: "Protagonist · Desire · Transformation" },
+  emotional_beats: { ko: "감정 비트", en: "Emotional Beats" },
+  content_type_label: { ko: "콘텐츠 유형", en: "Content Type" },
+};
+
+const CONTENT_TYPE_LABEL: Record<string, { ko: string; en: string; color: string }> = {
+  product_launch: { ko: "상품 런칭", en: "Product Launch", color: "#f59e0b" },
+  event: { ko: "이벤트", en: "Event", color: "#8b5cf6" },
+  update: { ko: "업데이트", en: "Update", color: "#06b6d4" },
+  community: { ko: "커뮤니티", en: "Community", color: "#10b981" },
+  brand_film: { ko: "브랜드 필름", en: "Brand Film", color: "#f9423a" },
 };
 const t = (key: string, lang: Lang) => L[key]?.[lang] ?? key;
 
@@ -867,7 +1003,7 @@ const AccordionCard = ({
     <div
       onClick={onToggle}
       className="flex items-center justify-between cursor-pointer select-none"
-      style={{ padding: "6px 14px" }}
+      style={{ padding: "14px 14px 6px" }}
     >
       <div className="flex items-center gap-2.5">
         <span
@@ -885,7 +1021,7 @@ const AccordionCard = ({
     </div>
     <div
       className="text-xs text-muted-foreground my-0 mx-0 py-[20px] px-[45px] pt-0"
-      style={{ paddingBottom: "4px", lineHeight: 1.3 }}
+      style={{ paddingBottom: isOpen ? "14px" : "10px", lineHeight: 1.4 }}
     >
       {preview}
     </div>
@@ -898,7 +1034,15 @@ const AccordionCard = ({
         transition: "max-height 300ms ease-in-out, opacity 200ms ease-in-out",
       }}
     >
-      <div style={{ padding: "0 14px 12px" }}>{children}</div>
+      <div
+        style={{
+          padding: "14px 14px 14px",
+          borderTop: "1px solid rgba(255,255,255,0.05)",
+          marginTop: 2,
+        }}
+      >
+        {children}
+      </div>
     </div>
   </div>
 );
@@ -924,6 +1068,7 @@ const CoreStrategyUI = ({
   };
   const isStrategyOpen = openSections.has("strategy");
   const isDirectionOpen = openSections.has("direction");
+  const isAbcdOpen = openSections.has("abcd");
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
@@ -943,6 +1088,9 @@ const CoreStrategyUI = ({
 
   const strategyPreview =
     lang === "ko" ? "캠페인 목표 · 타겟 · USP · 메모 분석" : "Campaign Goal · Target · USP · Memo Analysis";
+
+  const abcdPreview = t("abcd_preview_plan", lang);
+  const abcdTitle = t("abcd_design_checklist", lang);
 
   const E = (
     path: string[],
@@ -999,6 +1147,24 @@ const CoreStrategyUI = ({
   return (
     <div>
       <div className="px-1 mb-6">
+        {analysis.content_type && CONTENT_TYPE_LABEL[analysis.content_type] && (
+          <div className="mb-2">
+            <span
+              className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5"
+              title={analysis.classification_reasoning ?? ""}
+              style={{
+                borderRadius: 3,
+                background: `${CONTENT_TYPE_LABEL[analysis.content_type].color}15`,
+                color: CONTENT_TYPE_LABEL[analysis.content_type].color,
+                border: `1px solid ${CONTENT_TYPE_LABEL[analysis.content_type].color}40`,
+              }}
+            >
+              {CONTENT_TYPE_LABEL[analysis.content_type][lang]}
+              {typeof analysis.classification_confidence === "number" &&
+                ` · ${Math.round(analysis.classification_confidence * 100)}%`}
+            </span>
+          </div>
+        )}
         {E(["goal", "summary"], analysis.goal.summary, {
           className: "text-[22px] font-bold text-foreground leading-tight tracking-tight",
         })}
@@ -1298,6 +1464,16 @@ const CoreStrategyUI = ({
           )}
         </div>
       </AccordionCard>
+
+      <AccordionCard
+        index={3}
+        title={abcdTitle}
+        preview={abcdPreview}
+        isOpen={isAbcdOpen}
+        onToggle={() => toggleSection("abcd")}
+      >
+        <AbcdSlideContent analysis={analysis} lang={lang} />
+      </AccordionCard>
     </div>
   );
 };
@@ -1404,16 +1580,28 @@ const SlideUspContent = ({
 };
 
 /* ━━━━━ SlideViewUI — 7-slide carousel for analysis ━━━━━ */
+type SlideGroup = "core" | "direction" | "abcd";
+
 interface SlideDefinition {
   title: string;
   badge: string;
+  group: SlideGroup;
   render: (analysis: DeepAnalysis, lang: Lang, onUpdate?: OnFieldUpdate) => React.ReactNode;
+  /** optional predicate — if present and returns false, slide is filtered out */
+  show?: (analysis: DeepAnalysis) => boolean;
 }
+
+const SLIDE_GROUP_LABEL: Record<SlideGroup, { ko: string; en: string; color: string; bg: string }> = {
+  core: { ko: "핵심 전략", en: "Core Strategy", color: "#f9423a", bg: "rgba(249,66,58,0.08)" },
+  direction: { ko: "연출 가이드", en: "Direction Guide", color: "#888", bg: "rgba(255,255,255,0.04)" },
+  abcd: { ko: "효과성 검증", en: "Effectiveness Check", color: "#10b981", bg: "rgba(16,185,129,0.10)" },
+};
 
 const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
   (lang) => ({
     title: t("campaign_goal", lang),
     badge: "GOAL",
+    group: "core",
     render: (a, l, onU) => (
       <div className="space-y-4">
         <ul className="space-y-1.5">
@@ -1508,6 +1696,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
   (lang) => ({
     title: t("target", lang),
     badge: "TARGET",
+    group: "core",
     render: (a, l, onU) => (
       <div className="space-y-4">
         {onU ? (
@@ -1568,11 +1757,13 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
   (lang) => ({
     title: t("usp", lang),
     badge: "USP",
+    group: "core",
     render: (a, _l, onU) => <SlideUspContent analysis={a} lang={lang} onUpdate={onU} />,
   }),
   (lang) => ({
     title: t("brief_idea_analysis", lang),
     badge: "MEMO",
+    group: "core",
     render: (a, _l, onU) =>
       a.creative_gap ? (
         <div className="space-y-3">
@@ -1629,6 +1820,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
   (lang) => ({
     title: t("visual_direction", lang),
     badge: "VISUAL",
+    group: "direction",
     render: (a, l, onU) =>
       typeof a.tone_manner.visual_direction === "string" ? (
         onU ? (
@@ -1676,6 +1868,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
   (lang) => ({
     title: t("reference_mood", lang),
     badge: "MOOD",
+    group: "direction",
     render: (a, _l, onU) =>
       onU ? (
         <EditableText
@@ -1701,6 +1894,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
   (lang) => ({
     title: t("scene_flow", lang),
     badge: "FLOW",
+    group: "direction",
     render: (a, _l, onU) => (
       <div className="space-y-4">
         <div className="flex items-start">
@@ -1768,7 +1962,155 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
       </div>
     ),
   }),
+  (lang) => ({
+    title: t("narrative_structure", lang),
+    badge: "NARRATIVE",
+    group: "direction",
+    show: (a) => a.content_type === "brand_film" && !!a.narrative,
+    render: (a, l) => <NarrativeSlideContent analysis={a} lang={l} />,
+  }),
+  (lang) => ({
+    title: t("abcd_design_checklist", lang),
+    badge: "ABCD",
+    group: "abcd",
+    render: (a, l) => <AbcdSlideContent analysis={a} lang={l} />,
+  }),
 ];
+
+/* ━━━━━ Narrative (brand_film) Slide ━━━━━ */
+const NarrativeSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: Lang }) => {
+  const n = analysis.narrative;
+  if (!n) return null;
+  return (
+    <div className="space-y-4">
+      <div className="px-4 py-3" style={{ borderRadius: 4, background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}>
+        <Label3>{t("controlling_idea", lang)}</Label3>
+        <p className="text-[14px] text-foreground/90 leading-relaxed italic">"{n.controlling_idea}"</p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="px-3 py-2.5" style={{ borderRadius: 3, background: "rgba(255,255,255,0.03)" }}>
+          <Label3>Story Structure</Label3>
+          <p className="text-[13px] text-foreground/80 font-mono">{n.story_structure}</p>
+        </div>
+        <div className="px-3 py-2.5" style={{ borderRadius: 3, background: "rgba(255,255,255,0.03)" }}>
+          <Label3>{t("protagonist", lang)}</Label3>
+          <p className="text-[12px] text-foreground/80 leading-relaxed">
+            <span className="text-foreground/60">{lang === "ko" ? "정체성" : "Identity"}:</span> {n.protagonist?.identity}
+            <br />
+            <span className="text-foreground/60">{lang === "ko" ? "욕망" : "Desire"}:</span> {n.protagonist?.desire}
+            <br />
+            <span className="text-foreground/60">{lang === "ko" ? "변화" : "Transformation"}:</span> {n.protagonist?.transformation}
+          </p>
+        </div>
+      </div>
+
+      {Array.isArray(n.emotional_beats) && n.emotional_beats.length > 0 && (
+        <div className="px-3 py-2.5" style={{ borderRadius: 3, background: "rgba(255,255,255,0.03)" }}>
+          <Label3>{t("emotional_beats", lang)}</Label3>
+          <div className="space-y-1.5 mt-1">
+            {n.emotional_beats.map((b, i) => (
+              <div key={i} className="flex items-center gap-3 text-[12.5px]">
+                <span className="font-mono text-foreground/50 w-16 shrink-0">{b.timestamp}</span>
+                <span className="text-foreground/85 flex-1">{b.emotion}</span>
+                <div className="flex gap-0.5 items-end h-4 w-16">
+                  {Array.from({ length: 10 }).map((_, idx) => (
+                    <div
+                      key={idx}
+                      className="flex-1 rounded-sm"
+                      style={{
+                        background: idx < b.intensity ? "#f9423a" : "rgba(255,255,255,0.08)",
+                        height: `${30 + idx * 7}%`,
+                      }}
+                    />
+                  ))}
+                </div>
+                <span className="font-mono text-[11px] text-foreground/50 w-6 text-right">{b.intensity}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ━━━━━ ABCD Effectiveness Slide ━━━━━ */
+const AbcdSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: Lang }) => {
+  // 브리프 설계값만으로 채점하는 "설계 체크리스트". 저장된 값이 있으면 사용.
+  const computed = analysis.abcd_compliance ?? scoreABCD({
+    hook_strategy: analysis.hook_strategy,
+    hero_visual: analysis.hero_visual,
+    product_info: analysis.product_info,
+    pacing: analysis.pacing,
+    constraints: analysis.constraints,
+    audience_insight: analysis.audience_insight,
+    visual_direction:
+      typeof analysis.tone_manner?.visual_direction === "object"
+        ? analysis.tone_manner.visual_direction
+        : undefined,
+    reference_mood: analysis.tone_manner?.reference_mood,
+  });
+  const total = computed.total ?? (computed.attract.score + computed.brand.score + computed.connect.score + computed.direct.score);
+  const gradeInfo = gradeABCD(total);
+  const colorMap: Record<typeof gradeInfo.color, string> = {
+    red: "#ef4444",
+    amber: "#f59e0b",
+    lime: "#a3e635",
+    green: "#10b981",
+  };
+  const rows: Array<{ key: "attract" | "brand" | "connect" | "direct"; letter: string; label: string }> = [
+    { key: "attract", letter: "A", label: t("abcd_attract", lang) },
+    { key: "brand", letter: "B", label: t("abcd_brand", lang) },
+    { key: "connect", letter: "C", label: t("abcd_connect", lang) },
+    { key: "direct", letter: "D", label: t("abcd_direct", lang) },
+  ];
+  return (
+    <div className="space-y-4">
+      {rows.map(({ key, letter, label }) => {
+        const row = computed[key];
+        const pct = Math.round((row.score / 10) * 100);
+        return (
+          <div key={key} className="space-y-1.5">
+            <div className="flex items-baseline gap-2">
+              <span className="font-mono text-[13px] font-bold" style={{ color: "#f9423a" }}>{letter}</span>
+              <span className="text-[12px] uppercase tracking-wider text-foreground/70 font-semibold">{label}</span>
+              <span className="ml-auto font-mono text-[13px] text-foreground/80">{row.score}/10</span>
+            </div>
+            <div className="h-2 w-full rounded bg-foreground/10 overflow-hidden">
+              <div
+                className="h-full transition-all"
+                style={{
+                  width: `${pct}%`,
+                  background:
+                    row.score >= 7 ? "#10b981" : row.score >= 5 ? "#a3e635" : row.score >= 3 ? "#f59e0b" : "#ef4444",
+                }}
+              />
+            </div>
+            {row.notes && (
+              <p className="text-[11.5px] leading-relaxed text-muted-foreground/80 pl-4 font-light">{row.notes}</p>
+            )}
+          </div>
+        );
+      })}
+      <div
+        className="mt-4 px-4 py-3 flex items-center justify-between"
+        style={{ borderRadius: 4, background: "rgba(255,255,255,0.03)", border: `1px solid ${colorMap[gradeInfo.color]}40` }}
+      >
+        <div className="flex items-baseline gap-2">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{t("abcd_total", lang)}</span>
+          <span className="font-mono text-[16px] font-bold" style={{ color: colorMap[gradeInfo.color] }}>{total}/40</span>
+        </div>
+        <span
+          className="text-[12px] font-bold uppercase tracking-wider"
+          style={{ color: colorMap[gradeInfo.color] }}
+        >
+          {gradeInfo.grade}
+        </span>
+      </div>
+    </div>
+  );
+};
 
 const SlideViewUI = ({
   analysis,
@@ -1780,9 +2122,10 @@ const SlideViewUI = ({
   onUpdate?: OnFieldUpdate;
 }) => {
   const [slideIndex, setSlideIndex] = useState(0);
-  const slides = SLIDE_DEFS.map((fn) => fn(lang));
+  // show predicate 가 있는 슬라이드는 현재 analysis 에 맞지 않으면 숨긴다
+  const slides = SLIDE_DEFS.map((fn) => fn(lang)).filter((s) => !s.show || s.show(analysis));
   const total = slides.length;
-  const current = slides[slideIndex];
+  const current = slides[Math.min(slideIndex, total - 1)];
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -1798,6 +2141,24 @@ const SlideViewUI = ({
   return (
     <div className="flex flex-col h-full">
       <div className="px-1 mb-4">
+        {analysis.content_type && CONTENT_TYPE_LABEL[analysis.content_type] && (
+          <div className="mb-2">
+            <span
+              className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5"
+              title={analysis.classification_reasoning ?? ""}
+              style={{
+                borderRadius: 3,
+                background: `${CONTENT_TYPE_LABEL[analysis.content_type].color}15`,
+                color: CONTENT_TYPE_LABEL[analysis.content_type].color,
+                border: `1px solid ${CONTENT_TYPE_LABEL[analysis.content_type].color}40`,
+              }}
+            >
+              {CONTENT_TYPE_LABEL[analysis.content_type][lang]}
+              {typeof analysis.classification_confidence === "number" &&
+                ` · ${Math.round(analysis.classification_confidence * 100)}%`}
+            </span>
+          </div>
+        )}
         {onUpdate ? (
           <EditableText
             value={analysis.goal.summary}
@@ -1833,17 +2194,11 @@ const SlideViewUI = ({
               className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5"
               style={{
                 borderRadius: 3,
-                background: slideIndex < 4 ? "rgba(249,66,58,0.08)" : "rgba(255,255,255,0.04)",
-                color: slideIndex < 4 ? "#f9423a" : "#888",
+                background: SLIDE_GROUP_LABEL[current.group].bg,
+                color: SLIDE_GROUP_LABEL[current.group].color,
               }}
             >
-              {slideIndex < 4
-                ? lang === "ko"
-                  ? "핵심 전략"
-                  : "Core Strategy"
-                : lang === "ko"
-                  ? "연출 가이드"
-                  : "Direction Guide"}
+              {SLIDE_GROUP_LABEL[current.group][lang]}
             </span>
             <span className="text-[15px] font-bold text-foreground">{current.title}</span>
           </div>

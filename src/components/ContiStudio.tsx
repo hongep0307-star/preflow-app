@@ -1353,9 +1353,10 @@ export const ContiStudio = ({
                   (v.scenes as Scene[]).some((s) => s.conti_image_url && s.id !== currentScene.id),
                 );
                 const hasAnyContent = sortedMoods.length > 0 || hasSceneImages;
+                const hasExistingConti = !!currentScene.conti_image_url;
                 const onReplaceWithImage = (url: string) => {
                   onSaveInpaint(url);
-                  toast({ title: "Image replaced" });
+                  toast({ title: hasExistingConti ? "Image replaced" : "Set as conti image" });
                   setComparePreviewUrl(null);
                 };
                 const addToEditRefs = (url: string) => {
@@ -1381,17 +1382,19 @@ export const ContiStudio = ({
                               className="px-3 py-1.5 rounded text-[11px] font-semibold text-white transition-colors"
                               style={{ background: KR }}
                             >
-                              Replace
+                              {hasExistingConti ? "Replace" : "Use as Conti"}
                             </button>
-                            <button
-                              onClick={() => addToEditRefs(comparePreviewUrl)}
-                              className="px-3 py-1.5 rounded text-[11px] font-semibold border transition-colors"
-                              style={{ borderColor: "rgba(255,255,255,0.15)", color: "hsl(var(--foreground))" }}
-                            >
-                              <span className="flex items-center gap-1">
-                                <Plus className="w-3 h-3" /> Add to Edit
-                              </span>
-                            </button>
+                            {hasExistingConti && (
+                              <button
+                                onClick={() => addToEditRefs(comparePreviewUrl)}
+                                className="px-3 py-1.5 rounded text-[11px] font-semibold border transition-colors"
+                                style={{ borderColor: "rgba(255,255,255,0.15)", color: "hsl(var(--foreground))" }}
+                              >
+                                <span className="flex items-center gap-1">
+                                  <Plus className="w-3 h-3" /> Add to Edit
+                                </span>
+                              </button>
+                            )}
                           </div>
                         </div>
                       ) : (

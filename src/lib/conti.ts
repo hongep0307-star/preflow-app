@@ -1,4 +1,6 @@
 import { supabase } from "./supabase";
+import type { HeroVisual, HookStrategy, ProductInfo, Constraints } from "@/components/agent/agentTypes";
+import { buildHookMoodAddendum } from "./hookLibrary";
 
 /* ━━━━━ 타입 ━━━━━ */
 type AssetType = "character" | "item" | "background";
@@ -35,6 +37,12 @@ export interface BriefAnalysis {
   usp: BriefField;
   tone_manner: BriefField;
   visual_direction?: string | { camera?: string; lighting?: string; color_grade?: string; editing?: string };
+
+  // ── v2 fields (optional; injected into per-scene image prompt) ──
+  hero_visual?: HeroVisual;
+  hook_strategy?: HookStrategy;
+  product_info?: ProductInfo;
+  constraints?: Constraints;
 }
 
 export type ContiModel = "gpt" | "nano-banana-2";
@@ -419,6 +427,9 @@ const buildContiPrompt = (
   const prevScene = sceneIndex > 0 ? allScenes[sceneIndex - 1] : null;
   const nextScene = sceneIndex < totalScenes - 1 ? allScenes[sceneIndex + 1] : null;
 
+  const isFirstScene = scene.scene_number === 1;
+  const isLastScene = scene.scene_number === totalScenes && totalScenes > 1;
+
   const shotDirective = resolveShotType(scene.scene_number, totalScenes, scene.camera_angle);
 
   const visualDirStr = formatVisualDir(briefAnalysis?.visual_direction);
@@ -462,17 +473,68 @@ Adapt the scene content and characters into this exact composition framework.
   Mood: ${scene.mood || "consistent with campaign tone"}${visualInterpretation}
 ═══════════════════════════════════════`;
 
+  // ── v2 필드 주입 블록 ──
+  const hv = briefAnalysis?.hero_visual;
+  const hs = briefAnalysis?.hook_strategy;
+  const pi = briefAnalysis?.product_info;
+  const constraints = briefAnalysis?.constraints;
+
+  const mustShowBlock =
+    hv?.must_show && hv.must_show.length > 0
+      ? `\n═══ MANDATORY VISIBLE ELEMENTS (from brief hero_visual.must_show) ═══
+${hv.must_show.map((m) => `  • ${sanitizeImagePrompt(m)}`).join("\n")}
+  → At least these elements MUST be clearly visible or implied in-frame.
+═══════════════════════════════════════════`
+      : "";
+
+  const firstFrameBlock =
+    isFirstScene && (hv?.first_frame || hs?.primary)
+      ? `\n═══ FIRST-FRAME HOOK (scene 1 only) ═══${
+          hv?.first_frame ? `\nOpening frame visual intent: ${sanitizeImagePrompt(hv.first_frame)}` : ""
+        }${
+          hs?.primary
+            ? `\nHook type: ${hs.primary} — mood keywords: ${buildHookMoodAddendum(hs.primary)}`
+            : ""
+        }${
+          hv?.brand_reveal_timing === "0-3s" || hv?.product_reveal_timing === "0-3s"
+            ? `\nBrand/product MUST be visibly established in this frame (first 3 seconds exposure rule).`
+            : ""
+        }
+═══════════════════════════════════════════`
+      : "";
+
+  const ctaBlock =
+    isLastScene && pi && (pi.cta_action || pi.cta_destination)
+      ? `\n═══ FINAL-SCENE CTA HINT (last scene only) ═══${
+          pi.cta_action ? `\nCTA call: "${sanitizeImagePrompt(pi.cta_action)}"` : ""
+        }${pi.cta_destination ? `\nDirects viewer to: ${sanitizeImagePrompt(pi.cta_destination)}` : ""}
+  → Compose frame to visually imply the CTA moment (product hero shot, emotional peak, or clear directional cue).
+  → Do NOT render CTA text inside the image itself (text will be overlaid later).
+═══════════════════════════════════════════`
+      : "";
+
+  const negativePromptBlock =
+    constraints?.avoid && constraints.avoid.length > 0
+      ? `\n═══ NEGATIVE PROMPT — AVOID ═══
+${constraints.avoid.map((v) => `  ✗ ${sanitizeImagePrompt(v)}`).join("\n")}
+═══════════════════════════════════════════`
+      : "";
+
   return [
     `Create a single cinematic storyboard frame for a commercial advertisement.`,
     moodRefNote,
     `\n${shotDirective}\n`,
     sceneDetail,
+    firstFrameBlock,
+    mustShowBlock,
+    ctaBlock,
     assetSection
       ? `\n═══ ASSET REQUIREMENTS (HIGHEST PRIORITY) ═══\n${assetSection}\n═══════════════════════════════════════════`
       : "",
     briefContext,
     flowContext,
     styleRules,
+    negativePromptBlock,
   ]
     .filter(Boolean)
     .join("\n");
@@ -541,13 +603,18 @@ export const generateConti = async ({
   const assetImageUrls = buildAssetImageUrls(taggedAssets, styleImageUrl, moodReferenceUrl);
   const assetSection = buildAssetSections(taggedAssets, assetImageUrls.length > 0);
 
-  const safeBrief = briefAnalysis
+  const safeBrief: BriefAnalysis | null = briefAnalysis
     ? {
         goal: fieldToArray(briefAnalysis.goal).map(sanitizeImagePrompt),
         target: fieldToArray(briefAnalysis.target).map(sanitizeImagePrompt),
         usp: fieldToArray(briefAnalysis.usp).map(sanitizeImagePrompt),
         tone_manner: fieldToArray(briefAnalysis.tone_manner).map(sanitizeImagePrompt),
         visual_direction: briefAnalysis.visual_direction,
+        // v2 fields — 통과시켜 buildContiPrompt 가 활용. sanitize 는 첫프레임/CTA 시점에 국소 적용.
+        hero_visual: briefAnalysis.hero_visual,
+        hook_strategy: briefAnalysis.hook_strategy,
+        product_info: briefAnalysis.product_info,
+        constraints: briefAnalysis.constraints,
       }
     : null;
 

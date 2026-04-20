@@ -1099,16 +1099,32 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
             <Plus className="w-3.5 h-3.5" />
             {TYPE_META[activeType].addLabel}
           </Button>
-          {onSwitchToAgent && (
-            <Button
-              onClick={onSwitchToAgent}
-              className="gap-1.5 text-[11px] font-medium tracking-wider border-none h-8 px-3"
-              style={{ background: "rgba(249,66,58,0.1)", color: KR, borderRadius: 0 }}
-            >
-              Go to Agents
-              <ArrowRight className="w-3 h-3" />
-            </Button>
-          )}
+          {onSwitchToAgent && (() => {
+            const hasAssets = assets.length > 0;
+            return (
+              <Button
+                onClick={onSwitchToAgent}
+                title={
+                  hasAssets
+                    ? undefined
+                    : "에셋 없이도 이동 가능 — 채팅으로 먼저 스토리를 다듬어도 돼요"
+                }
+                className="gap-1.5 text-[11px] font-medium tracking-wider border-none h-8 px-3"
+                style={
+                  hasAssets
+                    ? { background: "rgba(249,66,58,0.1)", color: KR, borderRadius: 0 }
+                    : {
+                        background: "hsl(var(--muted))",
+                        color: "hsl(var(--muted-foreground))",
+                        borderRadius: 0,
+                      }
+                }
+              >
+                Go to Agents
+                <ArrowRight className="w-3 h-3" />
+              </Button>
+            );
+          })()}
         </div>
       </div>
 

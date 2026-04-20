@@ -113,7 +113,7 @@
       "dist-electron/**/*"
     ],
     "win": {
-      "target": "nsis",
+      "target": ["nsis", "portable"],
       "icon": "public/favicon.ico"
     },
     "mac": {

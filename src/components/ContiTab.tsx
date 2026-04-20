@@ -3534,6 +3534,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                           }
                           isUploading={uploadingSceneIds.has(scene.id)}
                           isStyleTransferring={styleTransferringIds.has(scene.id)}
+                          isStyleTransferFlow={styleTransferring}
                           isQueued={
                             queuedSceneIds.has(scene.id) &&
                             (!generatingVersionId || generatingVersionId === activeVersionId)
@@ -3546,7 +3547,9 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                           selected={selectedSceneIds.has(scene.id)}
                           hasMultipleVersions={versions.length > 1}
                           onClickImage={() => {
-                            setStudioInitialTab(undefined);
+                            // 콘티 이미지가 없는 씬은 Compare 탭으로 열어서 mood 이미지를
+                            // 즉시 확인하고 "Use as Conti" 로 활용할 수 있도록 한다.
+                            setStudioInitialTab(scene.conti_image_url ? undefined : "compare");
                             setStudioScene(scene);
                           }}
                           onGenerate={() => handleGenerate(scene)}

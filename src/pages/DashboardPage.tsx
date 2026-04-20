@@ -42,6 +42,12 @@ export interface Project {
 export interface SceneStats {
   total: number;
   withConti: number;
+  /** 콘티 탭에 작업 중인 씬이 있는지 (scenes.source = 'conti') */
+  hasContiScenes?: boolean;
+  /** Agent 스토리보드에 씬 카드가 있는지 (scenes.source = 'agent') */
+  hasAgentScenes?: boolean;
+  /** Agent 에서 저장된 스토리보드 드래프트 버전이 있는지 */
+  hasDraftVersion?: boolean;
 }
 export interface Folder {
   id: string;
@@ -349,12 +355,29 @@ const DashboardPage = () => {
       if (pData?.length) {
         const ids = pData.map((p) => p.id);
         const [{ data: sc }, { data: sv }] = await Promise.all([
-          supabase.from("scenes").select("project_id, conti_image_url, is_transition").in("project_id", ids),
+          supabase
+            .from("scenes")
+            .select("project_id, conti_image_url, is_transition, source")
+            .in("project_id", ids),
           supabase.from("scene_versions").select("id, project_id, scenes").in("project_id", ids),
         ]);
         const statsMap = pData.reduce(
           (acc, p) => {
             const activeVersionId = (p as any).active_version_id;
+
+            // 탭 결정용 보유 여부 (버전 우선 순위와 독립)
+            // hasContiScenes: scenes 테이블 또는 scene_versions 어디서든 conti_image_url 이 세팅된
+            //                 씬이 하나라도 있으면 콘티 작업 존재로 간주 (source 값과 무관)
+            const projScenes = sc?.filter((s) => s.project_id === p.id) ?? [];
+            const projVersions = sv?.filter((v) => v.project_id === p.id) ?? [];
+            const hasContiInScenesTable = projScenes.some((s: any) => !!s.conti_image_url);
+            const hasContiInVersions = projVersions.some((v: any) => {
+              const arr = Array.isArray(v.scenes) ? v.scenes : [];
+              return arr.some((s: any) => !!s?.conti_image_url);
+            });
+            const hasContiScenes = hasContiInScenesTable || hasContiInVersions;
+            const hasAgentScenes = projScenes.some((s: any) => s.source === "agent");
+            const hasDraftVersion = projVersions.length > 0;
 
             // 1순위: active_version_id 기준
             if (activeVersionId) {
@@ -366,6 +389,9 @@ const DashboardPage = () => {
                   acc[p.id] = {
                     total: scenes.length,
                     withConti: scenes.filter((s: any) => s.conti_image_url).length,
+                    hasContiScenes,
+                    hasAgentScenes,
+                    hasDraftVersion,
                   };
                   return acc;
                 }
@@ -373,11 +399,14 @@ const DashboardPage = () => {
             }
 
             // 2순위: scenes 테이블
-            const ps = sc?.filter((s) => s.project_id === p.id && !s.is_transition) ?? [];
+            const ps = projScenes.filter((s) => !s.is_transition);
             if (ps.length > 0) {
               acc[p.id] = {
                 total: ps.length,
                 withConti: ps.filter((s) => s.conti_image_url).length,
+                hasContiScenes,
+                hasAgentScenes,
+                hasDraftVersion,
               };
               return acc;
             }
@@ -391,9 +420,18 @@ const DashboardPage = () => {
               acc[p.id] = {
                 total: scenes.length,
                 withConti: scenes.filter((s: any) => s.conti_image_url).length,
+                hasContiScenes,
+                hasAgentScenes,
+                hasDraftVersion,
               };
             } else {
-              acc[p.id] = { total: 0, withConti: 0 };
+              acc[p.id] = {
+                total: 0,
+                withConti: 0,
+                hasContiScenes,
+                hasAgentScenes,
+                hasDraftVersion,
+              };
             }
             return acc;
           },
