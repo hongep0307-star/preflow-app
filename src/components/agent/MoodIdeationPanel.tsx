@@ -516,24 +516,18 @@ export const MoodIdeationPanel = ({
             model: moodModel,
           },
           (batchUrls) => {
-            // 1) 모듈 store 의 arrivedUrls 갱신 + listener 통지
-            //    → AgentTab 의 mood gen 구독 effect 가 setMoodImages 를 호출해 새 URL 을 반영
+            // 모듈 store 의 arrivedUrls 갱신 + listener 통지.
+            // AgentTab 의 mood gen 구독 effect(subscribeMoodGen) 가 이 patch 를 받아
+            // skeletonIds + arrivedUrls 를 기준으로 moodImages 를 일관되게 재구성한다.
+            //
+            // NOTE: 로컬에서 setMoodImages 로 null 을 url 로 바꾸는 추가 작업은
+            //       일부러 하지 않는다. 구독자와 로컬 setter 가 동시에 업데이트하면
+            //       batch 2+ 시점에 "첫 번째 null 슬롯"을 서로 다르게 해석해서
+            //       같은 URL 이 두 슬롯에 중복 기록되는 버그가 있었음.
             const cur = getMoodGen(projectId);
             if (cur) {
               patchMoodGen(projectId, { arrivedUrls: [...cur.arrivedUrls, ...batchUrls] });
             }
-            // 2) (현재 마운트된 인스턴스 한정) 로컬 setMoodImages 도 즉시 반영 — UI 지연 최소화용 fallback
-            setMoodImages((prev) => {
-              const next = [...prev];
-              let replaced = 0;
-              for (let i = 0; i < next.length && replaced < batchUrls.length; i++) {
-                if (next[i].url === null) {
-                  next[i] = { ...next[i], url: batchUrls[replaced] };
-                  replaced++;
-                }
-              }
-              return next;
-            });
           },
         );
         // 완료: 남아있는 null placeholder 제거 후 저장
