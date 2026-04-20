@@ -1,0 +1,236 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ── 배경 / 전경 ── */
+    --background: 0 0% 4%; /* #0a0a0a */
+    --foreground: 0 0% 94%; /* #f0f0f0 */
+
+    /* ── 카드 ── */
+    --card: 0 0% 8%; /* #141414 */
+    --card-foreground: 0 0% 94%;
+    --popover: 0 0% 8%;
+    --popover-foreground: 0 0% 94%;
+
+    /* ── Primary → KR Red ── */
+    --primary: 2 95% 60%; /* #f9423a */
+    --primary-foreground: 0 0% 100%;
+
+    /* ── Secondary / Muted ── */
+    --secondary: 0 0% 11%; /* #1c1c1c */
+    --secondary-foreground: 0 0% 60%;
+    --muted: 0 0% 11%;
+    --muted-foreground: 0 0% 35%; /* #5a5a5a */
+
+    /* ── Accent ── */
+    --accent: 0 0% 11%;
+    --accent-foreground: 0 0% 94%;
+
+    /* ── Destructive ── */
+    --destructive: 0 84% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* ── Border / Input / Ring ── */
+    --border: 0 0% 100% / 0.07;
+    --input: 0 0% 11%; /* #1c1c1c */
+    --ring: 2 95% 60% / 0.5;
+
+    /* ── Radius ── */
+    --radius: 0px;
+
+    /* ── Sidebar ── */
+    --sidebar-background: 0 0% 5%;
+    --sidebar-foreground: 0 0% 60%;
+    --sidebar-primary: 2 95% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 0 0% 11%;
+    --sidebar-accent-foreground: 0 0% 94%;
+    --sidebar-border: 0 0% 100% / 0.07;
+    --sidebar-ring: 2 95% 60%;
+
+    /* ── Elevated surface ── */
+    --surface-elevated: 0 0% 11%; /* #1c1c1c */
+
+    /* ── Text secondary ── */
+    --text-secondary: 0 0% 60%; /* #999 */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    /* Pretendard Variable: 한/영 통합, 가변 폰트로 모든 weight 커버 */
+    font-family:
+      "Pretendard Variable",
+      Pretendard,
+      -apple-system,
+      BlinkMacSystemFont,
+      system-ui,
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-wrap: pretty;
+  }
+
+  /* 스크롤바 — thin dark */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 2px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  /* Focus ring */
+  *:focus-visible {
+    outline: 1px solid hsl(2 95% 60% / 0.5);
+    outline-offset: 1px;
+  }
+}
+
+@layer components {
+  /* ── 카드 ── */
+  .surface-card {
+    @apply bg-card rounded-lg;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    transition:
+      border-color 200ms ease,
+      background-color 200ms ease;
+  }
+  .surface-card:hover {
+    border-color: rgba(249, 66, 58, 0.25);
+    background-color: hsl(var(--surface-elevated));
+  }
+
+  /* ── 탭 ── */
+  .tab-item {
+    @apply relative flex items-center gap-2 px-4 py-3 text-sm transition-all duration-150 cursor-pointer;
+    @apply text-muted-foreground hover:text-foreground;
+    border-bottom: 2px solid transparent;
+  }
+  .tab-item.active {
+    @apply text-foreground font-semibold;
+    border-bottom-color: hsl(var(--primary));
+  }
+
+  /* ── Elevated surface ── */
+  .surface-elevated {
+    background: hsl(var(--surface-elevated));
+  }
+
+  /* ── 메타데이터 라벨 ── */
+  /* Space Grotesk 제거 → Pretendard Variable 통일 */
+  .label-meta {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    color: hsl(var(--muted-foreground));
+  }
+
+  /* ── 기술값 모노스페이스 ── */
+  /* 버전 번호, 타임스탬프, 해상도(16:9) 등 기술적 수치에만 사용 */
+  .mono {
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+  }
+
+  /* ── 로딩 스켈레톤 시머 애니메이션 ── */
+  @keyframes shimmer {
+    0% {
+      background-position: -200% 0;
+    }
+    100% {
+      background-position: 200% 0;
+    }
+  }
+  .skeleton-shimmer {
+    background: linear-gradient(90deg, hsl(var(--muted)) 25%, hsl(0 0% 16%) 50%, hsl(var(--muted)) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.8s ease-in-out infinite;
+  }
+
+  /* ── 페이드 인 애니메이션 ── */
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-out forwards;
+  }
+
+  /* ── 이미지 로딩 트랜지션 ── */
+  .img-lazy {
+    opacity: 0;
+    transition: opacity 0.3s ease-in;
+  }
+  .img-lazy.loaded {
+    opacity: 1;
+  }
+
+  /* ── 구분선 ── */
+  .divider {
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+}
+
+/* ── 오로라 배경 키프레임 ── */
+@keyframes auroraTop {
+  0%,
+  100% {
+    transform: translateY(0) scaleX(1);
+  }
+  50% {
+    transform: translateY(3%) scaleX(1.03);
+  }
+}
+
+@keyframes auroraBottom {
+  0%,
+  100% {
+    transform: translateY(0) scaleX(1);
+  }
+  50% {
+    transform: translateY(-3%) scaleX(1.04);
+  }
+}
+
+@keyframes auroraMid {
+  0%,
+  100% {
+    transform: translateY(0) scaleX(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translateY(-2%) scaleX(1.06);
+    opacity: 0.7;
+  }
+}
+
+@keyframes shimmerSweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}

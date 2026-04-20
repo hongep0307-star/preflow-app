@@ -1,0 +1,3334 @@
+import { useEffect, useState, useRef, useCallback } from "react";
+import { supabase } from "@/lib/supabase";
+import { callClaude } from "@/lib/claude";
+import { useToast } from "@/hooks/use-toast";
+import { toast as sonnerToast } from "sonner";
+import {
+  BarChart3,
+  CheckCircle,
+  Copy,
+  ImagePlus,
+  X,
+  Plus,
+  FileText,
+  AlertCircle,
+  ChevronDown,
+  ChevronRight,
+  RefreshCw,
+  LayoutList,
+  GalleryHorizontalEnd,
+  ChevronLeft,
+  GripVertical,
+} from "lucide-react";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import {
+  SortableContext,
+  verticalListSortingStrategy,
+  useSortable,
+  arrayMove,
+  type AnimateLayoutChanges,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
+/* ━━━━━ localStorage 키 ━━━━━ */
+const LS_KEY = (pid: string) => `ff_brief_draft_${pid}`;
+
+/* ━━━━━ localStorage 직렬화용 이미지 타입 (File 제외) ━━━━━ */
+interface SerializableImage {
+  base64: string;
+  mediaType: string;
+}
+
+interface PersistedDraft {
+  briefText: string;
+  ideaNote: string;
+  briefImages: SerializableImage[];
+  refImages: SerializableImage[];
+  pdfState: "idle" | "extracting" | "ready" | "error";
+  pdfExtractedText: string;
+  pdfFileName: string;
+  pdfFileSize: number;
+  pdfPageInfo: { pages: number; chars: number } | null;
+}
+
+const getDefaultPersisted = (): PersistedDraft => ({
+  briefText: "",
+  ideaNote: "",
+  briefImages: [],
+  refImages: [],
+  pdfState: "idle",
+  pdfExtractedText: "",
+  pdfFileName: "",
+  pdfFileSize: 0,
+  pdfPageInfo: null,
+});
+
+const loadFromLS = (pid: string): PersistedDraft => {
+  try {
+    const raw = localStorage.getItem(LS_KEY(pid));
+    if (!raw) return getDefaultPersisted();
+    return { ...getDefaultPersisted(), ...JSON.parse(raw) };
+  } catch {
+    return getDefaultPersisted();
+  }
+};
+
+const saveToLS = (pid: string, draft: PersistedDraft) => {
+  try {
+    localStorage.setItem(LS_KEY(pid), JSON.stringify(draft));
+  } catch (e) {
+    try {
+      localStorage.setItem(LS_KEY(pid), JSON.stringify({ ...draft, briefImages: [], refImages: [] }));
+    } catch {}
+  }
+};
+
+/* ━━━━━ 모듈 레벨 Map — 탭 전환 시 성능용 캐시 ━━━━━ */
+interface DraftState {
+  briefText: string;
+  ideaNote: string;
+  briefImages: ImageItem[];
+  refImages: ImageItem[];
+  pdfState: "idle" | "extracting" | "ready" | "error";
+  pdfExtractedText: string;
+  pdfFileName: string;
+  pdfFileSize: number;
+  pdfPageInfo: { pages: number; chars: number } | null;
+}
+const _draftByProject = new Map<string, DraftState>();
+
+const getDefaultDraft = (): DraftState => ({
+  briefText: "",
+  ideaNote: "",
+  briefImages: [],
+  refImages: [],
+  pdfState: "idle",
+  pdfExtractedText: "",
+  pdfFileName: "",
+  pdfFileSize: 0,
+  pdfPageInfo: null,
+});
+
+/* ━━━━━ 이미지 타입 (런타임용) ━━━━━ */
+interface ImageItem {
+  file?: File;
+  base64: string;
+  mediaType: string;
+  preview: string;
+}
+
+/* ━━━━━ base64 → data URL 프리뷰 ━━━━━ */
+const toDataUrl = (base64: string, mediaType: string) => `data:${mediaType};base64,${base64}`;
+
+/* ━━━━━ localStorage → ImageItem 변환 ━━━━━ */
+const fromSerializable = (imgs: SerializableImage[]): ImageItem[] =>
+  imgs.map((img) => ({
+    base64: img.base64,
+    mediaType: img.mediaType,
+    preview: toDataUrl(img.base64, img.mediaType),
+  }));
+
+/* ━━━━━ ImageItem → SerializableImage 변환 ━━━━━ */
+const toSerializable = (imgs: ImageItem[]): SerializableImage[] =>
+  imgs.map(({ base64, mediaType }) => ({ base64, mediaType }));
+
+/* ━━━━━ Types ━━━━━ */
+interface VisualDirectionStructured {
+  camera: string;
+  lighting: string;
+  color_grade: string;
+  editing: string;
+}
+interface SceneFlowStructured {
+  structure: string;
+  total_scenes: string;
+  hook: { duration: string; description: string };
+  body: { duration: string; description: string };
+  cta: { duration: string; description: string };
+}
+interface UspItem {
+  keyword: string;
+  comparison: string;
+}
+interface DeepAnalysis {
+  goal: {
+    summary: string;
+    items: string[];
+    kpi_hint: string;
+    core_message?: string;
+    success_criteria?: string;
+    desired_action?: string;
+  };
+  target: { summary: string; primary: string[]; insight: string; media_behavior: string };
+  usp: { summary: string; items: string[] | UspItem[]; competitive_edge: string; message_hierarchy: string };
+  tone_manner: {
+    summary: string;
+    keywords: string[];
+    visual_direction: string | VisualDirectionStructured;
+    reference_mood: string;
+    do_not: string;
+  };
+  production_notes: {
+    format_recommendation: string;
+    shooting_style: string;
+    scene_count_hint: string | SceneFlowStructured;
+    budget_efficiency: string;
+  };
+  idea_note?: string;
+  image_analysis?: string;
+  creative_gap?: { synergy: string[]; gap: string[]; recommendation: string };
+}
+interface LegacyAnalysis {
+  goal: string[];
+  target: string[];
+  usp: string[];
+  tone_manner: string[];
+}
+type Analysis = DeepAnalysis | LegacyAnalysis;
+function isDeepAnalysis(a: Analysis): a is DeepAnalysis {
+  return a.goal && typeof a.goal === "object" && !Array.isArray(a.goal);
+}
+interface Brief {
+  id: string;
+  raw_text: string | null;
+  analysis: Analysis | null;
+  created_at: string;
+  source_type: string | null;
+  image_urls: string[] | null;
+}
+interface Props {
+  projectId: string;
+  onSwitchToAgent: (lang: "ko" | "en") => void;
+  onSwitchToAssets?: () => void;
+}
+
+/* ━━━━━ Helpers ━━━━━ */
+const fileToBase64 = (file: File): Promise<string> =>
+  new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res((r.result as string).split(",")[1]);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+
+const DEEP_ANALYSIS_SYSTEM_PROMPT = `당신은 칸 광고제 황금사자상 수상 경력의 시니어 아트 디렉터 겸 크리에이티브 디렉터입니다. 주어진 광고 브리프를 철저히 분석하여 실제 제작에 바로 활용할 수 있는 심층 전략 리포트를 작성하세요.
+
+반드시 아래 JSON 형식으로만 응답하세요. JSON 외 텍스트는 절대 포함하지 마세요.
+
+{
+  "goal": { "summary": "핵심 목표 한 줄 요약", "items": ["구체적 목표1", "목표2", "목표3"], "kpi_hint": "KPI 제안", "core_message": "이 캠페인이 전달해야 할 단 하나의 핵심 메시지 (15단어 이내, 태그라인처럼)", "success_criteria": "구체적 수치 포함 성공 기준 2-3개 (예: 영상 완주율 60% 이상, CTR 15% 이상)", "desired_action": "시청자가 취해야 할 구체적 행동 단계 2-3단계 퍼널 (예: 링크 클릭 → 페이지 방문 → 구매)" },
+  "target": { "summary": "타겟 한 줄 요약", "primary": ["1차 타겟 항목1", "항목2", "항목3"], "insight": "심리적 욕구와 페인 포인트", "media_behavior": "미디어/플랫폼 행동 패턴" },
+  "usp": {
+    "summary": "핵심 차별점 한 줄",
+    "items": [
+      { "keyword": "2-4 word differentiator", "comparison": "기존/경쟁 콘텐츠는 ~인데, 이건 ~라서 다르다 (구체적 비교 1문장)" },
+      { "keyword": "...", "comparison": "..." },
+      { "keyword": "...", "comparison": "..." }
+    ],
+    "competitive_edge": "독보적 강점",
+    "message_hierarchy": "1순위 → 2순위 → 3순위"
+  },
+  "tone_manner": {
+    "summary": "톤앤매너 한 줄",
+    "keywords": ["키워드1", "키워드2", "키워드3", "키워드4"],
+    "visual_direction": {
+      "camera": "Specific camera techniques, movements, angles",
+      "lighting": "Light sources, quality, direction",
+      "color_grade": "Grading approach, saturation, contrast",
+      "editing": "Cut rhythm, transition style, pacing"
+    },
+    "reference_mood": "레퍼런스 무드",
+    "do_not": "절대 피해야 할 요소"
+  },
+  "production_notes": {
+    "format_recommendation": "권장 포맷과 길이",
+    "shooting_style": "촬영 스타일",
+    "scene_count_hint": {
+      "structure": "HOOK → BODY → CTA",
+      "total_scenes": "3-5개 씬",
+      "hook": { "duration": "3-5초", "description": "구체적 오프닝 장면 묘사" },
+      "body": { "duration": "15-20초", "description": "핵심 내러티브 비트와 구체적 샷 제안" },
+      "cta": { "duration": "5-8초", "description": "구체적 엔딩 비주얼/액션 묘사" }
+    },
+    "budget_efficiency": "제작 효율 조언"
+  }
+}
+
+CRITICAL QUALITY RULES:
+
+For usp.items, each item MUST include:
+- keyword: 2-4 word differentiator
+- comparison: One concrete sentence explaining how existing/competing content does it differently, and why this approach is better. Be specific about the competitor behavior, not vague.
+Do NOT use generic words like "현장감" or "사실성" alone — always ground them in a specific competitive comparison.
+
+For visual_direction, you MUST provide 4 separate sub-fields:
+- camera: Specific camera techniques, movements, angles. NOT generic terms like "cinematic" — describe actual techniques.
+- lighting: Light sources, quality, direction. If natural light, specify conditions. If artificial, specify style.
+- color_grade: Grading approach, saturation, contrast. Reference specific looks if applicable.
+- editing: Cut rhythm, transition style, pacing. Mention specific editing techniques.
+Each sub-field must be 1-2 specific, actionable sentences.
+
+For reference_mood, do NOT list genre categories. Instead describe specific visual/audio moods as if directing a DP:
+Example BAD: "다큐멘터리 현장감, 브레이킹 뉴스"
+Example GOOD: "라이브 스트림 화면에 시청자 채팅이 겹치는 느낌. 현장 사이렌 소리+바람 소리가 그대로 깔린 무편집 오디오. CCTV 녹화본처럼 타임스탬프 오버레이가 있는 화면"
+Write 2-3 sentences of vivid, sensory mood description.
+
+For scene_count_hint (scene_flow), provide structured per-section guidance:
+- hook: Specific opening scene suggestion with visual description (what the audience sees first). Include duration.
+- body: Key narrative beats with specific shot suggestions. Include duration.
+- cta: Closing approach with specific visual/action description. Include duration.
+Each section's description must be a concrete visual scene suggestion, NOT abstract strategy. Write as if you're a director giving shot-by-shot guidance to a cinematographer.
+
+For goal.core_message, write a punchy, memorable one-liner (15 words max) that could work as a campaign tagline. NOT a description of the goal — a message TO the audience.
+
+For goal.success_criteria, include 2-3 specific measurable benchmarks with actual target numbers. NOT just KPI names — include values like "완주율 60% 이상, CTR 15% 이상". Separate each criterion with a comma.
+
+For goal.desired_action, write a clear 2-3 step funnel using → arrows. Example: "영상 내 링크 클릭 → 스킨 프리뷰 페이지 → 한정 스킨 구매 완료"
+
+아이디어 메모가 함께 제공된 경우 위 JSON에 추가:
+{ "idea_note": "원본 메모", "creative_gap": { "synergy": ["시너지 2~3개"], "gap": ["간극 (없으면 빈 배열)"], "recommendation": "CD 한마디 제언" } }`;
+
+const LANG_DIRECTIVE_KO = `CRITICAL LANGUAGE RULE: ALL output fields must be written in Korean (한국어). This includes visual_direction (camera, lighting, color_grade, editing), reference_mood, scene_count_hint descriptions, usp comparisons, and every other text field. Do NOT mix English into Korean analysis. Only use English for proper nouns, technical terms (e.g. POV, HUD, CCTV), or universally understood abbreviations.\n\n`;
+const LANG_DIRECTIVE_EN = `CRITICAL LANGUAGE RULE: ALL output fields must be written in English. Do NOT use Korean in any field.\n\n`;
+
+const analyzeBriefText = async (briefText: string, lang: Lang = "ko"): Promise<DeepAnalysis> => {
+  const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
+  const data = await callClaude({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 3000,
+    system: langDirective + DEEP_ANALYSIS_SYSTEM_PROMPT,
+    messages: [{ role: "user", content: `다음 브리프를 분석해주세요:\n\n${briefText}` }],
+  });
+  return JSON.parse(data.content[0].text.replace(/```json\n?|\n?```/g, "").trim());
+};
+
+const analyzeBriefWithImages = async (
+  images: Array<{ base64: string; mediaType: string }>,
+  additionalText: string,
+  lang: Lang = "ko",
+): Promise<DeepAnalysis> => {
+  const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
+  const contentArray: any[] = [];
+  images.forEach((img, i) => {
+    contentArray.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.base64 } });
+    if (images.length > 1) contentArray.push({ type: "text", text: `위 이미지는 브리프 ${i + 1}번째 장면입니다.` });
+  });
+  contentArray.push({
+    type: "text",
+    text: `이 이미지(들)는 광고 브리프입니다.${additionalText ? `\n\n추가 설명: ${additionalText}` : ""}`,
+  });
+  const data = await callClaude({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 3000,
+    system:
+      langDirective + DEEP_ANALYSIS_SYSTEM_PROMPT + "\n\n이미지 안의 모든 시각적 정보를 빠짐없이 읽고 분석하세요.",
+    messages: [{ role: "user", content: contentArray }],
+  });
+  return JSON.parse(data.content[0].text.replace(/```json\n?|\n?```/g, "").trim());
+};
+
+/* ━━━━━ i18n 라벨 맵 ━━━━━ */
+type Lang = "ko" | "en";
+const L: Record<string, Record<Lang, string>> = {
+  core_strategy: { ko: "핵심 전략", en: "Core Strategy" },
+  production_guide: { ko: "제작 가이드", en: "Production Guide" },
+  campaign_goal: { ko: "캠페인 목표", en: "Campaign Goal" },
+  target: { ko: "타겟", en: "Target" },
+  target_audience: { ko: "타겟 오디언스", en: "Target Audience" },
+  usp: { ko: "USP · 핵심 차별점", en: "USP · Key Differentiator" },
+  tone_manner: { ko: "톤앤매너", en: "Tone & Manner" },
+  prod_notes: { ko: "제작 노트", en: "Prod Notes" },
+  brief_idea_analysis: { ko: "브리프 × 아이디어 메모 분석", en: "Brief × Idea Memo Analysis" },
+  kpi_hint: { ko: "KPI 힌트", en: "KPI Hint" },
+  core_message: { ko: "핵심 메시지", en: "Core Message" },
+  success_criteria: { ko: "성공 기준", en: "Success Criteria" },
+  desired_action: { ko: "핵심 액션", en: "Desired Action" },
+  psychological_insight: { ko: "심리적 인사이트", en: "Psychological Insight" },
+  media_behavior: { ko: "미디어 행동", en: "Media Behavior" },
+  competitive_edge: { ko: "경쟁 우위", en: "Competitive Edge" },
+  visual_direction: { ko: "비주얼 방향", en: "Visual Direction" },
+  reference_mood: { ko: "레퍼런스 무드", en: "Reference Mood" },
+  do_not: { ko: "금지 사항", en: "Do Not" },
+  format: { ko: "포맷", en: "Format" },
+  shooting_style: { ko: "촬영 스타일", en: "Shooting Style" },
+  scene_flow: { ko: "씬 흐름", en: "Scene Flow" },
+  budget_efficiency: { ko: "예산 효율", en: "Budget Efficiency" },
+};
+const t = (key: string, lang: Lang) => L[key]?.[lang] ?? key;
+
+/* ━━━━━ UI 서브 컴포넌트 (Dark Theme) ━━━━━ */
+const SectionCard = ({
+  children,
+  className = "",
+  style,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  style?: React.CSSProperties;
+}) => (
+  <div
+    className={`bg-elevated border border-border overflow-hidden ${className}`}
+    style={{ borderRadius: 4, ...style }}
+  >
+    {children}
+  </div>
+);
+
+type DotVariant = "red" | "black" | "gray";
+
+const SectionHeader = ({ dot, label }: { dot: DotVariant; label: string; tag?: string }) => (
+  <div
+    className="flex items-center gap-2 px-3 py-2.5 border-b border-border"
+    style={{ background: dot === "red" ? "rgba(249,66,58,0.06)" : "rgba(255,255,255,0.02)" }}
+  >
+    <span
+      className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot === "red" ? "bg-primary" : dot === "black" ? "bg-foreground" : "bg-muted-foreground"}`}
+    />
+    <span className="text-[12px] font-bold uppercase tracking-wider text-foreground">{label}</span>
+  </div>
+);
+
+const BulletList = ({ items, dot = "red" }: { items: string[]; dot?: "red" | "black" }) => (
+  <ul className="space-y-1.5">
+    {items.map((item, i) => (
+      <li key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-muted-foreground">
+        <span className={`w-1 h-1 rounded-full shrink-0 mt-[7px] ${dot === "red" ? "bg-primary" : "bg-foreground"}`} />
+        {item}
+      </li>
+    ))}
+  </ul>
+);
+
+const SubCard = ({ label, value }: { label: string; value: string }) => (
+  <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+    <p className="label-meta text-muted-foreground mb-1">{label}</p>
+    <div className="text-[13px] leading-relaxed text-foreground/80 space-y-1">
+      {value
+        .split(/(?<=[.。!?])\s+/)
+        .filter((s) => s.trim())
+        .map((sentence, i) => (
+          <p key={i}>{sentence.trim()}</p>
+        ))}
+    </div>
+  </div>
+);
+
+const CreativeGapSection = ({
+  gap,
+  lang = "ko",
+  onUpdate,
+}: {
+  gap: DeepAnalysis["creative_gap"];
+  lang?: Lang;
+  onUpdate?: OnFieldUpdate;
+}) => {
+  if (!gap) return null;
+  return (
+    <SectionCard>
+      <SectionHeader dot="gray" label={t("brief_idea_analysis", lang)} />
+      <div className="px-3 py-2.5 space-y-2">
+        {gap.synergy.map((s, i) => (
+          <div key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-emerald-400">
+            <span className="shrink-0 mt-0.5">✅</span>
+            {onUpdate ? (
+              <EditableText
+                value={s}
+                onSave={(v) => onUpdate(["creative_gap", "synergy", String(i)], v)}
+                className="flex-1 text-[13px] leading-relaxed text-emerald-400"
+              />
+            ) : (
+              s
+            )}
+          </div>
+        ))}
+        {gap.gap.map((g, i) => (
+          <div key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-amber-400">
+            <span className="shrink-0 mt-0.5">⚠️</span>
+            {onUpdate ? (
+              <EditableText
+                value={g}
+                onSave={(v) => onUpdate(["creative_gap", "gap", String(i)], v)}
+                className="flex-1 text-[13px] leading-relaxed text-amber-400"
+              />
+            ) : (
+              g
+            )}
+          </div>
+        ))}
+        {gap.recommendation && (
+          <div className="border-l-2 border-primary/40 pl-3 mt-2">
+            {onUpdate ? (
+              <EditableText
+                value={gap.recommendation}
+                onSave={(v) => onUpdate(["creative_gap", "recommendation"], v)}
+                className="text-[13px] text-muted-foreground leading-relaxed italic"
+              />
+            ) : (
+              <p className="text-[13px] text-muted-foreground leading-relaxed italic">"{gap.recommendation}"</p>
+            )}
+          </div>
+        )}
+      </div>
+    </SectionCard>
+  );
+};
+
+/* ━━━━━ Collapsible Section ━━━━━ */
+const CollapsibleSection = ({
+  title,
+  preview,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  preview?: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) => {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 py-1.5 text-left group">
+        <ChevronDown
+          className={`w-3 h-3 text-muted-foreground/50 transition-transform duration-200 ${open ? "" : "-rotate-90"}`}
+        />
+        <span className="label-meta text-primary">{title}</span>
+        {!open && preview && (
+          <span className="text-[10px] text-muted-foreground/40 truncate flex-1 ml-1">{preview}</span>
+        )}
+      </button>
+      <div
+        className={`overflow-hidden transition-all duration-200 ${open ? "max-h-[2000px] opacity-100 mt-1.5" : "max-h-0 opacity-0"}`}
+      >
+        {children}
+      </div>
+    </div>
+  );
+};
+
+/* ━━━━━ Section heading helpers ━━━━━ */
+const Heading1 = ({ children }: { children: React.ReactNode }) => (
+  <div className="flex items-center gap-2.5 mt-8 first:mt-0 mb-4">
+    <span className="w-[3px] self-stretch bg-primary" style={{ borderRadius: 1 }} />
+    <span className="text-[15px] font-bold text-primary tracking-wide">{children}</span>
+  </div>
+);
+
+const Heading2 = ({ children, tag }: { children: React.ReactNode; tag?: string }) => (
+  <div className="flex items-center gap-2 mb-2">
+    <span className="text-[14px] font-semibold text-foreground">{children}</span>
+    {tag && (
+      <span
+        className="ml-auto font-mono text-[10px] px-2 py-0.5 font-bold uppercase tracking-wider"
+        style={{
+          borderRadius: 2,
+          background: "rgba(255,255,255,0.06)",
+          color: "rgba(255,255,255,0.4)",
+          border: "1px solid rgba(255,255,255,0.08)",
+        }}
+      >
+        {tag}
+      </span>
+    )}
+  </div>
+);
+
+const Label3 = ({ children }: { children: React.ReactNode }) => (
+  <p className="text-[12px] font-medium uppercase tracking-[0.5px] mb-1" style={{ color: "#666" }}>
+    {children}
+  </p>
+);
+
+/* ━━━━━ EditableText — inline editing component ━━━━━ */
+type OnFieldUpdate = (path: string[], newValue: any) => void;
+
+const EditableText = ({
+  value,
+  onSave,
+  multiline,
+  placeholder,
+  className: extraClass = "",
+  style: extraStyle,
+  syncing,
+}: {
+  value: string;
+  onSave: (newValue: string) => void;
+  multiline?: boolean;
+  placeholder?: string;
+  className?: string;
+  style?: React.CSSProperties;
+  syncing?: boolean;
+}) => {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const ref = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+  const clickOffsetRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (editing && ref.current) {
+      ref.current.focus();
+      if (clickOffsetRef.current !== null) {
+        const pos = Math.min(clickOffsetRef.current, ref.current.value.length);
+        ref.current.setSelectionRange(pos, pos);
+        clickOffsetRef.current = null;
+      } else {
+        const len = ref.current.value.length;
+        ref.current.setSelectionRange(len, len);
+      }
+    }
+  }, [editing]);
+
+  useEffect(() => {
+    if (!editing) setDraft(value);
+  }, [value, editing]);
+
+  if (!editing) {
+    const displayContent = (() => {
+      if (!value) return <span style={{ color: "#555", fontStyle: "italic" }}>{placeholder || "—"}</span>;
+      if (!multiline) return value;
+      const sentences = value.split(/(?<=[.。!?])\s+|\n/).filter((s: string) => s.trim());
+      if (sentences.length <= 1) return value;
+      return (
+        <span className="flex flex-col gap-1">
+          {sentences.map((s: string, i: number) => (
+            <span key={i}>{s.trim()}</span>
+          ))}
+        </span>
+      );
+    })();
+    return (
+      <span
+        onClick={() => {
+          const sel = window.getSelection();
+          clickOffsetRef.current = sel?.focusOffset ?? value.length;
+          setDraft(value);
+          setEditing(true);
+        }}
+        className={`cursor-text transition-colors duration-150 ${extraClass}`}
+        style={{
+          ...extraStyle,
+          borderRadius: 4,
+          display: multiline ? "block" : "inline",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.04)";
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLElement).style.background = "transparent";
+        }}
+        title="클릭하여 편집"
+      >
+        {displayContent}
+        {syncing && (
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: "#f9423a",
+              animation: "pulse 1s infinite",
+              marginLeft: 4,
+              display: "inline-block",
+              verticalAlign: "middle",
+            }}
+          />
+        )}
+      </span>
+    );
+  }
+  const handleCommit = () => {
+    setEditing(false);
+    if (draft.trim() !== value) {
+      onSave(draft.trim());
+      sonnerToast("저장됨", { duration: 1000 });
+    }
+  };
+
+  if (multiline) {
+    return (
+      <textarea
+        ref={ref as React.RefObject<HTMLTextAreaElement>}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={handleCommit}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            setDraft(value);
+            setEditing(false);
+          }
+        }}
+        className={extraClass}
+        style={{
+          ...extraStyle,
+          width: "100%",
+          background: "rgba(255,255,255,0.06)",
+          border: "1px solid rgba(249,66,58,0.3)",
+          borderRadius: 4,
+          padding: "4px 8px",
+          color: "#fff",
+          outline: "none",
+          resize: "vertical",
+          minHeight: 60,
+          fontFamily: "inherit",
+          fontSize: "inherit",
+          lineHeight: "inherit",
+        }}
+      />
+    );
+  }
+
+  return (
+    <input
+      ref={ref as React.RefObject<HTMLInputElement>}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={handleCommit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") handleCommit();
+        if (e.key === "Escape") {
+          setDraft(value);
+          setEditing(false);
+        }
+      }}
+      className={extraClass}
+      style={{
+        ...extraStyle,
+        width: "100%",
+        background: "rgba(255,255,255,0.06)",
+        border: "1px solid rgba(249,66,58,0.3)",
+        borderRadius: 4,
+        padding: "4px 8px",
+        color: "#fff",
+        outline: "none",
+        fontFamily: "inherit",
+        fontSize: "inherit",
+        lineHeight: "inherit",
+      }}
+    />
+  );
+};
+
+/* ━━━━━ Deep-set utility ━━━━━ */
+function deepSet(obj: any, path: string[], value: any): any {
+  const result = structuredClone(obj);
+  let target = result;
+  for (let i = 0; i < path.length - 1; i++) {
+    target = target[path[i]];
+  }
+  target[path[path.length - 1]] = value;
+  return result;
+}
+
+/* ━━━━━ Reorder array sync (no translation needed) ━━━━━ */
+function reorderArraySync(targetLang: any, sourceLang: any, path: string[], newArray: any[]): any {
+  const result = structuredClone(targetLang);
+  let target = result;
+  for (let i = 0; i < path.length - 1; i++) target = target[path[i]];
+
+  const oldTargetArray = target[path[path.length - 1]] || [];
+
+  let oldSource = sourceLang;
+  for (const p of path) oldSource = oldSource?.[p];
+
+  if (Array.isArray(newArray) && Array.isArray(oldTargetArray)) {
+    const reordered = newArray.map((item, i) => {
+      const origIdx = oldSource?.findIndex?.((old: any) => JSON.stringify(old) === JSON.stringify(item));
+      return origIdx >= 0 && origIdx < oldTargetArray.length ? oldTargetArray[origIdx] : oldTargetArray[i] || item;
+    });
+    target[path[path.length - 1]] = reordered;
+  }
+
+  return result;
+}
+
+/* ━━━━━ SortableUspItem — draggable USP card ━━━━━ */
+const SortableUspCard = ({
+  item,
+  index,
+  onUpdate,
+  basePath,
+}: {
+  item: UspItem;
+  index: number;
+  onUpdate?: OnFieldUpdate;
+  basePath: string[];
+}) => {
+  const noLayoutAnimation: AnimateLayoutChanges = () => false;
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: `usp-${index}`,
+    animateLayoutChanges: noLayoutAnimation,
+  });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition: isDragging ? transition : undefined,
+    opacity: isDragging ? 0.7 : 1,
+    borderRadius: 3,
+    ...(index === 0
+      ? {
+          background: "rgba(249,66,58,0.08)",
+          border: isDragging ? "1px solid rgba(249,66,58,0.5)" : "1px solid rgba(249,66,58,0.2)",
+        }
+      : {
+          background: "rgba(255,255,255,0.03)",
+          border: isDragging ? "1px solid rgba(249,66,58,0.5)" : "1px solid rgba(255,255,255,0.06)",
+        }),
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="px-3 py-3">
+      <div className="flex items-start gap-2.5">
+        <span
+          {...attributes}
+          {...listeners}
+          className="w-5 h-5 flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5 cursor-grab active:cursor-grabbing group relative"
+          style={{
+            borderRadius: 2,
+            background: index === 0 ? "#f9423a" : index === 1 ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)",
+            color: index === 0 ? "#fff" : "rgba(255,255,255,0.5)",
+          }}
+        >
+          {index + 1}
+          <GripVertical
+            className="w-3 h-3 absolute opacity-0 group-hover:opacity-60 transition-opacity"
+            style={{ color: "currentColor" }}
+          />
+        </span>
+        <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+          {onUpdate ? (
+            <>
+              <EditableText
+                value={item.keyword}
+                onSave={(v) => onUpdate([...basePath, String(index), "keyword"], v)}
+                className="text-[13px] leading-snug font-semibold"
+                style={{ color: index === 0 ? "#f0f0f0" : "rgba(255,255,255,0.6)" }}
+              />
+              {item.comparison && (
+                <EditableText
+                  value={item.comparison}
+                  onSave={(v) => onUpdate([...basePath, String(index), "comparison"], v)}
+                  multiline
+                  className="text-[12px] leading-[1.6]"
+                  style={{ color: "#999", paddingLeft: 0 }}
+                />
+              )}
+            </>
+          ) : (
+            <>
+              <span
+                className="text-[13px] leading-snug font-semibold"
+                style={{ color: index === 0 ? "#f0f0f0" : "rgba(255,255,255,0.6)" }}
+              >
+                {item.keyword}
+              </span>
+              {item.comparison && (
+                <p className="text-[12px] leading-[1.6]" style={{ color: "#999" }}>
+                  {item.comparison}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AccordionCard = ({
+  index,
+  title,
+  preview,
+  isOpen,
+  onToggle,
+  children,
+}: {
+  index: number;
+  title: string;
+  preview: string;
+  isOpen: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) => (
+  <div
+    className="transition-all duration-200"
+    style={{
+      background: isOpen ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.02)",
+      border: `1px solid ${isOpen ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.06)"}`,
+      borderRadius: 10,
+      marginBottom: 8,
+    }}
+  >
+    <div
+      onClick={onToggle}
+      className="flex items-center justify-between cursor-pointer select-none"
+      style={{ padding: "6px 14px" }}
+    >
+      <div className="flex items-center gap-2.5">
+        <span
+          className="w-[22px] h-[22px] flex items-center justify-center text-[11px] font-bold text-white shrink-0"
+          style={{ borderRadius: "50%", background: "#f9423a" }}
+        >
+          {index}
+        </span>
+        <span className="text-[16px] font-bold text-foreground">{title}</span>
+      </div>
+      <ChevronDown
+        className="w-3.5 h-3.5 transition-transform duration-200"
+        style={{ color: "#666", transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)" }}
+      />
+    </div>
+    <div
+      className="text-xs text-muted-foreground my-0 mx-0 py-[20px] px-[45px] pt-0"
+      style={{ paddingBottom: "4px", lineHeight: 1.3 }}
+    >
+      {preview}
+    </div>
+    <div
+      className="transition-all duration-300"
+      style={{
+        overflow: "hidden",
+        maxHeight: isOpen ? 2000 : 0,
+        opacity: isOpen ? 1 : 0,
+        transition: "max-height 300ms ease-in-out, opacity 200ms ease-in-out",
+      }}
+    >
+      <div style={{ padding: "0 14px 12px" }}>{children}</div>
+    </div>
+  </div>
+);
+
+/* ━━━━━ CoreStrategyUI — center column ━━━━━ */
+const CoreStrategyUI = ({
+  analysis,
+  lang = "ko",
+  onUpdate,
+}: {
+  analysis: DeepAnalysis;
+  lang?: Lang;
+  onUpdate?: OnFieldUpdate;
+}) => {
+  const [openSections, setOpenSections] = useState<Set<string>>(new Set());
+  const toggleSection = (key: string) => {
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const isStrategyOpen = openSections.has("strategy");
+  const isDirectionOpen = openSections.has("direction");
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  const handleUspDragEnd = (event: any) => {
+    const { active, over } = event;
+    if (!active || !over || active.id === over.id || !onUpdate) return;
+    const items = analysis.usp.items;
+    if (!items.length || typeof items[0] !== "object") return;
+    const oldIndex = parseInt((active.id as string).replace("usp-", ""));
+    const newIndex = parseInt((over.id as string).replace("usp-", ""));
+    const reordered = arrayMove(items as UspItem[], oldIndex, newIndex);
+    onUpdate(["usp", "items"], reordered as any);
+  };
+
+  const directionPreview =
+    lang === "ko" ? "비주얼 방향 · 레퍼런스 무드 · 씬 흐름" : "Visual Direction · Reference Mood · Scene Flow";
+
+  const strategyPreview =
+    lang === "ko" ? "캠페인 목표 · 타겟 · USP · 메모 분석" : "Campaign Goal · Target · USP · Memo Analysis";
+
+  const E = (
+    path: string[],
+    value: string,
+    opts?: { multiline?: boolean; className?: string; style?: React.CSSProperties },
+  ) => {
+    if (!onUpdate) {
+      return (
+        <span className={opts?.className} style={opts?.style}>
+          {value}
+        </span>
+      );
+    }
+    return (
+      <EditableText
+        value={value}
+        onSave={(v) => onUpdate(path, v)}
+        multiline={opts?.multiline}
+        className={opts?.className || ""}
+        style={opts?.style}
+      />
+    );
+  };
+
+  const EditableBulletList = ({
+    items,
+    basePath,
+    dot = "red",
+  }: {
+    items: string[];
+    basePath: string[];
+    dot?: "red" | "black";
+  }) => (
+    <ul className="space-y-1.5">
+      {items.map((item, i) => (
+        <li key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-muted-foreground">
+          <span
+            className={`w-1 h-1 rounded-full shrink-0 mt-[7px] ${dot === "red" ? "bg-primary" : "bg-foreground"}`}
+          />
+          {onUpdate ? (
+            <EditableText
+              value={item}
+              onSave={(v) => onUpdate([...basePath, String(i)], v)}
+              className="flex-1 text-[13px] leading-relaxed text-muted-foreground"
+            />
+          ) : (
+            item
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+
+  return (
+    <div>
+      <div className="px-1 mb-6">
+        {E(["goal", "summary"], analysis.goal.summary, {
+          className: "text-[22px] font-bold text-foreground leading-tight tracking-tight",
+        })}
+        <div className="mt-2">
+          {E(["usp", "summary"], analysis.usp.summary, {
+            className: "text-[13px] text-muted-foreground leading-relaxed",
+          })}
+        </div>
+      </div>
+
+      <AccordionCard
+        index={1}
+        title={t("core_strategy", lang)}
+        preview={strategyPreview}
+        isOpen={isStrategyOpen}
+        onToggle={() => toggleSection("strategy")}
+      >
+        <div className="grid gap-4 items-stretch" style={{ gridTemplateColumns: "1fr 1fr" }}>
+          <SectionCard className="w-full flex flex-col">
+            <SectionHeader dot="red" label={t("campaign_goal", lang)} tag="GOAL" />
+            <div className="px-3 py-3 flex-1 space-y-2.5">
+              <EditableBulletList items={analysis.goal.items} basePath={["goal", "items"]} dot="red" />
+              {analysis.goal.core_message && (
+                <div
+                  className="rounded-lg px-3 py-2.5"
+                  style={{ background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}
+                >
+                  <span className="text-[11px] font-medium" style={{ color: "#888" }}>
+                    💬 {t("core_message", lang)}
+                  </span>
+                  <div className="mt-1">
+                    {E(["goal", "core_message"], analysis.goal.core_message, {
+                      className: "text-[13px] text-foreground/90 font-medium leading-relaxed",
+                    })}
+                  </div>
+                </div>
+              )}
+              {analysis.goal.success_criteria && (
+                <div
+                  className="rounded-lg px-3 py-2.5"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+                >
+                  <span className="text-[11px] font-medium" style={{ color: "#888" }}>
+                    🎯 {t("success_criteria", lang)}
+                  </span>
+                  <div className="mt-1">
+                    {E(["goal", "success_criteria"], analysis.goal.success_criteria, {
+                      multiline: true,
+                      className: "text-[13px] text-foreground/80 leading-relaxed",
+                    })}
+                  </div>
+                </div>
+              )}
+              {analysis.goal.desired_action && (
+                <div
+                  className="rounded-lg px-3 py-2.5"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+                >
+                  <span className="text-[11px] font-medium" style={{ color: "#888" }}>
+                    ▶ {t("desired_action", lang)}
+                  </span>
+                  <div className="mt-1">
+                    {E(["goal", "desired_action"], analysis.goal.desired_action, {
+                      className: "text-[13px] text-foreground/80 leading-relaxed",
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </SectionCard>
+
+          <SectionCard className="w-full flex flex-col">
+            <SectionHeader dot="black" label={t("target", lang)} tag="TARGET" />
+            <div className="px-3 py-3 space-y-2 flex-1">
+              {E(["target", "summary"], analysis.target.summary, {
+                className: "text-[13px] font-medium text-muted-foreground",
+              })}
+              <EditableBulletList items={analysis.target.primary} basePath={["target", "primary"]} dot="black" />
+              <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+                <Label3>{t("psychological_insight", lang)}</Label3>
+                {E(["target", "insight"], analysis.target.insight, {
+                  multiline: true,
+                  className: "text-[13px] leading-relaxed text-foreground/80",
+                })}
+              </div>
+              <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+                <Label3>{t("media_behavior", lang)}</Label3>
+                {E(["target", "media_behavior"], analysis.target.media_behavior, {
+                  multiline: true,
+                  className: "text-[13px] leading-relaxed text-foreground/80",
+                })}
+              </div>
+            </div>
+          </SectionCard>
+        </div>
+
+        <div className="border-t mt-5 pt-4" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+          <SectionCard className="w-full">
+            <SectionHeader dot="red" label={t("usp", lang)} tag="USP" />
+            <div className="px-3 py-3 space-y-1.5" style={{ gap: 6 }}>
+              {(() => {
+                const items = analysis.usp.items;
+                const isStructured = items.length > 0 && typeof items[0] === "object";
+                if (isStructured && onUpdate) {
+                  return (
+                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleUspDragEnd}>
+                      <SortableContext
+                        items={(items as UspItem[]).map((_, i) => `usp-${i}`)}
+                        strategy={verticalListSortingStrategy}
+                      >
+                        <div className="flex flex-col" style={{ gap: 6 }}>
+                          {(items as UspItem[]).map((item, i) => (
+                            <SortableUspCard
+                              key={`usp-${i}`}
+                              item={item}
+                              index={i}
+                              onUpdate={onUpdate}
+                              basePath={["usp", "items"]}
+                            />
+                          ))}
+                        </div>
+                      </SortableContext>
+                    </DndContext>
+                  );
+                }
+                if (isStructured) {
+                  return (
+                    <div className="flex flex-col" style={{ gap: 6 }}>
+                      {(items as UspItem[]).map((item, i) => (
+                        <div
+                          key={i}
+                          className="px-3 py-2"
+                          style={{
+                            borderRadius: 3,
+                            ...(i === 0
+                              ? { background: "rgba(249,66,58,0.08)", border: "1px solid rgba(249,66,58,0.2)" }
+                              : { background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }),
+                          }}
+                        >
+                          <div className="flex items-start gap-2.5">
+                            <span
+                              className="w-5 h-5 flex items-center justify-center text-[10px] font-bold shrink-0 mt-px"
+                              style={{
+                                borderRadius: 2,
+                                background:
+                                  i === 0 ? "#f9423a" : i === 1 ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)",
+                                color: i === 0 ? "#fff" : "rgba(255,255,255,0.5)",
+                              }}
+                            >
+                              {i + 1}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <span
+                                className="text-[13px] leading-relaxed font-semibold"
+                                style={{ color: i === 0 ? "#f0f0f0" : "rgba(255,255,255,0.6)" }}
+                              >
+                                {item.keyword}
+                              </span>
+                              {item.comparison && (
+                                <p className="text-[13px] leading-[1.5] mt-1" style={{ color: "#888" }}>
+                                  {item.comparison}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                }
+                return <BulletList items={items as string[]} dot="red" />;
+              })()}
+              {analysis.usp.competitive_edge && (
+                <div className="pt-1">
+                  <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+                    <Label3>{t("competitive_edge", lang)}</Label3>
+                    {E(["usp", "competitive_edge"], analysis.usp.competitive_edge, {
+                      className: "text-[13px] leading-relaxed text-foreground/80",
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </SectionCard>
+        </div>
+
+        {analysis.creative_gap && (
+          <div className="border-t mt-5 pt-4" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+            <CreativeGapSection gap={analysis.creative_gap} lang={lang} onUpdate={onUpdate} />
+          </div>
+        )}
+      </AccordionCard>
+
+      <AccordionCard
+        index={2}
+        title={lang === "ko" ? "연출 가이드" : "Direction Guide"}
+        preview={directionPreview}
+        isOpen={isDirectionOpen}
+        onToggle={() => toggleSection("direction")}
+      >
+        <Heading2>{t("visual_direction", lang)}</Heading2>
+        {typeof analysis.tone_manner.visual_direction === "string" ? (
+          <SubCard label={t("visual_direction", lang)} value={analysis.tone_manner.visual_direction} />
+        ) : (
+          <div className="grid grid-cols-2 gap-3 mb-6">
+            {(
+              [
+                { icon: "📷", label: lang === "ko" ? "카메라" : "Camera", key: "camera" as const },
+                { icon: "💡", label: lang === "ko" ? "조명" : "Lighting", key: "lighting" as const },
+                { icon: "🎨", label: lang === "ko" ? "색감" : "Color", key: "color_grade" as const },
+                { icon: "✂️", label: lang === "ko" ? "편집" : "Editing", key: "editing" as const },
+              ] as const
+            ).map(({ icon, label: cellLabel, key }) => (
+              <div key={key} className="px-3 py-3" style={{ borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <span className="text-[12px]">{icon}</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-foreground/60">{cellLabel}</span>
+                </div>
+                {E(
+                  ["tone_manner", "visual_direction", key],
+                  (analysis.tone_manner.visual_direction as VisualDirectionStructured)[key],
+                  {
+                    multiline: true,
+                    className: "text-[13px] text-foreground/70 leading-relaxed",
+                  },
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {analysis.tone_manner.reference_mood && (
+          <div className="mb-6">
+            <Heading2>{t("reference_mood", lang)}</Heading2>
+            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+              {E(["tone_manner", "reference_mood"], analysis.tone_manner.reference_mood, {
+                multiline: true,
+                className: "text-[13px] leading-relaxed text-foreground/80",
+              })}
+            </div>
+          </div>
+        )}
+
+        <Heading2>{t("scene_flow", lang)}</Heading2>
+        <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+          <div className="flex items-start mb-3">
+            {(["Hook", "Body", "CTA"] as const).map((step, i) => (
+              <div key={step} className="flex-1 relative">
+                {i < 2 && <div className="absolute top-[6px] left-1/2 w-full h-px bg-border" />}
+                <div className="flex flex-col items-center gap-1.5 relative z-10">
+                  <div
+                    className="w-3 h-3 border-2 border-background"
+                    style={{ borderRadius: 2, background: i === 1 ? "rgba(255,255,255,0.2)" : "#f9423a" }}
+                  />
+                  <span
+                    className="font-mono text-[10px] font-bold uppercase"
+                    style={{ color: i === 1 ? "rgba(255,255,255,0.3)" : "#f9423a" }}
+                  >
+                    {step}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+          {typeof analysis.production_notes.scene_count_hint === "string" ? (
+            <p className="text-[13px] text-muted-foreground leading-relaxed">
+              {analysis.production_notes.scene_count_hint}
+            </p>
+          ) : (
+            <div className="grid grid-cols-3 gap-2">
+              {(["hook", "body", "cta"] as const).map((key) => {
+                const section = (analysis.production_notes.scene_count_hint as SceneFlowStructured)[key];
+                return (
+                  <div
+                    key={key}
+                    className="px-3 py-3"
+                    style={{ borderRadius: 8, background: "rgba(255,255,255,0.03)" }}
+                  >
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="font-mono text-[12px] font-semibold" style={{ color: "#f9423a" }}>
+                        {key.toUpperCase()}
+                      </span>
+                      {E(["production_notes", "scene_count_hint", key, "duration"], section.duration, {
+                        className: "text-[11px]",
+                        style: { color: "#666" },
+                      })}
+                    </div>
+                    {E(["production_notes", "scene_count_hint", key, "description"], section.description, {
+                      multiline: true,
+                      className: "text-[13px] leading-[1.5]",
+                      style: { color: "#aaa" },
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </AccordionCard>
+    </div>
+  );
+};
+
+/* ━━━━━ SlideUspContent — USP with DnD for slide view ━━━━━ */
+const SlideUspContent = ({
+  analysis,
+  lang,
+  onUpdate,
+}: {
+  analysis: DeepAnalysis;
+  lang: Lang;
+  onUpdate?: OnFieldUpdate;
+}) => {
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+  const items = analysis.usp.items;
+  const isStructured = items.length > 0 && typeof items[0] === "object";
+
+  const handleDragEnd = (event: any) => {
+    const { active, over } = event;
+    if (!active || !over || active.id === over.id || !onUpdate) return;
+    if (!isStructured) return;
+    const oldIndex = parseInt((active.id as string).replace("usp-", ""));
+    const newIndex = parseInt((over.id as string).replace("usp-", ""));
+    const reordered = arrayMove(items as UspItem[], oldIndex, newIndex);
+    onUpdate(["usp", "items"], reordered as any);
+  };
+
+  return (
+    <div className="space-y-4">
+      {isStructured && onUpdate ? (
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext
+            items={(items as UspItem[]).map((_, i) => `usp-${i}`)}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="flex flex-col" style={{ gap: 6 }}>
+              {(items as UspItem[]).map((item, i) => (
+                <SortableUspCard
+                  key={`usp-${i}`}
+                  item={item}
+                  index={i}
+                  onUpdate={onUpdate}
+                  basePath={["usp", "items"]}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      ) : isStructured ? (
+        <div className="flex flex-col gap-3">
+          {(items as UspItem[]).map((item, i) => (
+            <div
+              key={i}
+              className="px-4 py-3"
+              style={{
+                borderRadius: 6,
+                ...(i === 0
+                  ? { background: "rgba(249,66,58,0.08)", border: "1px solid rgba(249,66,58,0.2)" }
+                  : { background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }),
+              }}
+            >
+              <div className="flex items-start gap-3">
+                <span
+                  className="w-6 h-6 flex items-center justify-center text-[11px] font-bold shrink-0"
+                  style={{
+                    borderRadius: 3,
+                    background: i === 0 ? "#f9423a" : "rgba(255,255,255,0.12)",
+                    color: i === 0 ? "#fff" : "rgba(255,255,255,0.5)",
+                  }}
+                >
+                  {i + 1}
+                </span>
+                <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+                  <span className="text-[13px] leading-snug font-semibold">{item.keyword}</span>
+                  {item.comparison && (
+                    <p className="text-[12px] leading-[1.6]" style={{ color: "#999" }}>
+                      {item.comparison}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <BulletList items={items as string[]} dot="red" />
+      )}
+      {analysis.usp.competitive_edge &&
+        (onUpdate ? (
+          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+            <Label3>{t("competitive_edge", lang)}</Label3>
+            <EditableText
+              value={analysis.usp.competitive_edge}
+              onSave={(v) => onUpdate(["usp", "competitive_edge"], v)}
+              className="text-[13px] leading-relaxed text-foreground/80"
+            />
+          </div>
+        ) : (
+          <SubCard label={t("competitive_edge", lang)} value={analysis.usp.competitive_edge} />
+        ))}
+    </div>
+  );
+};
+
+/* ━━━━━ SlideViewUI — 7-slide carousel for analysis ━━━━━ */
+interface SlideDefinition {
+  title: string;
+  badge: string;
+  render: (analysis: DeepAnalysis, lang: Lang, onUpdate?: OnFieldUpdate) => React.ReactNode;
+}
+
+const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
+  (lang) => ({
+    title: t("campaign_goal", lang),
+    badge: "GOAL",
+    render: (a, l, onU) => (
+      <div className="space-y-4">
+        <ul className="space-y-1.5">
+          {a.goal.items.map((item, i) => (
+            <li key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-muted-foreground">
+              <span className="w-1 h-1 rounded-full shrink-0 mt-[7px] bg-primary" />
+              {onU ? (
+                <EditableText
+                  value={item}
+                  onSave={(v) => onU(["goal", "items", String(i)], v)}
+                  className="flex-1 text-[13px] leading-relaxed text-muted-foreground"
+                />
+              ) : (
+                item
+              )}
+            </li>
+          ))}
+        </ul>
+        {a.goal.core_message && (
+          <div
+            className="rounded-lg px-3 py-1.5"
+            style={{ background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}
+          >
+            <span className="text-[11px] font-medium" style={{ color: "#888" }}>
+              💬 {t("core_message", l)}
+            </span>
+            <div className="mt-1">
+              {onU ? (
+                <EditableText
+                  value={a.goal.core_message}
+                  onSave={(v) => onU(["goal", "core_message"], v)}
+                  className="text-[13px] text-foreground/90 font-medium leading-relaxed"
+                />
+              ) : (
+                <p className="text-[13px] text-foreground/90 font-medium leading-relaxed">"{a.goal.core_message}"</p>
+              )}
+            </div>
+          </div>
+        )}
+        {a.goal.success_criteria && (
+          <div
+            className="rounded-lg px-3 py-1.5"
+            style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+          >
+            <span className="text-[11px] font-medium" style={{ color: "#888" }}>
+              🎯 {t("success_criteria", l)}
+            </span>
+            <div className="mt-1">
+              {onU ? (
+                <EditableText
+                  value={a.goal.success_criteria}
+                  onSave={(v) => onU(["goal", "success_criteria"], v)}
+                  multiline
+                  className="text-[13px] text-foreground/80 leading-relaxed"
+                />
+              ) : (
+                <div className="space-y-1">
+                  {a.goal.success_criteria.split(/[,،、]\s*/).map((c: string, i: number) => (
+                    <p key={i} className="text-[13px] text-foreground/80 leading-relaxed">
+                      {c.trim()}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {a.goal.desired_action && (
+          <div
+            className="rounded-lg px-3 py-1.5"
+            style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+          >
+            <span className="text-[11px] font-medium" style={{ color: "#888" }}>
+              ▶ {t("desired_action", l)}
+            </span>
+            <div className="mt-1">
+              {onU ? (
+                <EditableText
+                  value={a.goal.desired_action}
+                  onSave={(v) => onU(["goal", "desired_action"], v)}
+                  className="text-[13px] text-foreground/80 leading-relaxed"
+                />
+              ) : (
+                <p className="text-[13px] text-foreground/80 leading-relaxed">{a.goal.desired_action}</p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    ),
+  }),
+  (lang) => ({
+    title: t("target", lang),
+    badge: "TARGET",
+    render: (a, l, onU) => (
+      <div className="space-y-4">
+        {onU ? (
+          <EditableText
+            value={a.target.summary}
+            onSave={(v) => onU(["target", "summary"], v)}
+            className="text-[13px] text-muted-foreground leading-relaxed"
+          />
+        ) : (
+          <p className="text-[13px] text-muted-foreground leading-relaxed">{a.target.summary}</p>
+        )}
+        <ul className="space-y-1.5">
+          {a.target.primary.map((item, i) => (
+            <li key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-muted-foreground">
+              <span className="w-1 h-1 rounded-full shrink-0 mt-[7px] bg-foreground" />
+              {onU ? (
+                <EditableText
+                  value={item}
+                  onSave={(v) => onU(["target", "primary", String(i)], v)}
+                  className="flex-1 text-[13px] leading-relaxed text-muted-foreground"
+                />
+              ) : (
+                item
+              )}
+            </li>
+          ))}
+        </ul>
+        {onU ? (
+          <>
+            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+              <Label3>{t("psychological_insight", l)}</Label3>
+              <EditableText
+                value={a.target.insight}
+                onSave={(v) => onU(["target", "insight"], v)}
+                multiline
+                className="text-[13px] leading-relaxed text-foreground/80"
+              />
+            </div>
+            <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+              <Label3>{t("media_behavior", l)}</Label3>
+              <EditableText
+                value={a.target.media_behavior}
+                onSave={(v) => onU(["target", "media_behavior"], v)}
+                multiline
+                className="text-[13px] leading-relaxed text-foreground/80"
+              />
+            </div>
+          </>
+        ) : (
+          <>
+            <SubCard label={t("psychological_insight", l)} value={a.target.insight} />
+            <SubCard label={t("media_behavior", l)} value={a.target.media_behavior} />
+          </>
+        )}
+      </div>
+    ),
+  }),
+  (lang) => ({
+    title: t("usp", lang),
+    badge: "USP",
+    render: (a, _l, onU) => <SlideUspContent analysis={a} lang={lang} onUpdate={onU} />,
+  }),
+  (lang) => ({
+    title: t("brief_idea_analysis", lang),
+    badge: "MEMO",
+    render: (a, _l, onU) =>
+      a.creative_gap ? (
+        <div className="space-y-3">
+          {a.creative_gap.synergy.map((s, i) => (
+            <div key={i} className="flex items-start gap-2.5 text-[13px] leading-relaxed text-emerald-400">
+              <span className="shrink-0 mt-0.5">✅</span>
+              {onU ? (
+                <EditableText
+                  value={s}
+                  onSave={(v) => onU(["creative_gap", "synergy", String(i)], v)}
+                  className="flex-1 text-[13px] leading-relaxed text-emerald-400"
+                />
+              ) : (
+                s
+              )}
+            </div>
+          ))}
+          {a.creative_gap.gap.map((g, i) => (
+            <div key={i} className="flex items-start gap-2.5 text-[13px] leading-relaxed text-amber-400">
+              <span className="shrink-0 mt-0.5">⚠️</span>
+              {onU ? (
+                <EditableText
+                  value={g}
+                  onSave={(v) => onU(["creative_gap", "gap", String(i)], v)}
+                  className="flex-1 text-[13px] leading-relaxed text-amber-400"
+                />
+              ) : (
+                g
+              )}
+            </div>
+          ))}
+          {a.creative_gap.recommendation && (
+            <div className="border-l-2 border-primary/40 pl-4 mt-3">
+              {onU ? (
+                <EditableText
+                  value={a.creative_gap.recommendation}
+                  onSave={(v) => onU(["creative_gap", "recommendation"], v)}
+                  className="text-[14px] text-muted-foreground leading-relaxed italic"
+                />
+              ) : (
+                <p className="text-[14px] text-muted-foreground leading-relaxed italic">
+                  "{a.creative_gap.recommendation}"
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-[13px] text-muted-foreground/50">
+          {lang === "ko" ? "아이디어 메모가 없습니다" : "No idea memo provided"}
+        </p>
+      ),
+  }),
+  (lang) => ({
+    title: t("visual_direction", lang),
+    badge: "VISUAL",
+    render: (a, l, onU) =>
+      typeof a.tone_manner.visual_direction === "string" ? (
+        onU ? (
+          <EditableText
+            value={a.tone_manner.visual_direction}
+            onSave={(v) => onU(["tone_manner", "visual_direction"], v)}
+            multiline
+            className="text-[14px] text-foreground/80 leading-relaxed"
+          />
+        ) : (
+          <p className="text-[14px] text-foreground/80 leading-relaxed">{a.tone_manner.visual_direction}</p>
+        )
+      ) : (
+        <div className="grid grid-cols-2 gap-4">
+          {(
+            [
+              { icon: "📷", label: l === "ko" ? "카메라" : "Camera", key: "camera" as const },
+              { icon: "💡", label: l === "ko" ? "조명" : "Lighting", key: "lighting" as const },
+              { icon: "🎨", label: l === "ko" ? "색감" : "Color", key: "color_grade" as const },
+              { icon: "✂️", label: l === "ko" ? "편집" : "Editing", key: "editing" as const },
+            ] as const
+          ).map(({ icon, label: cellLabel, key }) => (
+            <div key={key} className="px-4 py-4" style={{ borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[14px]">{icon}</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-foreground/60">{cellLabel}</span>
+              </div>
+              {onU ? (
+                <EditableText
+                  value={(a.tone_manner.visual_direction as VisualDirectionStructured)[key]}
+                  onSave={(v) => onU(["tone_manner", "visual_direction", key], v)}
+                  multiline
+                  className="text-[13px] text-foreground/70 leading-relaxed"
+                />
+              ) : (
+                <p className="text-[13px] text-foreground/70 leading-relaxed">
+                  {(a.tone_manner.visual_direction as VisualDirectionStructured)[key]}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      ),
+  }),
+  (lang) => ({
+    title: t("reference_mood", lang),
+    badge: "MOOD",
+    render: (a, _l, onU) =>
+      onU ? (
+        <EditableText
+          value={a.tone_manner.reference_mood || ""}
+          onSave={(v) => onU(["tone_manner", "reference_mood"], v)}
+          multiline
+          className="text-[14px] leading-relaxed text-foreground/80"
+        />
+      ) : (
+        <ul className="space-y-2.5">
+          {(a.tone_manner.reference_mood || "")
+            .split(/(?<=[.。!?])\s+|(?<=\n)/)
+            .filter((s: string) => s.trim())
+            .map((sentence: string, i: number) => (
+              <li key={i} className="flex items-start gap-2.5 text-[14px] leading-relaxed text-foreground/80">
+                <span className="shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full bg-foreground/30" />
+                {sentence.trim()}
+              </li>
+            ))}
+        </ul>
+      ),
+  }),
+  (lang) => ({
+    title: t("scene_flow", lang),
+    badge: "FLOW",
+    render: (a, _l, onU) => (
+      <div className="space-y-4">
+        <div className="flex items-start">
+          {(["Hook", "Body", "CTA"] as const).map((step, i) => (
+            <div key={step} className="flex-1 relative">
+              {i < 2 && <div className="absolute top-[6px] left-1/2 w-full h-px bg-border" />}
+              <div className="flex flex-col items-center gap-1.5 relative z-10">
+                <div
+                  className="w-3 h-3 border-2 border-background"
+                  style={{ borderRadius: 2, background: i === 1 ? "rgba(255,255,255,0.2)" : "#f9423a" }}
+                />
+                <span
+                  className="font-mono text-[10px] font-bold uppercase"
+                  style={{ color: i === 1 ? "rgba(255,255,255,0.3)" : "#f9423a" }}
+                >
+                  {step}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+        {typeof a.production_notes.scene_count_hint === "string" ? (
+          <p className="text-[13px] text-muted-foreground leading-relaxed">{a.production_notes.scene_count_hint}</p>
+        ) : (
+          <div className="grid grid-cols-3 gap-3">
+            {(["hook", "body", "cta"] as const).map((key) => {
+              const section = (a.production_notes.scene_count_hint as SceneFlowStructured)[key];
+              return (
+                <div key={key} className="px-4 py-4" style={{ borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="font-mono text-[13px] font-semibold" style={{ color: "#f9423a" }}>
+                      {key.toUpperCase()}
+                    </span>
+                    {onU ? (
+                      <EditableText
+                        value={section.duration}
+                        onSave={(v) => onU(["production_notes", "scene_count_hint", key, "duration"], v)}
+                        className="text-[12px]"
+                        style={{ color: "#666" }}
+                      />
+                    ) : (
+                      <span className="text-[12px]" style={{ color: "#666" }}>
+                        {section.duration}
+                      </span>
+                    )}
+                  </div>
+                  {onU ? (
+                    <EditableText
+                      value={section.description}
+                      onSave={(v) => onU(["production_notes", "scene_count_hint", key, "description"], v)}
+                      multiline
+                      className="text-[13px] leading-[1.6]"
+                      style={{ color: "#aaa" }}
+                    />
+                  ) : (
+                    <p className="text-[13px] leading-[1.6]" style={{ color: "#aaa" }}>
+                      {section.description}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    ),
+  }),
+];
+
+const SlideViewUI = ({
+  analysis,
+  lang = "ko",
+  onUpdate,
+}: {
+  analysis: DeepAnalysis;
+  lang?: Lang;
+  onUpdate?: OnFieldUpdate;
+}) => {
+  const [slideIndex, setSlideIndex] = useState(0);
+  const slides = SLIDE_DEFS.map((fn) => fn(lang));
+  const total = slides.length;
+  const current = slides[slideIndex];
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (e.key === "ArrowLeft") setSlideIndex((i) => Math.max(0, i - 1));
+      if (e.key === "ArrowRight") setSlideIndex((i) => Math.min(total - 1, i + 1));
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [total]);
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="px-1 mb-4">
+        {onUpdate ? (
+          <EditableText
+            value={analysis.goal.summary}
+            onSave={(v) => onUpdate(["goal", "summary"], v)}
+            className="text-[22px] font-bold text-foreground leading-tight tracking-tight"
+          />
+        ) : (
+          <p className="text-[22px] font-bold text-foreground leading-tight tracking-tight">{analysis.goal.summary}</p>
+        )}
+        <div className="mt-2">
+          {onUpdate ? (
+            <EditableText
+              value={analysis.usp.summary}
+              onSave={(v) => onUpdate(["usp", "summary"], v)}
+              className="text-[13px] text-muted-foreground leading-relaxed"
+            />
+          ) : (
+            <p className="text-[13px] text-muted-foreground leading-relaxed">{analysis.usp.summary}</p>
+          )}
+        </div>
+      </div>
+
+      <div className="flex-1 min-h-0 flex flex-col">
+        <div
+          className="flex-1 overflow-y-auto"
+          style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12 }}
+        >
+          <div className="flex items-center gap-3 px-5 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+            <span className="font-mono text-[11px] font-bold" style={{ color: "#666" }}>
+              {slideIndex + 1}/{total}
+            </span>
+            <span
+              className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5"
+              style={{
+                borderRadius: 3,
+                background: slideIndex < 4 ? "rgba(249,66,58,0.08)" : "rgba(255,255,255,0.04)",
+                color: slideIndex < 4 ? "#f9423a" : "#888",
+              }}
+            >
+              {slideIndex < 4
+                ? lang === "ko"
+                  ? "핵심 전략"
+                  : "Core Strategy"
+                : lang === "ko"
+                  ? "연출 가이드"
+                  : "Direction Guide"}
+            </span>
+            <span className="text-[15px] font-bold text-foreground">{current.title}</span>
+          </div>
+          <div key={slideIndex} className="px-5 py-5 animate-fade-in">
+            {current.render(analysis, lang, onUpdate)}
+          </div>
+        </div>
+
+        <div className="flex flex-col items-center gap-2 pt-4 pb-1">
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setSlideIndex((i) => Math.max(0, i - 1))}
+              disabled={slideIndex === 0}
+              className="w-8 h-8 flex items-center justify-center transition-colors"
+              style={{
+                borderRadius: "50%",
+                background: slideIndex === 0 ? "transparent" : "rgba(255,255,255,0.06)",
+                color: slideIndex === 0 ? "#333" : "#999",
+                border: "none",
+                cursor: slideIndex === 0 ? "default" : "pointer",
+              }}
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div className="flex items-center gap-1.5">
+              {slides.map((_, i) => (
+                <button
+                  key={i}
+                  onClick={() => setSlideIndex(i)}
+                  style={{
+                    width: i === slideIndex ? 20 : 6,
+                    height: 6,
+                    borderRadius: 3,
+                    background: i === slideIndex ? "#f9423a" : "rgba(255,255,255,0.15)",
+                    border: "none",
+                    cursor: "pointer",
+                    transition: "width 200ms, background 200ms",
+                  }}
+                />
+              ))}
+            </div>
+            <button
+              onClick={() => setSlideIndex((i) => Math.min(total - 1, i + 1))}
+              disabled={slideIndex === total - 1}
+              className="w-8 h-8 flex items-center justify-center transition-colors"
+              style={{
+                borderRadius: "50%",
+                background: slideIndex === total - 1 ? "transparent" : "rgba(255,255,255,0.06)",
+                color: slideIndex === total - 1 ? "#333" : "#999",
+                border: "none",
+                cursor: slideIndex === total - 1 ? "default" : "pointer",
+              }}
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+          <span className="text-[11px] text-muted-foreground/50">
+            {slideIndex + 1} / {total} · {current.title}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ━━━━━ ProductionGuideUI — right column ━━━━━ */
+const ProductionGuideUI = ({
+  analysis,
+  lang = "ko",
+  onUpdate,
+}: {
+  analysis: DeepAnalysis;
+  lang?: Lang;
+  onUpdate?: OnFieldUpdate;
+}) => {
+  const [addingTag, setAddingTag] = useState(false);
+  const [newTag, setNewTag] = useState("");
+
+  const addToneTag = (tag: string) => {
+    if (!tag.trim() || !onUpdate) return;
+    const updated = [...(analysis.tone_manner.keywords || []), tag.trim()];
+    onUpdate(["tone_manner", "keywords"], updated as any);
+    setAddingTag(false);
+    setNewTag("");
+  };
+
+  const removeToneTag = (index: number) => {
+    if (!onUpdate) return;
+    const updated = analysis.tone_manner.keywords.filter((_, i) => i !== index);
+    onUpdate(["tone_manner", "keywords"], updated as any);
+  };
+
+  const E = (
+    path: string[],
+    value: string,
+    opts?: { multiline?: boolean; className?: string; style?: React.CSSProperties },
+  ) => {
+    if (!onUpdate) {
+      return (
+        <span className={opts?.className} style={opts?.style}>
+          {value}
+        </span>
+      );
+    }
+    return (
+      <EditableText
+        value={value}
+        onSave={(v) => onUpdate(path, v)}
+        multiline={opts?.multiline}
+        className={opts?.className || ""}
+        style={opts?.style}
+      />
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 mb-1">
+        <span className="w-[3px] h-3 bg-foreground/30" style={{ borderRadius: 1 }} />
+        <span className="label-meta text-muted-foreground">{t("production_guide", lang)}</span>
+      </div>
+
+      <SectionCard>
+        <SectionHeader dot="gray" label={t("tone_manner", lang)} />
+        <div className="px-3 py-3 space-y-2.5">
+          <div className="flex flex-wrap gap-1.5">
+            {analysis.tone_manner.keywords.map((kw, i) => (
+              <span
+                key={i}
+                className="font-mono text-[10px] px-2 py-1 font-bold uppercase tracking-wider relative group"
+                style={{
+                  borderRadius: 2,
+                  ...(i % 2 === 0
+                    ? { background: "rgba(249,66,58,0.12)", color: "#f9423a", border: "1px solid rgba(249,66,58,0.2)" }
+                    : {
+                        background: "rgba(255,255,255,0.06)",
+                        color: "rgba(255,255,255,0.5)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                      }),
+                }}
+              >
+                {kw}
+                {onUpdate && (
+                  <button
+                    onClick={() => removeToneTag(i)}
+                    className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                    style={{ borderRadius: "50%", fontSize: 8, lineHeight: 1 }}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
+            ))}
+            {onUpdate && !addingTag && (
+              <button
+                onClick={() => setAddingTag(true)}
+                className="font-mono text-[10px] px-2 py-1 font-bold uppercase tracking-wider transition-colors"
+                style={{
+                  borderRadius: 2,
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#666",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                }}
+              >
+                +
+              </button>
+            )}
+            {addingTag && (
+              <input
+                autoFocus
+                value={newTag}
+                onChange={(e) => setNewTag(e.target.value)}
+                onBlur={() => {
+                  if (newTag.trim()) addToneTag(newTag);
+                  else {
+                    setAddingTag(false);
+                    setNewTag("");
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && newTag.trim()) addToneTag(newTag);
+                  if (e.key === "Escape") {
+                    setAddingTag(false);
+                    setNewTag("");
+                  }
+                }}
+                className="font-mono text-[10px] px-2 py-1 font-bold uppercase tracking-wider"
+                style={{
+                  width: 80,
+                  borderRadius: 2,
+                  background: "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(249,66,58,0.3)",
+                  color: "#fff",
+                  outline: "none",
+                }}
+              />
+            )}
+          </div>
+          <div
+            className="flex items-start gap-2.5 px-3 py-2.5"
+            style={{ borderRadius: 3, background: "rgba(249,66,58,0.08)", border: "1px solid rgba(249,66,58,0.25)" }}
+          >
+            <div
+              className="w-5 h-5 flex items-center justify-center shrink-0 mt-px"
+              style={{ borderRadius: 2, background: "#f9423a" }}
+            >
+              <span className="text-white text-[11px] font-bold leading-none">!</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="label-meta text-primary mb-1">{t("do_not", lang).toUpperCase()}</p>
+              {E(["tone_manner", "do_not"], analysis.tone_manner.do_not, {
+                multiline: true,
+                className: "text-[13px] text-primary/80 leading-relaxed",
+              })}
+            </div>
+          </div>
+        </div>
+      </SectionCard>
+
+      <SectionCard>
+        <div
+          className="flex items-center gap-2 px-3 py-2.5 border-b border-border"
+          style={{ background: "rgba(249,66,58,0.1)" }}
+        >
+          <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-primary" />
+          <span className="text-[11px] font-bold uppercase tracking-wider text-primary">
+            {t("prod_notes", lang).toUpperCase()}
+          </span>
+        </div>
+        <div className="px-3 py-3 space-y-2">
+          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+            <p className="label-meta text-muted-foreground mb-1">{t("format", lang)}</p>
+            {E(["production_notes", "format_recommendation"], analysis.production_notes.format_recommendation, {
+              className: "text-[13px] leading-relaxed text-foreground/80",
+            })}
+          </div>
+          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+            <p className="label-meta text-muted-foreground mb-1">{t("shooting_style", lang)}</p>
+            {E(["production_notes", "shooting_style"], analysis.production_notes.shooting_style, {
+              className: "text-[13px] leading-relaxed text-foreground/80",
+            })}
+          </div>
+          <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 3 }}>
+            <p className="label-meta text-muted-foreground mb-1">{t("budget_efficiency", lang)}</p>
+            {E(["production_notes", "budget_efficiency"], analysis.production_notes.budget_efficiency, {
+              multiline: true,
+              className: "text-[13px] leading-relaxed text-foreground/80",
+            })}
+          </div>
+        </div>
+      </SectionCard>
+    </div>
+  );
+};
+
+/* ━━━━━ DeepResultUI (legacy wrapper) ━━━━━ */
+const DeepResultUI = ({
+  analysis,
+  lang = "ko",
+  onUpdate,
+}: {
+  analysis: DeepAnalysis;
+  lang?: Lang;
+  onUpdate?: OnFieldUpdate;
+}) => (
+  <div className="space-y-5">
+    <CoreStrategyUI analysis={analysis} lang={lang} onUpdate={onUpdate} />
+    <ProductionGuideUI analysis={analysis} lang={lang} onUpdate={onUpdate} />
+  </div>
+);
+
+const LegacyResultUI = ({ analysis, lang = "ko" }: { analysis: LegacyAnalysis; lang?: Lang }) => {
+  const cards: { dot: DotVariant; label: string; tag: string; key: keyof LegacyAnalysis }[] = [
+    { dot: "red", label: t("campaign_goal", lang), tag: "GOAL", key: "goal" },
+    { dot: "black", label: t("target_audience", lang), tag: "TARGET", key: "target" },
+    { dot: "red", label: t("usp", lang), tag: "USP", key: "usp" },
+    { dot: "gray", label: t("tone_manner", lang), tag: "TONE", key: "tone_manner" },
+  ];
+  return (
+    <div className="space-y-2">
+      {cards.map((c) => (
+        <SectionCard key={c.key}>
+          <SectionHeader dot={c.dot} label={c.label} tag={c.tag} />
+          <div className="px-3 py-2.5">
+            <BulletList items={analysis[c.key] as string[]} dot={c.dot === "black" ? "black" : "red"} />
+          </div>
+        </SectionCard>
+      ))}
+    </div>
+  );
+};
+
+/* ━━━━━ NextStepOption ━━━━━ */
+const NextStepOption = ({
+  icon,
+  title,
+  desc,
+  onClick,
+}: {
+  icon: string;
+  title: string;
+  desc: string;
+  onClick: () => void;
+}) => {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      className="w-full flex items-start gap-3 p-3 border text-left transition-all duration-150"
+      style={{
+        borderRadius: 4,
+        borderColor: hovered ? "rgba(249,66,58,0.4)" : "rgba(255,255,255,0.07)",
+        background: hovered ? "rgba(249,66,58,0.06)" : "transparent",
+        transform: hovered ? "translateY(-1px)" : "translateY(0)",
+        boxShadow: hovered ? "0 4px 12px rgba(249,66,58,0.12)" : "none",
+      }}
+    >
+      <span className="text-xl mt-0.5">{icon}</span>
+      <div>
+        <div className="text-[12px] font-semibold text-foreground">{title}</div>
+        <div className="text-[11px] text-muted-foreground mt-0.5">{desc}</div>
+      </div>
+    </button>
+  );
+};
+
+const NextStepModal = ({
+  onClose,
+  onGoAssets,
+  onGoAgent,
+}: {
+  onClose: () => void;
+  onGoAssets: () => void;
+  onGoAgent: () => void;
+  analysisLang?: "ko" | "en";
+}) => (
+  <Dialog open onOpenChange={(o) => !o && onClose()}>
+    <DialogContent className="max-w-[380px] bg-card border-border" style={{ borderRadius: 4 }}>
+      <DialogHeader>
+        <DialogTitle className="text-[15px] font-semibold text-foreground">Choose next step</DialogTitle>
+      </DialogHeader>
+      <p className="text-[12px] text-muted-foreground leading-relaxed">
+        Registering assets (characters, items, backgrounds) first helps the agent build more detailed scenes.
+      </p>
+      <div className="space-y-2 mt-1">
+        {[
+          {
+            icon: "🎭",
+            title: "Set Up Assets First",
+            desc: "Register characters, items, backgrounds then go to Agent",
+            onClick: () => {
+              onClose();
+              onGoAssets();
+            },
+          },
+          {
+            icon: "💬",
+            title: "Go to Agent Directly",
+            desc: "Start building the story without assets",
+            onClick: () => {
+              onClose();
+              onGoAgent();
+            },
+          },
+        ].map((opt) => (
+          <NextStepOption key={opt.title} {...opt} />
+        ))}
+      </div>
+      <DialogFooter>
+        <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>
+          Cancel
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+);
+
+/* ━━━━━ LangToggle — shared toggle UI ━━━━━ */
+const LangToggle = ({
+  lang,
+  onChange,
+  loading = false,
+}: {
+  lang: Lang;
+  onChange: (l: Lang) => void;
+  loading?: boolean;
+}) => (
+  <button
+    onClick={() => onChange(lang === "ko" ? "en" : "ko")}
+    disabled={loading}
+    className="flex items-center h-6 border border-border overflow-hidden"
+    style={{ borderRadius: 2 }}
+  >
+    {(["ko", "en"] as const).map((l) => (
+      <span
+        key={l}
+        className="px-2 h-full flex items-center text-[10px] font-bold tracking-wider transition-colors"
+        style={{
+          background: lang === l ? "#f9423a" : "transparent",
+          color: lang === l ? "#fff" : "rgba(255,255,255,0.35)",
+        }}
+      >
+        {l === "en" && loading ? (
+          <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+        ) : (
+          l.toUpperCase()
+        )}
+      </span>
+    ))}
+  </button>
+);
+
+/* ━━━━━ Main Component ━━━━━ */
+export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props) => {
+  const { toast } = useToast();
+  const isMobile = useIsMobile();
+
+  const getInitialDraft = useCallback((): DraftState => {
+    const memCached = _draftByProject.get(projectId);
+    if (memCached) return memCached;
+
+    const persisted = loadFromLS(projectId);
+    const draft: DraftState = {
+      ...persisted,
+      briefImages: fromSerializable(persisted.briefImages),
+      refImages: fromSerializable(persisted.refImages),
+    };
+    _draftByProject.set(projectId, draft);
+    return draft;
+  }, [projectId]);
+
+  const initialDraft = getInitialDraft();
+
+  const [briefText, setBriefTextState] = useState(initialDraft.briefText);
+  const [ideaNote, setIdeaNoteState] = useState(initialDraft.ideaNote);
+  const [briefImages, setBriefImagesState] = useState<ImageItem[]>(initialDraft.briefImages);
+  const [refImages, setRefImagesState] = useState<ImageItem[]>(initialDraft.refImages);
+  const [pdfState, setPdfStateRaw] = useState<"idle" | "extracting" | "ready" | "error">(initialDraft.pdfState);
+  const [pdfExtractedText, setPdfExtractedTextState] = useState(initialDraft.pdfExtractedText);
+  const [pdfFileName, setPdfFileNameState] = useState(initialDraft.pdfFileName);
+  const [pdfFileSize, setPdfFileSizeState] = useState(initialDraft.pdfFileSize);
+  const [pdfPageInfo, setPdfPageInfoState] = useState(initialDraft.pdfPageInfo);
+
+  const saveDraft = useCallback(
+    (patch: Partial<DraftState>) => {
+      const cur = _draftByProject.get(projectId) ?? getDefaultDraft();
+      const next = { ...cur, ...patch };
+      _draftByProject.set(projectId, next);
+
+      const persisted: PersistedDraft = {
+        briefText: next.briefText,
+        ideaNote: next.ideaNote,
+        briefImages: toSerializable(next.briefImages),
+        refImages: toSerializable(next.refImages),
+        pdfState: next.pdfState,
+        pdfExtractedText: next.pdfExtractedText,
+        pdfFileName: next.pdfFileName,
+        pdfFileSize: next.pdfFileSize,
+        pdfPageInfo: next.pdfPageInfo,
+      };
+      saveToLS(projectId, persisted);
+    },
+    [projectId],
+  );
+
+  const setBriefText = (v: string) => {
+    setBriefTextState(v);
+    saveDraft({ briefText: v });
+  };
+  const setIdeaNote = (v: string) => {
+    setIdeaNoteState(v);
+    saveDraft({ ideaNote: v });
+  };
+
+  const setBriefImages = (fn: ImageItem[] | ((p: ImageItem[]) => ImageItem[])) => {
+    setBriefImagesState((prev) => {
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      saveDraft({ briefImages: next });
+      return next;
+    });
+  };
+  const setRefImages = (fn: ImageItem[] | ((p: ImageItem[]) => ImageItem[])) => {
+    setRefImagesState((prev) => {
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      saveDraft({ refImages: next });
+      return next;
+    });
+  };
+  const setPdfState = (v: "idle" | "extracting" | "ready" | "error") => {
+    setPdfStateRaw(v);
+    saveDraft({ pdfState: v });
+  };
+  const setPdfExtractedText = (v: string) => {
+    setPdfExtractedTextState(v);
+    saveDraft({ pdfExtractedText: v });
+  };
+  const setPdfFileName = (v: string) => {
+    setPdfFileNameState(v);
+    saveDraft({ pdfFileName: v });
+  };
+  const setPdfFileSize = (v: number) => {
+    setPdfFileSizeState(v);
+    saveDraft({ pdfFileSize: v });
+  };
+  const setPdfPageInfo = (v: { pages: number; chars: number } | null) => {
+    setPdfPageInfoState(v);
+    saveDraft({ pdfPageInfo: v });
+  };
+
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [existingBrief, setExistingBrief] = useState<Brief | null>(null);
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [analyzedAt, setAnalyzedAt] = useState<string | null>(null);
+  const [sourceType, setSourceType] = useState<"text" | "image" | "pdf">("text");
+  const [composerDragOver, setComposerDragOver] = useState(false);
+  const [refDragOver, setRefDragOver] = useState(false);
+  const [showNextStepModal, setShowNextStepModal] = useState(false);
+  const [viewMode, setViewMode] = useState<"list" | "slide">("list");
+
+  /* ━━━━━ KO/EN — analysis lang + bidirectional sync ━━━━━ */
+  const [analysisLang, setAnalysisLang] = useState<Lang>("ko");
+  const [analysisEn, setAnalysisEn] = useState<Analysis | null>(null);
+  const [translating, setTranslating] = useState(false);
+  const [fieldSyncing, setFieldSyncing] = useState<string | null>(null);
+
+  /* Analysis result lang toggle — lazy translate on first EN click */
+  const handleLangToggle = useCallback(
+    async (next: Lang) => {
+      if (next === "ko") {
+        setAnalysisLang("ko");
+        return;
+      }
+      if (!analysis) return;
+      if (analysisEn) {
+        setAnalysisLang("en");
+        return;
+      }
+      // First-time full translation
+      setTranslating(true);
+      try {
+        const { data, error } = await supabase.functions.invoke("translate-analysis", {
+          body: { mode: "full", analysis, direction: "ko_to_en" },
+        });
+        if (error) throw error;
+        if (data?.translated) {
+          setAnalysisEn(data.translated);
+          setAnalysisLang("en");
+          if (existingBrief) {
+            await supabase
+              .from("briefs")
+              .update({ analysis_en: data.translated } as any)
+              .eq("id", existingBrief.id);
+          }
+        }
+      } catch {
+        toast({
+          variant: "destructive",
+          title: "Translation failed",
+          description: "영어 번역 중 오류가 발생했습니다.",
+        });
+      } finally {
+        setTranslating(false);
+      }
+    },
+    [analysis, analysisEn, toast, existingBrief],
+  );
+
+  /* ━━━━━ Bidirectional field sync ━━━━━ */
+  const updateAnalysisField = useCallback(
+    async (path: string[], newValue: any) => {
+      if (!analysis || !isDeepAnalysis(analysis)) return;
+
+      const editedLang = analysisLang;
+      const pathKey = path.join(".");
+
+      if (editedLang === "ko") {
+        const updated = deepSet(analysis, path, newValue);
+        setAnalysis(updated);
+        if (existingBrief) {
+          await supabase.from("briefs").update({ analysis: updated }).eq("id", existingBrief.id);
+        }
+      } else {
+        if (!analysisEn) return;
+        const updated = deepSet(analysisEn, path, newValue);
+        setAnalysisEn(updated);
+        if (existingBrief) {
+          await supabase
+            .from("briefs")
+            .update({ analysis_en: updated } as any)
+            .eq("id", existingBrief.id);
+        }
+      }
+
+      if (editedLang === "ko" && !analysisEn) return;
+      if (editedLang === "en" && !analysis) return;
+
+      if (Array.isArray(newValue)) {
+        if (editedLang === "ko" && analysisEn) {
+          const enUpdated = reorderArraySync(analysisEn, analysis, path, newValue);
+          setAnalysisEn(enUpdated);
+          if (existingBrief) {
+            await supabase
+              .from("briefs")
+              .update({ analysis_en: enUpdated } as any)
+              .eq("id", existingBrief.id);
+          }
+        } else if (editedLang === "en" && analysis) {
+          const koUpdated = reorderArraySync(analysis, analysisEn!, path, newValue);
+          setAnalysis(koUpdated);
+          if (existingBrief) {
+            await supabase.from("briefs").update({ analysis: koUpdated }).eq("id", existingBrief.id);
+          }
+        }
+        return;
+      }
+
+      if (typeof newValue === "string" && newValue.trim()) {
+        setFieldSyncing(pathKey);
+        try {
+          const { data } = await supabase.functions.invoke("translate-analysis", {
+            body: {
+              mode: "field",
+              fieldValue: newValue,
+              fieldPath: pathKey,
+              direction: editedLang === "ko" ? "ko_to_en" : "en_to_ko",
+            },
+          });
+
+          if (data?.translated) {
+            if (editedLang === "ko" && analysisEn) {
+              const enUpdated = deepSet(structuredClone(analysisEn), path, data.translated);
+              setAnalysisEn(enUpdated);
+              if (existingBrief) {
+                await supabase
+                  .from("briefs")
+                  .update({ analysis_en: enUpdated } as any)
+                  .eq("id", existingBrief.id);
+              }
+            } else if (editedLang === "en" && analysis) {
+              const koUpdated = deepSet(structuredClone(analysis), path, data.translated);
+              setAnalysis(koUpdated);
+              if (existingBrief) {
+                await supabase.from("briefs").update({ analysis: koUpdated }).eq("id", existingBrief.id);
+              }
+            }
+          }
+        } catch (err) {
+          console.error("Field sync failed:", err);
+        } finally {
+          setFieldSyncing(null);
+        }
+      }
+    },
+    [analysis, analysisEn, analysisLang, existingBrief],
+  );
+
+  /* ━━━━━ First-time editing hint ━━━━━ */
+  const [showEditHint, setShowEditHint] = useState(false);
+  useEffect(() => {
+    if (!analysis || !isDeepAnalysis(analysis)) return;
+    const key = `ff_edit_hint_${projectId}`;
+    if (!localStorage.getItem(key)) {
+      setShowEditHint(true);
+      localStorage.setItem(key, "1");
+      const timer = setTimeout(() => setShowEditHint(false), 3000);
+      const handleClick = () => {
+        setShowEditHint(false);
+        clearTimeout(timer);
+      };
+      window.addEventListener("click", handleClick, { once: true });
+      return () => {
+        clearTimeout(timer);
+        window.removeEventListener("click", handleClick);
+      };
+    }
+  }, [analysis, projectId]);
+
+  const refFileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const fetchBrief = async () => {
+      const { data } = await supabase
+        .from("briefs")
+        .select("*")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (!data) return;
+      setExistingBrief(data as unknown as Brief);
+
+      if (data.analysis) {
+        const a = data.analysis as unknown as DeepAnalysis;
+        setAnalysis(a);
+        setAnalyzedAt(data.created_at);
+        setSourceType(((data as any).source_type as "text" | "image" | "pdf") || "text");
+
+        // ★ Load lang from DB
+        if ((data as any).lang) {
+          setAnalysisLang((data as any).lang as Lang);
+        }
+
+        if ((data as any).analysis_en) {
+          setAnalysisEn((data as any).analysis_en as unknown as Analysis);
+        }
+
+        const currentDraft = loadFromLS(projectId);
+        if (!currentDraft.ideaNote && a.idea_note) {
+          setIdeaNote(a.idea_note);
+        }
+      }
+
+      const currentDraft = loadFromLS(projectId);
+      if (!currentDraft.briefText && data.raw_text) {
+        setBriefText(data.raw_text);
+      }
+    };
+    fetchBrief();
+  }, [projectId]);
+
+  const handleRefFileSelect = useCallback(
+    async (files: FileList | null) => {
+      if (!files) return;
+      for (const file of Array.from(files).slice(0, 5 - refImages.length)) {
+        if (file.size > 10 * 1024 * 1024) {
+          toast({ variant: "destructive", title: "File too large", description: "Max file size is 10MB." });
+          continue;
+        }
+        if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+          toast({ variant: "destructive", title: "Unsupported format", description: "JPG, PNG, WEBP만 지원합니다." });
+          continue;
+        }
+        const base64 = await fileToBase64(file);
+        setRefImages((prev) => [
+          ...prev,
+          { file, base64, mediaType: file.type, preview: toDataUrl(base64, file.type) },
+        ]);
+      }
+    },
+    [refImages.length, toast],
+  );
+
+  const removeRefImage = (i: number) => setRefImages((prev) => prev.filter((_, j) => j !== i));
+  const removeBriefImage = (i: number) => setBriefImages((prev) => prev.filter((_, j) => j !== i));
+
+  const extractTextFromPDF = async (file: File) => {
+    const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+    const pages: string[] = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const tc = await page.getTextContent();
+      pages.push(`[${i}페이지]\n${(tc.items as any[]).map((it) => it.str).join(" ")}`);
+    }
+    const full = pages.join("\n\n");
+    if (full.trim().length < 50) throw new Error("텍스트가 너무 적습니다");
+    return { text: full.length > 8000 ? full.slice(0, 8000) + "\n\n[이하 생략됨]" : full, pages: pdf.numPages };
+  };
+
+  const handlePDFUpload = useCallback(
+    async (file: File) => {
+      if (file.size > 20 * 1024 * 1024) {
+        toast({ variant: "destructive", title: "File too large", description: "Max file size is 20MB." });
+        return;
+      }
+      if (file.type !== "application/pdf") {
+        toast({ variant: "destructive", title: "Unsupported format", description: "Only PDF files are supported." });
+        return;
+      }
+      setPdfFileName(file.name);
+      setPdfFileSize(file.size);
+      setPdfState("extracting");
+      try {
+        const { text, pages } = await extractTextFromPDF(file);
+        setPdfExtractedText(text);
+        setPdfPageInfo({ pages, chars: text.length });
+        setPdfState("ready");
+      } catch {
+        setPdfState("error");
+      }
+    },
+    [toast],
+  );
+
+  const resetPdf = () => {
+    setPdfState("idle");
+    setPdfExtractedText("");
+    setPdfFileName("");
+    setPdfFileSize(0);
+    setPdfPageInfo(null);
+  };
+
+  const handleComposerDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      setComposerDragOver(false);
+      const files = e.dataTransfer.files;
+      if (!files?.length) return;
+      const pdfs = Array.from(files).filter((f) => f.type === "application/pdf");
+      const imgs = Array.from(files).filter((f) => ["image/jpeg", "image/png", "image/webp"].includes(f.type));
+      if (pdfs[0]) handlePDFUpload(pdfs[0]);
+      for (const file of imgs.slice(0, 3 - briefImages.length)) {
+        if (file.size > 10 * 1024 * 1024) {
+          toast({ variant: "destructive", title: "File too large", description: "Max file size is 10MB." });
+          continue;
+        }
+        const base64 = await fileToBase64(file);
+        setBriefImages((prev) => [
+          ...prev,
+          { file, base64, mediaType: file.type, preview: toDataUrl(base64, file.type) },
+        ]);
+      }
+    },
+    [briefImages.length, handlePDFUpload, toast],
+  );
+
+  const canAnalyze = briefText.trim().length > 0 || pdfState === "ready" || briefImages.length > 0;
+
+  const handleAnalyze = async () => {
+    if (!canAnalyze) return;
+    setAnalyzing(true);
+    try {
+      let result: DeepAnalysis;
+      let currentSourceType: "text" | "pdf" | "image";
+      let imageAnalysis = "";
+
+      if (refImages.length > 0) {
+        try {
+          const { data: rd, error: re } = await supabase.functions.invoke("analyze-reference-images", {
+            body: { images: refImages.map((i) => ({ base64: i.base64, mediaType: i.mediaType })) },
+          });
+          if (!re && rd?.analysis) imageAnalysis = rd.analysis;
+        } catch {}
+      }
+
+      if (briefImages.length > 0) {
+        result = await analyzeBriefWithImages(
+          briefImages.map((i) => ({ base64: i.base64, mediaType: i.mediaType })),
+          [
+            briefText.trim(),
+            imageAnalysis ? `스타일 레퍼런스 분석: ${imageAnalysis}` : "",
+            ideaNote.trim() ? `크리에이터 아이디어 메모: ${ideaNote.trim()}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          analysisLang,
+        );
+        currentSourceType = "image";
+      } else if (pdfState === "ready") {
+        let txt = `[PDF 브리프: ${pdfFileName}]\n\n${pdfExtractedText}`;
+        if (briefText.trim()) txt += `\n\n## 추가 텍스트\n${briefText.trim()}`;
+        if (imageAnalysis) txt += `\n\n## 첨부 이미지 스타일 분석\n${imageAnalysis}`;
+        if (ideaNote.trim()) txt += `\n\n## 크리에이터 아이디어 메모\n${ideaNote.trim()}`;
+        result = await analyzeBriefText(txt, analysisLang);
+        currentSourceType = "pdf";
+      } else {
+        let txt = briefText.trim();
+        if (imageAnalysis) txt += `\n\n## 첨부 이미지 스타일 분석\n${imageAnalysis}`;
+        if (ideaNote.trim()) txt += `\n\n## 크리에이터 아이디어 메모\n${ideaNote.trim()}`;
+        result = await analyzeBriefText(txt, analysisLang);
+        currentSourceType = "text";
+      }
+
+      if (ideaNote.trim()) result.idea_note = ideaNote.trim();
+      if (imageAnalysis) result.image_analysis = imageAnalysis;
+
+      setAnalysis(result);
+      setAnalysisEn(null); // invalidate EN cache
+      // ★ analysisLang은 유지 — 사용자가 선택한 언어 보존
+      setSourceType(currentSourceType);
+      setAnalyzedAt(new Date().toISOString());
+
+      const payload: any = {
+        raw_text: pdfState === "ready" ? pdfExtractedText : briefText.trim(),
+        analysis: result as any,
+        analysis_en: null,
+        lang: analysisLang, // ★ DB에 lang 저장
+        source_type: currentSourceType,
+        image_urls: null,
+      };
+
+      if (existingBrief) {
+        await supabase.from("briefs").update(payload).eq("id", existingBrief.id);
+      } else {
+        const { data: nb } = await supabase
+          .from("briefs")
+          .insert({ project_id: projectId, ...payload })
+          .select()
+          .single();
+        if (nb) setExistingBrief(nb as unknown as Brief);
+      }
+    } catch {
+      toast({
+        variant: "destructive",
+        title: "분석 오류",
+        description: "분석 중 오류가 발생했습니다. 다시 시도해주세요.",
+      });
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const copyAll = () => {
+    if (!analysis) return;
+    let text: string;
+    if (isDeepAnalysis(analysis)) {
+      const a = analysis;
+      text = [
+        `캠페인 목표: ${a.goal.summary}\n${a.goal.items.map((g) => `• ${g}`).join("\n")}`,
+        `타겟: ${a.target.summary}\n${a.target.primary.map((t) => `• ${t}`).join("\n")}`,
+        `USP: ${a.usp.summary}\n${a.usp.items.map((u) => `• ${u}`).join("\n")}`,
+        `톤앤매너: ${a.tone_manner.summary}\n키워드: ${a.tone_manner.keywords.join(", ")}`,
+        `제작 노트\n포맷: ${a.production_notes.format_recommendation}`,
+      ].join("\n\n");
+    } else {
+      const l = analysis as LegacyAnalysis;
+      text = [
+        `목표:\n${l.goal.map((g) => `• ${g}`).join("\n")}`,
+        `타겟:\n${l.target.map((t) => `• ${t}`).join("\n")}`,
+        `USP:\n${l.usp.map((u) => `• ${u}`).join("\n")}`,
+        `톤앤매너:\n${l.tone_manner.map((t) => `• ${t}`).join("\n")}`,
+      ].join("\n\n");
+    }
+    navigator.clipboard.writeText(text);
+    toast({ title: "Copied", description: "Analysis copied to clipboard." });
+  };
+
+  const formatDate = (iso: string) => {
+    const d = new Date(iso);
+    return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+
+  const hasAnalysis = !!analysis && !analyzing;
+  const isCollapsedMode = hasAnalysis;
+
+  const briefTextPreview = briefText.trim()
+    ? briefText.trim().slice(0, 60) + (briefText.trim().length > 60 ? "…" : "")
+    : "Empty";
+  const moodboardPreview =
+    refImages.length > 0 ? `${refImages.length} image${refImages.length > 1 ? "s" : ""}` : "No images";
+  const ideaNotePreview = ideaNote.trim()
+    ? ideaNote.trim().slice(0, 60) + (ideaNote.trim().length > 60 ? "…" : "")
+    : "Empty";
+
+  const renderBriefTextContent = () => (
+    <>
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setComposerDragOver(true);
+        }}
+        onDragLeave={() => setComposerDragOver(false)}
+        onDrop={handleComposerDrop}
+        className={`overflow-hidden border bg-input transition-colors ${composerDragOver ? "border-primary/50" : "border-input focus-within:border-primary/50"}`}
+        style={{
+          borderRadius: 0,
+          ...(composerDragOver ? { background: "rgba(249,66,58,0.04)" } : {}),
+        }}
+      >
+        <textarea
+          value={briefText}
+          onChange={(e) => setBriefText(e.target.value.slice(0, 5000))}
+          placeholder="Enter your brief — production goals, target audience, key message, references, etc."
+          className={`w-full border-none outline-none resize-none text-[12px] font-[inherit] text-foreground bg-transparent px-3 pt-3 pb-2 leading-relaxed placeholder:text-muted-foreground/40 ${isCollapsedMode ? "h-[100px]" : "h-[140px]"}`}
+        />
+        <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-border bg-input">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="rgba(255,255,255,0.2)" strokeWidth="1.5">
+            <path d="M3 10l3-3 3 3M9 7l3-3 3 3" />
+            <path d="M1 13h14" />
+          </svg>
+          <span className="font-mono text-[10px] text-muted-foreground/40">IMG · PDF DROP</span>
+          <span className="ml-auto font-mono text-[10px] text-muted-foreground/30">{briefText.length} / 5000</span>
+        </div>
+      </div>
+
+      {briefImages.length > 0 && (
+        <div className="border border-border p-2" style={{ borderRadius: 0 }}>
+          <p className="label-meta text-muted-foreground mb-1.5">BRIEF_IMAGES</p>
+          <div className="flex gap-2 flex-wrap">
+            {briefImages.map((img, i) => (
+              <div key={i} className="relative group">
+                <img
+                  src={img.preview}
+                  alt=""
+                  onClick={() => setLightboxSrc(img.preview)}
+                  className="h-[56px] w-[56px] object-cover border border-border cursor-zoom-in"
+                  style={{ borderRadius: 0 }}
+                />
+                <button
+                  onClick={() => removeBriefImage(i)}
+                  className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                  style={{ borderRadius: 0 }}
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              </div>
+            ))}
+            {briefImages.length < 3 && (
+              <div
+                className="h-[56px] w-[56px] border border-dashed border-border flex flex-col items-center justify-center gap-0.5"
+                style={{ borderRadius: 0 }}
+              >
+                <span className="font-mono text-[9px] text-muted-foreground/30">+DROP</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {pdfState === "extracting" && (
+        <div className="flex items-center gap-2 px-3 py-2.5 bg-input border border-border" style={{ borderRadius: 0 }}>
+          <FileText className="w-4 h-4 text-primary shrink-0" />
+          <span className="font-mono text-[11px] text-muted-foreground flex-1 truncate">{pdfFileName}</span>
+          <div className="w-20 h-1 bg-border overflow-hidden" style={{ borderRadius: 0 }}>
+            <div className="h-full bg-primary animate-pulse" style={{ width: "70%", borderRadius: 0 }} />
+          </div>
+        </div>
+      )}
+      {pdfState === "ready" && (
+        <div className="flex items-center gap-2 px-3 py-2.5 bg-input border border-border" style={{ borderRadius: 0 }}>
+          <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-[12px] text-foreground truncate font-medium">{pdfFileName}</p>
+            {pdfPageInfo && (
+              <p className="font-mono text-[10px] text-muted-foreground">
+                {pdfPageInfo.pages}P · {pdfPageInfo.chars.toLocaleString()} CHARS
+              </p>
+            )}
+          </div>
+          <button onClick={resetPdf} className="text-muted-foreground hover:text-foreground transition-colors shrink-0">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+      {pdfState === "error" && (
+        <div
+          className="flex items-center gap-2 px-3 py-2.5 border"
+          style={{ borderRadius: 0, background: "rgba(249,66,58,0.06)", borderColor: "rgba(249,66,58,0.2)" }}
+        >
+          <AlertCircle className="w-4 h-4 text-primary shrink-0" />
+          <p className="font-mono text-[10px] text-primary flex-1">PDF_EXTRACT_FAILED — SCAN IMG NOT SUPPORTED</p>
+          <button onClick={resetPdf} className="text-[11px] text-primary underline shrink-0">
+            닫기
+          </button>
+        </div>
+      )}
+    </>
+  );
+
+  const renderMoodboardContent = () => (
+    <>
+      <input
+        ref={refFileInputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          handleRefFileSelect(e.target.files);
+          e.target.value = "";
+        }}
+      />
+      {refImages.length === 0 ? (
+        <div
+          onClick={() => refFileInputRef.current?.click()}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setRefDragOver(true);
+          }}
+          onDragLeave={() => setRefDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setRefDragOver(false);
+            handleRefFileSelect(e.dataTransfer.files);
+          }}
+          className="h-[60px] border border-dashed flex items-center justify-center gap-2 cursor-pointer transition-colors"
+          style={{
+            borderRadius: 0,
+            borderColor: refDragOver ? "rgba(249,66,58,0.5)" : "rgba(255,255,255,0.1)",
+            background: refDragOver ? "rgba(249,66,58,0.04)" : "transparent",
+          }}
+        >
+          <ImagePlus className="w-4 h-4 text-muted-foreground/30" />
+          <p className="font-mono text-[10px] text-muted-foreground/40">DRAG OR CLICK · MAX 5</p>
+        </div>
+      ) : (
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setRefDragOver(true);
+          }}
+          onDragLeave={() => setRefDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setRefDragOver(false);
+            handleRefFileSelect(e.dataTransfer.files);
+          }}
+          className="border p-2 transition-colors"
+          style={{
+            borderRadius: 0,
+            borderColor: refDragOver ? "rgba(249,66,58,0.5)" : "rgba(255,255,255,0.07)",
+            background: refDragOver ? "rgba(249,66,58,0.04)" : "transparent",
+          }}
+        >
+          <div className="flex gap-2 flex-wrap">
+            {refImages.map((img, i) => (
+              <div key={i} className="relative group">
+                <img
+                  src={img.preview}
+                  alt=""
+                  onClick={() => setLightboxSrc(img.preview)}
+                  className="h-[54px] w-[54px] object-cover border border-border cursor-zoom-in"
+                  style={{ borderRadius: 0 }}
+                />
+                <button
+                  onClick={() => removeRefImage(i)}
+                  className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                  style={{ borderRadius: 0 }}
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              </div>
+            ))}
+            {refImages.length < 5 && (
+              <button
+                onClick={() => refFileInputRef.current?.click()}
+                className="h-[54px] w-[54px] border border-dashed border-border hover:border-primary/40 flex flex-col items-center justify-center gap-0.5 transition-colors"
+                style={{ borderRadius: 0 }}
+              >
+                <Plus className="w-3.5 h-3.5 text-muted-foreground/30" />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+
+  const renderIdeaNoteContent = () => (
+    <div
+      className="overflow-hidden border border-input bg-input transition-colors focus-within:border-primary/50"
+      style={{ borderRadius: 0 }}
+    >
+      <textarea
+        value={ideaNote}
+        onChange={(e) => setIdeaNote(e.target.value.slice(0, 2000))}
+        placeholder="Scenes, moods, and references — feel free to share."
+        className="w-full h-[60px] border-none outline-none resize-none text-[11px] font-[inherit] text-foreground bg-transparent px-3 py-2 leading-relaxed placeholder:text-muted-foreground/30"
+      />
+    </div>
+  );
+
+  /* ━━━━━ RENDER ━━━━━ */
+  return (
+    <div className="flex gap-3 h-full">
+      {/* ── LEFT: Input Panel ── */}
+      <div
+        className={`shrink-0 ${isMobile ? "w-full" : ""}`}
+        style={
+          isMobile
+            ? {}
+            : {
+                width: isCollapsedMode ? 260 : 300,
+                minWidth: isCollapsedMode ? 220 : undefined,
+                maxWidth: isCollapsedMode ? 280 : undefined,
+              }
+        }
+      >
+        <div className="bg-card/80 border border-border flex flex-col h-full" style={{ borderRadius: 0 }}>
+          {/* ★ Header — Creative Input + KO/EN toggle */}
+          <div className="px-4 pt-4 pb-3 border-b border-border flex items-center justify-between">
+            <h2 className="text-[13px] font-bold tracking-wider text-foreground">Creative Input</h2>
+            <LangToggle lang={analysisLang} onChange={(l) => { if (hasAnalysis) handleLangToggle(l); else setAnalysisLang(l); }} loading={translating} />
+          </div>
+
+          <div className="flex flex-col flex-1 px-5 pt-3 pb-4 gap-4 overflow-y-auto">
+            {isCollapsedMode ? (
+              <>
+                <CollapsibleSection title="Brief Text" preview={briefTextPreview}>
+                  {renderBriefTextContent()}
+                </CollapsibleSection>
+                <CollapsibleSection title="Moodboard" preview={moodboardPreview}>
+                  {renderMoodboardContent()}
+                </CollapsibleSection>
+                <CollapsibleSection title="Idea Note" preview={ideaNotePreview}>
+                  {renderIdeaNoteContent()}
+                </CollapsibleSection>
+                <button
+                  onClick={handleAnalyze}
+                  disabled={!canAnalyze || analyzing}
+                  className="w-full h-[36px] text-[11px] font-semibold tracking-wider text-muted-foreground border border-border transition-colors flex items-center justify-center gap-2 mt-auto hover:text-foreground hover:border-foreground/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                  style={{ borderRadius: 0 }}
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Re-analyze
+                </button>
+              </>
+            ) : (
+              <>
+                <div>
+                  <p className="label-meta text-primary mb-1">Brief Text</p>
+                  {renderBriefTextContent()}
+                </div>
+                <div>
+                  <p className="label-meta text-primary mb-1">Moodboard</p>
+                  {renderMoodboardContent()}
+                </div>
+                <div>
+                  <p className="label-meta text-primary mb-1">
+                    Idea Note <span className="font-normal opacity-50">(Optional)</span>
+                  </p>
+                  {renderIdeaNoteContent()}
+                </div>
+                <button
+                  onClick={handleAnalyze}
+                  disabled={!canAnalyze || analyzing}
+                  className="w-full h-[40px] text-[12px] font-semibold tracking-wider text-white transition-colors flex items-center justify-center gap-2 mt-auto disabled:opacity-30 disabled:cursor-not-allowed"
+                  style={{
+                    borderRadius: 0,
+                    background: analyzing ? "rgba(249,66,58,0.4)" : "#f9423a",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!analyzing && canAnalyze) (e.currentTarget as HTMLElement).style.background = "#e03530";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = analyzing ? "rgba(249,66,58,0.4)" : "#f9423a";
+                  }}
+                >
+                  {analyzing ? "Analyzing..." : "✦ Execute Analysis"}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── CENTER: Strategy Manifesto ── */}
+      {(hasAnalysis || analyzing) && (
+        <div className="flex-1 min-w-0 flex flex-col">
+          <div className="border border-border overflow-hidden flex flex-col h-full" style={{ borderRadius: 4 }}>
+            <div
+              className="flex items-center gap-2 px-4 py-3 border-b border-border shrink-0"
+              style={{ background: "rgba(249,66,58,0.06)" }}
+            >
+              <h2 className="text-[13px] font-bold tracking-wider text-foreground">Strategy Manifesto</h2>
+              {showEditHint && (
+                <span
+                  className="text-[10px] px-2 py-0.5 rounded animate-fade-in"
+                  style={{
+                    background: "rgba(249,66,58,0.12)",
+                    color: "#f9423a",
+                    border: "1px solid rgba(249,66,58,0.2)",
+                  }}
+                >
+                  텍스트를 클릭하여 편집할 수 있습니다
+                </span>
+              )}
+              {hasAnalysis && (
+                <>
+                  <div
+                    className="ml-auto flex items-center gap-1"
+                    style={{ background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: 2 }}
+                  >
+                    <button
+                      onClick={() => setViewMode("list")}
+                      className="flex items-center justify-center transition-colors"
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 6,
+                        background: viewMode === "list" ? "rgba(249,66,58,0.14)" : "transparent",
+                        color: viewMode === "list" ? "#f9423a" : "#666",
+                      }}
+                    >
+                      <LayoutList className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => setViewMode("slide")}
+                      className="flex items-center justify-center transition-colors"
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 6,
+                        background: viewMode === "slide" ? "rgba(249,66,58,0.14)" : "transparent",
+                        color: viewMode === "slide" ? "#f9423a" : "#666",
+                      }}
+                    >
+                      <GalleryHorizontalEnd className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                   {/* ★ Result area lang toggle — removed, now in Creative Input header */}
+                </>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto bg-background/60 p-4">
+              {analyzing ? (
+                <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-5">
+                  <div className="relative w-10 h-10">
+                    <span className="absolute inset-0 border-2 border-primary/20 rounded-full" />
+                    <span className="absolute inset-0 border-2 border-transparent border-t-primary rounded-full animate-spin" />
+                  </div>
+                  <div className="text-center space-y-1.5">
+                    <p className="text-[13px] font-semibold text-foreground">
+                      {pdfState === "ready" ? "Processing PDF Brief…" : "Generating Strategy Report…"}
+                    </p>
+                    <p className="font-mono text-[10px] text-muted-foreground/50">Deep analysis · ~10-20s</p>
+                  </div>
+                  <div
+                    className="w-48 h-1 rounded-full overflow-hidden"
+                    style={{ background: "rgba(255,255,255,0.06)" }}
+                  >
+                    <div className="h-full bg-primary/60 rounded-full animate-pulse" style={{ width: "60%" }} />
+                  </div>
+                </div>
+              ) : analysis ? (
+                (() => {
+                  const displayAnalysis = analysisLang === "en" && analysisEn ? analysisEn : analysis;
+                  if (isDeepAnalysis(displayAnalysis)) {
+                    return viewMode === "slide" ? (
+                      <SlideViewUI analysis={displayAnalysis} lang={analysisLang} onUpdate={updateAnalysisField} />
+                    ) : (
+                      <CoreStrategyUI analysis={displayAnalysis} lang={analysisLang} onUpdate={updateAnalysisField} />
+                    );
+                  }
+                  return <LegacyResultUI analysis={displayAnalysis as LegacyAnalysis} lang={analysisLang} />;
+                })()
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Empty state ── */}
+      {!hasAnalysis && !analyzing && (
+        <div className="flex-1 min-w-0 flex flex-col">
+          <div className="border border-border overflow-hidden flex flex-col h-full" style={{ borderRadius: 0 }}>
+            <div
+              className="flex items-center gap-2 px-4 py-3 border-b border-border shrink-0"
+              style={{ background: "rgba(249,66,58,0.06)" }}
+            >
+              <h2 className="text-[13px] font-bold tracking-wider text-foreground">Strategy Manifesto</h2>
+            </div>
+            <div className="flex-1 overflow-y-auto bg-background/60 p-4">
+              <div className="flex flex-col items-center justify-center h-full min-h-[360px]">
+                <BarChart3 className="w-8 h-8 text-muted-foreground/20 mb-3" />
+                <p className="text-[13px] font-bold tracking-wider text-muted-foreground/40">No Analysis Yet</p>
+                <p className="font-mono text-[10px] text-muted-foreground/25 mt-1">Input brief → Execute Analysis</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── RIGHT: Production Guide + Actions ── */}
+      {!isMobile && hasAnalysis && (
+        <div className="shrink-0" style={{ width: 380, minWidth: 340 }}>
+          <div className="border border-border flex flex-col h-full overflow-hidden" style={{ borderRadius: 0 }}>
+            <div
+              className="px-4 pt-4 pb-3 shrink-0"
+              style={{
+                position: "sticky",
+                top: 0,
+                zIndex: 10,
+                background: "hsl(var(--background))",
+                boxShadow: "0 1px 0 rgba(255,255,255,0.06)",
+              }}
+            >
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
+                  <span className="text-[11px] font-medium text-emerald-400">Analysis Complete</span>
+                  {analyzedAt && (
+                    <span className="font-mono text-[10px] text-muted-foreground/50 ml-auto">
+                      {formatDate(analyzedAt)}
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => setShowNextStepModal(true)}
+                  className="w-full h-[44px] text-[12px] font-semibold tracking-wider text-white transition-colors flex items-center justify-center gap-2"
+                  style={{ borderRadius: 0, background: "#f9423a" }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = "#e03530";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = "#f9423a";
+                  }}
+                >
+                  Execute Strategy →
+                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={copyAll}
+                    className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <Copy className="w-3 h-3" />
+                    Copy
+                  </button>
+                  <button
+                    onClick={handleAnalyze}
+                    disabled={!canAnalyze || analyzing}
+                    className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Re-analyze
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-4">
+              {analysis &&
+                isDeepAnalysis(analysis) &&
+                (() => {
+                  const displayAnalysis = analysisLang === "en" && analysisEn ? analysisEn : analysis;
+                  return isDeepAnalysis(displayAnalysis) ? (
+                    <ProductionGuideUI analysis={displayAnalysis} lang={analysisLang} onUpdate={updateAnalysisField} />
+                  ) : null;
+                })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── RIGHT: Action Panel (no analysis) ── */}
+      {!isMobile && !hasAnalysis && (
+        <div className="w-[200px] shrink-0">
+          <div className="bg-card/80 border border-border flex flex-col h-full" style={{ borderRadius: 0 }}>
+            <div className="px-4 pt-4 pb-3 border-b border-border">
+              <h2 className="text-[13px] font-bold tracking-wider text-foreground">Next Step</h2>
+            </div>
+            <div className="flex flex-col flex-1 px-3 pt-4 pb-4 gap-4">
+              {analyzing ? (
+                <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center">
+                  <span className="font-mono text-[10px] text-muted-foreground/30 uppercase leading-relaxed">
+                    Analysis in progress…
+                  </span>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center">
+                  <span className="font-mono text-[10px] text-muted-foreground/30 uppercase leading-relaxed">
+                    Run analysis first to proceed
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showNextStepModal && (
+        <NextStepModal
+          onClose={() => setShowNextStepModal(false)}
+          onGoAssets={() => onSwitchToAssets?.()}
+          onGoAgent={() => onSwitchToAgent(analysisLang)}
+          analysisLang={analysisLang}
+        />
+      )}
+
+      {lightboxSrc && (
+        <div
+          onClick={() => setLightboxSrc(null)}
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 cursor-zoom-out"
+        >
+          <button
+            onClick={() => setLightboxSrc(null)}
+            className="absolute top-4 right-4 w-8 h-8 bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"
+            style={{ borderRadius: 3 }}
+          >
+            <X className="w-4 h-4 text-white" />
+          </button>
+          <img
+            src={lightboxSrc}
+            alt="Original image"
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-[90vw] max-h-[90vh] object-contain shadow-2xl cursor-default"
+            style={{ borderRadius: 4 }}
+          />
+        </div>
+      )}
+    </div>
+  );
+};

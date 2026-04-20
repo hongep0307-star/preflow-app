@@ -1,0 +1,28 @@
+node_modules
+dist
+dist-electron
+release
+
+# SQLite
+*.db
+*.db-wal
+*.db-shm
+
+# env/secrets
+.env
+.env.local
+.env.*.local
+
+# logs / caches
+*.log
+npm-debug.log*
+.vite
+.cache
+
+# OS
+Thumbs.db
+.DS_Store
+
+# editors
+.vscode/
+.idea/
