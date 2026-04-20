@@ -969,6 +969,7 @@ export const SortableSceneCard = ({
   onContentHeight,
   showImages = true,
   onDropMoodImage,
+  maxImgWidth,
 }: {
   scene: Scene;
   onDelete: (id: string) => void;
@@ -985,6 +986,8 @@ export const SortableSceneCard = ({
     sceneNumber: number,
     payload: { moodImageId: string; url: string },
   ) => void;
+  /** 패널 폭 대비 이미지 컬럼 최대 폭(px). 미지정 시 제한 없음. */
+  maxImgWidth?: number;
 }) => {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: scene.id });
   const [moodHovered, setMoodHovered] = useState(false);
@@ -992,7 +995,12 @@ export const SortableSceneCard = ({
   const assetMap = buildAssetMap(assets);
   const slotCfg = FORMAT_MOOD_SLOT[videoFormat] ?? FORMAT_MOOD_SLOT.vertical;
   const [wr, hr] = slotCfg.aspectRatio.split("/").map(Number);
-  const imgWidth = Math.round((sharedHeight * wr) / hr);
+  // imgWidth 가 sharedHeight 에서만 파생되면 (sharedHeight → imgWidth → content 폭 축소
+  // → content 높이↑ → sharedHeight↑) 피드백 루프가 발생한다.
+  // 패널 폭을 기준으로 상한(maxImgWidth)을 걸어 피드백 루프를 차단한다.
+  const naturalImgWidth = Math.round((sharedHeight * wr) / hr);
+  const imgWidth =
+    maxImgWidth && maxImgWidth > 0 ? Math.min(naturalImgWidth, Math.round(maxImgWidth)) : naturalImgWidth;
   const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

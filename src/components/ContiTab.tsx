@@ -111,6 +111,10 @@ const _loadingByProject = new Map<string, LoadingFields>();
 const _loadingListenersByProject = new Map<string, Set<() => void>>();
 const _cacheBustersByProject = new Map<string, Record<number, number>>();
 const _sceneStateByProject = new Map<string, { scenes: Scene[]; activeVersionId: string | null }>();
+// scene state 모듈 store 에 구독자를 둔다. 탭 이동으로 컴포넌트가 언마운트된 뒤에도
+// 계속 돌고 있는 스타일 변형/전체 생성 배치 루프가 saveSceneState 로 최신 상태를 쓰면,
+// 리마운트된 인스턴스가 이 구독을 통해 React state 를 동기화해 UI 에 새 이미지를 즉시 반영한다.
+const _sceneStateListenersByProject = new Map<string, Set<() => void>>();
 
 function emptyLoading(): LoadingFields {
   return {
@@ -164,6 +168,14 @@ function getSceneState(pid: string) {
 }
 function saveSceneState(pid: string, scenes: Scene[], activeVersionId: string | null) {
   _sceneStateByProject.set(pid, { scenes, activeVersionId });
+  _sceneStateListenersByProject.get(pid)?.forEach((fn) => fn());
+}
+function subscribeSceneState(pid: string, fn: () => void) {
+  if (!_sceneStateListenersByProject.has(pid)) _sceneStateListenersByProject.set(pid, new Set());
+  _sceneStateListenersByProject.get(pid)!.add(fn);
+  return () => {
+    _sceneStateListenersByProject.get(pid)?.delete(fn);
+  };
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1455,6 +1467,20 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     [projectId],
   );
 
+  // ⚠️ 모듈 store 구독: 탭 이동 → 리마운트 중에도 background 스타일 변형/일괄 생성 루프가
+  // saveSceneState 로 최신 scene 배열을 쓴다. 언마운트된 인스턴스의 setter 는 no-op 이므로
+  // 새 인스턴스는 이 구독을 통해 모듈 store 변경을 감지해 activeScenes React state 를 맞춘다.
+  // 같은 reference 라면 React 가 자동으로 dedupe 하므로 cycle 걱정 없음.
+  useEffect(() => {
+    const unsub = subscribeSceneState(projectId, () => {
+      const stored = _sceneStateByProject.get(projectId);
+      if (!stored) return;
+      setActiveScenesState(stored.scenes);
+      setActiveVersionIdState(stored.activeVersionId);
+    });
+    return unsub;
+  }, [projectId]);
+
   const [currentScenes, setCurrentScenes] = useState<Scene[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
 
@@ -1573,17 +1599,33 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   }, []);
   const [historySheet, setHistorySheet] = useState<Scene | null>(null);
 
-  const pushHistory = (sceneNumber: number, oldUrl: string | null) => {
+  // ⚠️ sceneId 로 식별한다. 이전에는 scene_number 로 식별했는데,
+  // 스타일 변형 전체 루프 중간에 TR 삽입/삭제/재배열이 일어나면 scene_number 가 뒤섞여
+  // 엉뚱한 scene 의 conti_image_history 에 push 되는 버그가 있었다.
+  const pushHistory = (sceneId: string, oldUrl: string | null) => {
     if (!oldUrl) return;
-    setImageHistory((prev) => {
-      const existing = prev[sceneNumber] ?? [];
-      const updated = [oldUrl, ...existing.filter((u) => u !== oldUrl)].slice(0, MAX_HISTORY);
-      const scene = (getSceneState(projectId)?.scenes ?? activeScenes).find((s) => s.scene_number === sceneNumber);
-      if (scene) {
-        supabase.from("scenes").update({ conti_image_history: updated }).eq("id", scene.id).then();
-      }
-      return { ...prev, [sceneNumber]: updated };
-    });
+    const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+    const scene = latest.find((s) => s.id === sceneId);
+    if (!scene) return;
+    const existing = Array.isArray(scene.conti_image_history) ? scene.conti_image_history : [];
+    const next = [oldUrl, ...existing.filter((u) => u !== oldUrl)].slice(0, MAX_HISTORY);
+    supabase.from("scenes").update({ conti_image_history: next }).eq("id", scene.id).then();
+    // 모듈 store 를 동기로 먼저 갱신해 두어야, style-transfer 루프처럼
+    // pushHistory 직후 await 전에 getSceneState() 를 읽는 코드가 최신 history 를 본다.
+    const currentState = getSceneState(projectId);
+    if (currentState) {
+      const updatedScenes = currentState.scenes.map((s) =>
+        s.id === scene.id ? { ...s, conti_image_history: next } : s,
+      );
+      saveSceneState(projectId, updatedScenes, currentState.activeVersionId ?? null);
+    }
+    setActiveScenes((prev) =>
+      prev.map((s) => (s.id === scene.id ? { ...s, conti_image_history: next } : s)),
+    );
+    // UI 캐시는 '현재의' scene_number 로 동기화 (표시 전용).
+    const nextMap = { ...imageHistoryRef.current, [scene.scene_number]: next };
+    imageHistoryRef.current = nextMap;
+    setImageHistoryState(nextMap);
   };
 
   const imageHistorySyncKey = activeScenes.map((s) => `${s.id}:${(s.conti_image_history ?? []).join("|")}`).join("||");
@@ -1649,6 +1691,32 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     return linked?.url ?? undefined;
   }, []);
 
+  // scene_versions.scenes 에 conti_image_history 가 누락된 legacy 데이터를 위해,
+  // scenes 테이블에서 scene.id 기준으로 history 를 가져와 머지한다. renumber 에 영향을 받지 않는다.
+  const hydrateSceneHistory = useCallback(
+    async (scenes: Scene[]): Promise<Scene[]> => {
+      if (!scenes.length) return scenes;
+      const ids = scenes.map((s) => s.id).filter(Boolean);
+      if (!ids.length) return scenes;
+      const { data, error } = await supabase
+        .from("scenes")
+        .select("id, conti_image_history")
+        .in("id", ids);
+      if (error || !data) return scenes;
+      const histById = new Map<string, string[]>();
+      for (const row of data as { id: string; conti_image_history: string[] | null }[]) {
+        histById.set(row.id, Array.isArray(row.conti_image_history) ? row.conti_image_history : []);
+      }
+      return scenes.map((s) => {
+        const dbHist = histById.get(s.id) ?? [];
+        const own = Array.isArray(s.conti_image_history) ? s.conti_image_history : [];
+        // scene 객체에 history 가 이미 있다면 그것을 우선(최신 업데이트 반영).
+        return { ...s, conti_image_history: own.length > 0 ? own : dbHist };
+      });
+    },
+    [],
+  );
+
   const loadVersions = useCallback(
     async (preserveActiveScenes = false) => {
       const { data } = await supabase
@@ -1661,7 +1729,10 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       if (vers.length > 0) {
         const active = vers.find((v) => v.id === projectActiveVersionIdRef.current) ?? vers[0];
         setActiveVersionId(active.id);
-        if (!preserveActiveScenes) setActiveScenes(active.scenes as Scene[]);
+        if (!preserveActiveScenes) {
+          const hydrated = await hydrateSceneHistory(active.scenes as Scene[]);
+          setActiveScenes(hydrated);
+        }
       } else {
         setActiveVersionId(null);
         if (!preserveActiveScenes) {
@@ -1670,7 +1741,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         }
       }
     },
-    [projectId, fetchCurrentScenes, setActiveVersionId, setActiveScenes],
+    [projectId, fetchCurrentScenes, setActiveVersionId, setActiveScenes, hydrateSceneHistory],
   );
 
   useEffect(() => {
@@ -1678,7 +1749,16 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   }, []);
 
   useEffect(() => {
-    const hasOngoing = getGeneratingScenes(projectId).size > 0 || isGeneratingAll(projectId);
+    // in-flight 스타일 변형/일괄 생성이 진행 중이면, DB 로부터 scene 을 다시 읽어
+    // 모듈 store 를 덮어쓰지 않는다. 모듈 store 가 DB 보다 앞서있을 수 있기 때문.
+    // (background loop 가 scene 마다 saveSceneState 후 async 로 DB 에 write — 이 사이
+    //  구간에 리마운트가 일어나면 DB 는 한 번뒤쳐진 상태라 그걸 읽어 쓰면 진행분이 롤백된다.)
+    const _l = getLoading(projectId);
+    const hasOngoing =
+      _l.generatingSceneIds.size > 0 ||
+      _l.generatingAll ||
+      _l.styleTransferringIds.size > 0 ||
+      _l.styleTransferring;
 
     const briefsPromise = supabase
       .from("briefs")
@@ -1749,9 +1829,10 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     const version = data as SceneVersion;
     setVersions((prev) => prev.map((v) => (v.id === versionId ? { ...v, scenes: version.scenes } : v)));
     setActiveVersionId(versionId);
-    setActiveScenes(version.scenes as Scene[]);
+    const hydrated = await hydrateSceneHistory(version.scenes as Scene[]);
+    setActiveScenes(hydrated);
     projectActiveVersionIdRef.current = versionId;
-    replaceImageHistory(buildHistoryFromScenes(version.scenes as Scene[]));
+    replaceImageHistory(buildHistoryFromScenes(hydrated));
     const moduleState = getGeneratingScenes(projectId);
     setGeneratingSceneIds(new Set(moduleState));
     await supabase.from("projects").update({ active_version_id: versionId }).eq("id", projectId);
@@ -1810,14 +1891,23 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
 
   const updateVersionScenes = useCallback(
     async (updatedScenes: Scene[]) => {
-      setActiveScenes(updatedScenes);
+      // history 의 source of truth 는 scene 객체의 conti_image_history 필드.
+      // imageHistoryRef 는 scene_number 키라 insert/delete/reorder 직후에는 꼬이기 때문에
+      // 절대 fallback 으로 쓰면 안 된다 (예: TR 삽입 시 새 TR(#2) 이 구 #2 의 history 를 물려받는 버그).
+      // scene 객체에 history 가 없으면 빈 배열로 취급한다 — legacy 데이터는 별도 hydrate 단계에서 채운다.
+      const enriched = updatedScenes.map((s) => ({
+        ...s,
+        conti_image_history: Array.isArray(s.conti_image_history) ? s.conti_image_history : [],
+      }));
+      // ⚠️ 모듈 store 를 React state updater **바깥**에서 동기 갱신한다.
+      // 컴포넌트 언마운트 후에도 in-flight 스타일 트랜스퍼/생성 루프가 다음 이터레이션에서
+      // getSceneState() 로 최신 상태를 읽어 누적 업데이트 해야, 이전 이터레이션의 URL 이
+      // 덮어쓰기로 롤백되는 사고(탭 이동 후 "생성이 안되" 버그)가 없어진다.
+      const curActiveVid = getSceneState(projectId)?.activeVersionId ?? activeVersionIdRef.current ?? null;
+      saveSceneState(projectId, enriched, curActiveVid);
+      setActiveScenes(enriched);
       const vid = activeVersionIdRef.current;
       if (vid) {
-        const hist = imageHistoryRef.current;
-        const enriched = updatedScenes.map((s) => ({
-          ...s,
-          conti_image_history: hist[s.scene_number] ?? s.conti_image_history ?? [],
-        }));
         await supabase
           .from("scene_versions")
           .update({ scenes: enriched as any })
@@ -1825,7 +1915,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         setVersions((prev) => prev.map((v) => (v.id === vid ? { ...v, scenes: enriched as any } : v)));
       }
     },
-    [setActiveScenes],
+    [setActiveScenes, projectId],
   );
 
   const handleSceneUpdate = async (sceneNumber: number, fields: Partial<Scene>) => {
@@ -1851,8 +1941,6 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   };
 
   const handleDuplicateScene = async (scene: Scene) => {
-    const sourceIdx = activeScenes.findIndex((s) => s.id === scene.id);
-    const insertIdx = sourceIdx + 1;
     const tempNumber = 90000 + (Date.now() % 10000);
     const { data, error } = await supabase
       .from("scenes")
@@ -1875,7 +1963,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       toast({ title: "복제 실패", description: error?.message, variant: "destructive" });
       return;
     }
-    const newScenes = [...activeScenes];
+    // ⚠️ await 이후에는 반드시 모듈 store 로부터 최신 scene 배열을 다시 읽어야 한다.
+    // 스타일 변형/전체 생성 루프가 진행 중이면, 위의 await 동안 다른 scene 들의
+    // conti_image_url/conti_image_history 가 갱신되어 있다. activeScenes closure 는
+    // stale 이라 그대로 쓰면 진행 중이던 변경사항(스타일 결과, 새 history 엔트리)을 롤백시킨다.
+    const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+    const sourceIdxLatest = latest.findIndex((s) => s.id === scene.id);
+    const insertIdx = sourceIdxLatest >= 0 ? sourceIdxLatest + 1 : latest.length;
+    const newScenes = [...latest];
     newScenes.splice(insertIdx, 0, data as Scene);
     const renumbered = newScenes.map((s, i) => ({ ...s, scene_number: i + 1 }));
     const tempRenumbered = renumbered.map((s, i) => ({ ...s, scene_number: 80000 + i }));
@@ -1885,20 +1980,18 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     await Promise.all(
       renumbered.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
-    setActiveScenes(renumbered);
-    if (activeVersionId)
-      await supabase
-        .from("scene_versions")
-        .update({ scenes: renumbered as any })
-        .eq("id", activeVersionId);
+    await updateVersionScenes(renumbered);
     toast({ title: `Scene duplicated to position ${insertIdx + 1}.` });
   };
 
   const handleDeleteScene = async (sceneId: string, sceneNumber: number) => {
-    const deletedScene = activeScenes.find((s) => s.id === sceneId);
+    const snapshot = getSceneState(projectId)?.scenes ?? activeScenes;
+    const deletedScene = snapshot.find((s) => s.id === sceneId);
     const isTransition = deletedScene?.is_transition;
     await supabase.from("scenes").delete().eq("id", sceneId);
-    const updated = activeScenes.filter((s) => s.id !== sceneId).map((s, i) => ({ ...s, scene_number: i + 1 }));
+    // await 이후 최신 snapshot 재조회 (스타일 변형 루프가 중간에 다른 scene 업데이트 가능).
+    const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+    const updated = latest.filter((s) => s.id !== sceneId).map((s, i) => ({ ...s, scene_number: i + 1 }));
     const tempUpdated = updated.map((s, i) => ({ ...s, scene_number: 80000 + i }));
     await Promise.all(
       tempUpdated.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
@@ -1906,12 +1999,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     await Promise.all(
       updated.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
-    setActiveScenes(updated);
-    if (activeVersionId)
-      await supabase
-        .from("scene_versions")
-        .update({ scenes: updated as any })
-        .eq("id", activeVersionId);
+    await updateVersionScenes(updated);
     toast({
       title: isTransition
         ? `Transition (${deletedScene?.transition_type ?? "TRANSITION"}) deleted.`
@@ -1920,32 +2008,30 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   };
 
   const bulkDeleteScenes = async () => {
-    const toDelete = activeScenes.filter((s) => selectedSceneIds.has(s.id));
+    const snapshot = getSceneState(projectId)?.scenes ?? activeScenes;
+    const toDelete = snapshot.filter((s) => selectedSceneIds.has(s.id));
     await Promise.all(toDelete.map((s) => supabase.from("scenes").delete().eq("id", s.id)));
-    const updated = activeScenes
+    const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+    const updated = latest
       .filter((s) => !selectedSceneIds.has(s.id))
       .map((s, i) => ({ ...s, scene_number: i + 1 }));
     await Promise.all(
       updated.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
-    setActiveScenes(updated);
-    if (activeVersionId)
-      await supabase
-        .from("scene_versions")
-        .update({ scenes: updated as any })
-        .eq("id", activeVersionId);
+    await updateVersionScenes(updated);
     setSelectedSceneIds(new Set());
     toast({ title: `${toDelete.length} scene(s) deleted.` });
   };
 
   const handleAddScene = async () => {
+    const snapshot = getSceneState(projectId)?.scenes ?? activeScenes;
     const tempNumber = 90000 + (Date.now() % 10000);
     const { data, error } = await supabase
       .from("scenes")
       .insert({
         project_id: projectId,
         scene_number: tempNumber,
-        title: `Scene ${activeScenes.length + 1}`,
+        title: `Scene ${snapshot.length + 1}`,
         description: null,
         camera_angle: null,
         location: null,
@@ -1961,15 +2047,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       toast({ title: "Failed to add scene", description: error?.message, variant: "destructive" });
       return;
     }
-    const updated = [...activeScenes, data as Scene];
+    // await 이후 모듈 store 재조회 — 진행 중인 스타일 변형/생성 결과를 덮어쓰지 않기 위해.
+    const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+    const updated = [...latest, data as Scene];
     const renumbered = updated.map((s, i) => ({ ...s, scene_number: i + 1 }));
     await supabase.from("scenes").update({ scene_number: renumbered.length }).eq("id", data.id);
-    setActiveScenes(renumbered);
-    if (activeVersionId)
-      await supabase
-        .from("scene_versions")
-        .update({ scenes: renumbered as any })
-        .eq("id", activeVersionId);
+    // scene_versions 에 직접 쓰면 imageHistory 병합이 누락되어 히스토리가 유실된다.
+    await updateVersionScenes(renumbered);
   };
 
   const handleInsertSceneAt = async (insertIdx: number) => {
@@ -1995,8 +2079,11 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       toast({ title: "Failed to add scene", description: error?.message, variant: "destructive" });
       return;
     }
-    const updated = [...activeScenes];
-    updated.splice(insertIdx, 0, data as Scene);
+    // await 이후 모듈 store 재조회.
+    const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+    const safeInsertIdx = Math.min(insertIdx, latest.length);
+    const updated = [...latest];
+    updated.splice(safeInsertIdx, 0, data as Scene);
     const renumbered = updated.map((s, i) => ({ ...s, scene_number: i + 1 }));
     const tempRenumbered = renumbered.map((s, i) => ({ ...s, scene_number: 80000 + i }));
     await Promise.all(
@@ -2005,18 +2092,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     await Promise.all(
       renumbered.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
-    setActiveScenes(renumbered);
-    if (activeVersionId)
-      await supabase
-        .from("scene_versions")
-        .update({ scenes: renumbered as any })
-        .eq("id", activeVersionId);
+    await updateVersionScenes(renumbered);
     toast({ title: `Scene inserted at position ${insertIdx + 1}.` });
   };
 
   const handleInsertTransitionAt = async (idx: number) => {
-    const prevScene = activeScenes[idx - 1];
-    const nextScene = activeScenes[idx];
+    const snapshot = getSceneState(projectId)?.scenes ?? activeScenes;
+    const prevScene = snapshot[idx - 1];
+    const nextScene = snapshot[idx];
     if (!prevScene?.conti_image_url || !nextScene?.conti_image_url) return;
     const tempNumber = 80000 + (Date.now() % 10000);
     const { data: newScene, error } = await supabase
@@ -2037,7 +2120,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       toast({ title: "Failed to add transition", description: error?.message, variant: "destructive" });
       return;
     }
-    const inserted = [...activeScenes.slice(0, idx), newScene as Scene, ...activeScenes.slice(idx)].map((s, i) => ({
+    // await 이후 반드시 모듈 store 로 최신 scene 배열을 재조회.
+    // 스타일 변형/전체 생성이 진행 중이면 activeScenes closure 는 stale 이므로,
+    // 그대로 TR 을 꽂으면 이미 완료된 scene 들의 새 conti_image_url / conti_image_history 가 덮어써진다.
+    // prevScene.id 를 기준으로 최신 배열에서 삽입 위치를 다시 계산한다.
+    const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+    const prevIdxInLatest = latest.findIndex((s) => s.id === prevScene.id);
+    const insertIdx = prevIdxInLatest >= 0 ? prevIdxInLatest + 1 : Math.min(idx, latest.length);
+    const inserted = [...latest.slice(0, insertIdx), newScene as Scene, ...latest.slice(insertIdx)].map((s, i) => ({
       ...s,
       scene_number: i + 1,
     }));
@@ -2052,48 +2142,40 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     await Promise.all(
       inserted.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
-    setActiveScenes(inserted);
-    if (activeVersionId)
-      await supabase
-        .from("scene_versions")
-        .update({ scenes: inserted as any })
-        .eq("id", activeVersionId);
+    await updateVersionScenes(inserted);
     toast({ title: "Transition added." });
   };
 
   const handleTransitionTypeChange = async (scene: Scene, newType: string) => {
     await supabase.from("scenes").update({ transition_type: newType, title: "" }).eq("id", scene.id);
-    const updatedScenes = activeScenes.map((s) =>
+    const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+    const updatedScenes = latest.map((s) =>
       s.id === scene.id ? { ...s, transition_type: newType, title: "" } : s,
     );
-    setActiveScenes(updatedScenes);
-    if (activeVersionId)
-      await supabase
-        .from("scene_versions")
-        .update({ scenes: updatedScenes as any })
-        .eq("id", activeVersionId);
+    await updateVersionScenes(updatedScenes);
     toast({ title: `Transition → ${newType}` });
   };
 
   const handleImportSceneImage = async (sceneNumber: number, imageUrl: string) => {
     const current = getSceneState(projectId)?.scenes ?? activeScenes;
     const target = current.find((s) => s.scene_number === sceneNumber);
-    pushHistory(sceneNumber, target?.conti_image_url ?? null);
+    if (!target) return;
+    pushHistory(target.id, target.conti_image_url ?? null);
     const latest = getSceneState(projectId)?.scenes ?? current;
     await updateVersionScenes(
-      latest.map((s) => (s.scene_number === sceneNumber ? { ...s, conti_image_url: imageUrl } : s)),
+      latest.map((s) => (s.id === target.id ? { ...s, conti_image_url: imageUrl } : s)),
     );
-    bumpCache(sceneNumber);
-    toast({ title: `Scene ${sceneNumber} conti replaced.` });
+    bumpCache(target.scene_number);
+    toast({ title: `Scene ${target.scene_number} conti replaced.` });
   };
 
   const handleRollback = async (scene: Scene, url: string) => {
     const current = getSceneState(projectId)?.scenes ?? activeScenes;
     const liveScene = current.find((s) => s.id === scene.id);
-    pushHistory(scene.scene_number, liveScene?.conti_image_url ?? scene.conti_image_url);
+    pushHistory(scene.id, liveScene?.conti_image_url ?? scene.conti_image_url);
     await supabase.from("scenes").update({ conti_image_url: url }).eq("id", scene.id);
     const latest = getSceneState(projectId)?.scenes ?? current;
-    const updated = latest.map((s) => (s.scene_number === scene.scene_number ? { ...s, conti_image_url: url } : s));
+    const updated = latest.map((s) => (s.id === scene.id ? { ...s, conti_image_url: url } : s));
     if (activeVersionId) await updateVersionScenes(updated);
     else {
       setActiveScenes(updated);
@@ -2114,7 +2196,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       if (!publicUrl) throw new Error("URL generation failed");
       const current = getSceneState(projectId)?.scenes ?? activeScenes;
       const liveScene = current.find((s) => s.id === scene.id);
-      pushHistory(scene.scene_number, liveScene?.conti_image_url ?? scene.conti_image_url);
+      pushHistory(scene.id, liveScene?.conti_image_url ?? scene.conti_image_url);
       await supabase.from("scenes").update({ conti_image_url: publicUrl }).eq("id", scene.id);
       const latest = getSceneState(projectId)?.scenes ?? current;
       const updated = latest.map((s) => (s.id === scene.id ? { ...s, conti_image_url: publicUrl } : s));
@@ -2178,7 +2260,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         });
         const newUrl = imgData?.publicUrl ?? imgData?.url ?? null;
         if (newUrl) {
-          pushHistory(scene.scene_number, scene.conti_image_url);
+          pushHistory(scene.id, scene.conti_image_url);
           await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", scene.id);
           const current = getSceneState(projectId)?.scenes ?? activeScenes;
           const updated = current.map((s) => (s.id === scene.id ? { ...s, conti_image_url: newUrl } : s));
@@ -2225,7 +2307,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         model: contiModel,
         onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
       });
-      pushHistory(scene.scene_number, scene.conti_image_url);
+      pushHistory(scene.id, scene.conti_image_url);
       await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", scene.id);
       const current = getSceneState(projectId)?.scenes ?? activeScenes;
       const updated = current.map((s) => (s.id === scene.id ? { ...s, conti_image_url: newUrl } : s));
@@ -2302,10 +2384,11 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               model: contiModel,
               onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
             });
-            pushHistory(scene.scene_number, scene.conti_image_url);
+            pushHistory(scene.id, scene.conti_image_url);
             await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", scene.id);
-            setActiveScenes((prev) => prev.map((s) => (s.id === scene.id ? { ...s, conti_image_url: newUrl } : s)));
-            const current = getSceneState(projectId)?.scenes ?? [];
+            // 언마운트 후에도 누적 업데이트가 가능하도록 module store 기반으로 다음 스냅샷을 만든다.
+            // fallback 은 `[]` 가 아닌 activeScenes 여야 기존 scene 데이터가 통째로 날아가는 사고가 없다.
+            const current = getSceneState(projectId)?.scenes ?? activeScenes;
             const updated = current.map((s) => (s.id === scene.id ? { ...s, conti_image_url: newUrl } : s));
             await updateVersionScenes(updated);
             bumpCache(scene.scene_number);
@@ -2354,6 +2437,17 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     setStyleTransferProgress({ done: 0, total: targetScenes.length });
     const initialQueued = new Set(targetScenes.slice(STYLE_BATCH).map((s) => s.id));
     setQueuedSceneIds(initialQueued);
+
+    // ⚠️ NB2 호출은 batch 내에서 병렬로 돌리되,
+    // pushHistory / updateVersionScenes (모듈 store / DB 읽고-합치고-쓰기) 는 race condition 을 피하려
+    // 단일 체인으로 직렬화한다. (두 scene 이 동시에 getSceneState().scenes 를 읽고 write-back 하면
+    // last-writer 가 먼저 쓴 쪽의 conti_image_url 을 덮어쓰는 사고 발생.)
+    let postProcessChain: Promise<void> = Promise.resolve();
+    const enqueuePostProcess = (task: () => Promise<void>): Promise<void> => {
+      postProcessChain = postProcessChain.then(task, task); // 이전 task 실패해도 다음 task 는 진행
+      return postProcessChain;
+    };
+    let doneCount = 0;
     try {
       for (let i = 0; i < targetScenes.length; i += STYLE_BATCH) {
         const batch = targetScenes.slice(i, i + STYLE_BATCH);
@@ -2367,47 +2461,68 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           batch.forEach((s) => n.delete(s.id));
           return n;
         });
-        for (const scene of batch) {
-          try {
-            setSceneStages((prev) => ({ ...prev, [scene.id]: "generating" }));
-            const newUrl = await styleTransfer({
-              scene,
-              projectId,
-              videoFormat,
-              styleImageUrl: currentStyle?.thumbnail_url ?? null,
-              onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
-            });
-            pushHistory(scene.scene_number, scene.conti_image_url);
-            const { data: freshRow } = await supabase
-              .from("scenes")
-              .select("conti_image_crop")
-              .eq("id", scene.id)
-              .single();
-            const preservedCrop = freshRow?.conti_image_crop ?? scene.conti_image_crop ?? null;
-            await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", scene.id);
-            const current = getSceneState(projectId)?.scenes ?? [];
-            const updated = current.map((s) =>
-              s.id === scene.id ? { ...s, conti_image_url: newUrl, conti_image_crop: preservedCrop } : s,
-            );
-            await updateVersionScenes(updated);
-            bumpCache(scene.scene_number);
-          } catch (err: any) {
-            console.error(`Scene ${scene.scene_number} style transfer failed:`, err.message);
-          } finally {
-            setStyleTransferringIds((prev) => {
-              const n = new Set(prev);
-              n.delete(scene.id);
-              return n;
-            });
-            setSceneStages((prev) => {
-              const n = { ...prev };
-              delete n[scene.id];
-              return n;
-            });
-          }
-        }
-        setStyleTransferProgress({ done: Math.min(i + STYLE_BATCH, targetScenes.length), total: targetScenes.length });
+        await Promise.all(
+          batch.map(async (scene) => {
+            try {
+              setSceneStages((prev) => ({ ...prev, [scene.id]: "generating" }));
+              const oldUrl = scene.conti_image_url;
+              console.log("[StyleTransfer/ContiTab] ▶ start scene", scene.scene_number, {
+                id: scene.id,
+                oldUrl,
+                hasCurrentStyle: !!currentStyle,
+                styleThumbUrl: currentStyle?.thumbnail_url ?? null,
+                is_transition: !!scene.is_transition,
+              });
+              const newUrl = await styleTransfer({
+                scene,
+                projectId,
+                videoFormat,
+                styleImageUrl: currentStyle?.thumbnail_url ?? null,
+                onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
+              });
+              console.log("[StyleTransfer/ContiTab] ✓ got newUrl for scene", scene.scene_number, newUrl);
+              // post-processing 을 체인에 enqueue — 완료될 때까지 await 해서 진행률/로딩 UI 가 정확히 맞도록.
+              await enqueuePostProcess(async () => {
+                pushHistory(scene.id, oldUrl);
+                const { data: freshRow } = await supabase
+                  .from("scenes")
+                  .select("conti_image_crop")
+                  .eq("id", scene.id)
+                  .single();
+                const preservedCrop = freshRow?.conti_image_crop ?? scene.conti_image_crop ?? null;
+                const current = getSceneState(projectId)?.scenes ?? activeScenes;
+                const updated = current.map((s) =>
+                  s.id === scene.id ? { ...s, conti_image_url: newUrl, conti_image_crop: preservedCrop } : s,
+                );
+                await updateVersionScenes(updated);
+                bumpCache(scene.scene_number);
+                doneCount += 1;
+                setStyleTransferProgress({ done: doneCount, total: targetScenes.length });
+                console.log("[StyleTransfer/ContiTab] ✓ done scene", scene.scene_number);
+              });
+            } catch (err: any) {
+              console.error(
+                `[StyleTransfer/ContiTab] ✗ Scene ${scene.scene_number} FAILED:`,
+                err?.message,
+                err?.stack ?? err,
+              );
+            } finally {
+              setStyleTransferringIds((prev) => {
+                const n = new Set(prev);
+                n.delete(scene.id);
+                return n;
+              });
+              setSceneStages((prev) => {
+                const n = { ...prev };
+                delete n[scene.id];
+                return n;
+              });
+            }
+          }),
+        );
       }
+      // 마지막 post-process 까지 다 끝난 뒤 종료 (exception-proof).
+      await postProcessChain.catch(() => {});
     } finally {
       setStyleTransferring(false);
       setStyleTransferProgress(null);
@@ -2436,19 +2551,16 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     dragCloneRef.current = null;
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const oldIdx = activeScenes.findIndex((s) => s.id === active.id);
-    const newIdx = activeScenes.findIndex((s) => s.id === over.id);
+    // 스타일 변형/생성이 진행 중이어도 드래그 이동이 안전하도록 최신 snapshot 사용.
+    const snapshot = getSceneState(projectId)?.scenes ?? activeScenes;
+    const oldIdx = snapshot.findIndex((s) => s.id === active.id);
+    const newIdx = snapshot.findIndex((s) => s.id === over.id);
     if (oldIdx === -1 || newIdx === -1) return;
-    const reordered = arrayMove(activeScenes, oldIdx, newIdx).map((s, i) => ({ ...s, scene_number: i + 1 }));
-    setActiveScenes(reordered);
+    const reordered = arrayMove(snapshot, oldIdx, newIdx).map((s, i) => ({ ...s, scene_number: i + 1 }));
     await Promise.all(
       reordered.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
-    if (activeVersionId)
-      await supabase
-        .from("scene_versions")
-        .update({ scenes: reordered as any })
-        .eq("id", activeVersionId);
+    await updateVersionScenes(reordered);
   };
 
   function getExportCrop(
@@ -3692,7 +3804,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           onSaveInpaint={async (url) => {
             const current = getSceneState(projectId)?.scenes ?? activeScenes;
             const liveScene = current.find((s) => s.id === studioScene.id);
-            pushHistory(studioScene.scene_number, liveScene?.conti_image_url ?? studioScene.conti_image_url);
+            pushHistory(studioScene.id, liveScene?.conti_image_url ?? studioScene.conti_image_url);
             await supabase.from("scenes").update({ conti_image_url: url }).eq("id", studioScene.id);
             const latest = getSceneState(projectId)?.scenes ?? current;
             await updateVersionScenes(

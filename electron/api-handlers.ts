@@ -298,9 +298,10 @@ export async function handleOpenaiImage(body: any) {
     }
 
     if (!imageBytes) {
-      // GPT edits 폴백. 브러시 있을 때는 native mask 로 인페인팅, 없을 때는 forceGpt 필요
-      if (!imageBase64 || (!maskBase64 && !forceGpt)) {
-        return { error: "GPT edits 폴백에 imageBase64 가 필요합니다 (마스크 없을 때는 forceGpt=true 필요)", usedModel: "inpaint-failed" };
+      // GPT edits 폴백. 브러시 있을 때는 native mask 로 인페인팅, 없을 때는 mask=null 로 reference edit.
+      // (마스크 없는 태그-only 인페인팅은 정상 유즈케이스이므로 forceGpt 요구 X.)
+      if (!imageBase64) {
+        return { error: "GPT edits 폴백에 imageBase64 가 필요합니다", usedModel: "inpaint-failed" };
       }
       if (!openaiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다.");
       imageBytes = await callGptInpaint(openaiKey, imageBase64, maskBase64 ?? null, prompt, size, referenceImageUrls);

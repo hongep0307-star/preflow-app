@@ -1046,13 +1046,64 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
 
   const [cardHeights, setCardHeights] = useState<Record<string, number>>({});
   const [showImages, setShowImages] = useState(true);
-  const sharedHeight = Math.max(160, ...Object.values(cardHeights));
   const handleContentHeight = useCallback((id: string, h: number) => {
     setCardHeights((prev) => {
       if (prev[id] === h) return prev;
       return { ...prev, [id]: h };
     });
   }, []);
+  // 삭제된 scene 의 cardHeights 엔트리가 남아 sharedHeight 를 상향 고정하는 것을 방지.
+  useEffect(() => {
+    setCardHeights((prev) => {
+      const sceneIds = new Set(scenes.map((s) => s.id));
+      let changed = false;
+      const next: Record<string, number> = {};
+      for (const k of Object.keys(prev)) {
+        if (sceneIds.has(k)) next[k] = prev[k];
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [scenes]);
+
+  // ─── Scene 패널 폭 관측 + 이미지 컬럼 상한 계산 ───
+  // Split 뷰에서 Mood 패널을 넓혀 Scene 패널이 좁아지면, Scene 카드의
+  // imgWidth(= sharedHeight × wr/hr) 가 컨테이너를 잠식하면서 회색 placeholder 만
+  // 남는 피드백 루프가 발생한다. 패널 폭을 기준으로 imgWidth / sharedHeight 양쪽에
+  // 상한을 걸어 피드백 루프 자체를 차단한다.
+  const [scenesPanelEl, setScenesPanelEl] = useState<HTMLDivElement | null>(null);
+  const [scenesPanelWidth, setScenesPanelWidth] = useState(0);
+  const scenesPanelRef = useCallback((el: HTMLDivElement | null) => {
+    setScenesPanelEl(el);
+  }, []);
+  useEffect(() => {
+    if (!scenesPanelEl) return;
+    setScenesPanelWidth(scenesPanelEl.getBoundingClientRect().width);
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setScenesPanelWidth(e.contentRect.width);
+    });
+    ro.observe(scenesPanelEl);
+    return () => ro.disconnect();
+  }, [scenesPanelEl]);
+
+  // 이미지 컬럼이 패널 폭에서 차지할 수 있는 최대 비율.
+  // 피드백 루프를 확실히 끊으려면 0.5 미만이어야 한다.
+  const IMAGE_COL_MAX_RATIO = 0.35;
+  const [imgWR, imgHR] =
+    videoFormat === "horizontal" ? [16, 9] : videoFormat === "square" ? [1, 1] : [9, 16];
+  const maxImgWidth =
+    scenesPanelWidth > 0 ? Math.max(60, Math.floor(scenesPanelWidth * IMAGE_COL_MAX_RATIO)) : 9999;
+  // sharedHeight 는 naturalHeight 를 따르되, maxImgWidth 에서 역산한 상한을 넘지 않게 캡.
+  const maxSharedHeightFromPanel =
+    scenesPanelWidth > 0 ? Math.floor((maxImgWidth * imgHR) / imgWR) : 9999;
+  const naturalSharedHeight = Math.max(160, ...Object.values(cardHeights));
+  const sharedHeight = Math.max(160, Math.min(naturalSharedHeight, maxSharedHeightFromPanel));
+
+  const minPanelWidthForImage =
+    videoFormat === "horizontal" ? 520 : videoFormat === "square" ? 400 : 330;
+  const panelTooNarrowForImage =
+    scenesPanelWidth > 0 && scenesPanelWidth < minPanelWidthForImage;
+  const effectiveShowImages = showImages && !panelTooNarrowForImage;
 
   const moodImagesRef = useRef<MoodImage[]>([]);
   useEffect(() => {
@@ -2280,7 +2331,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
 
       {(() => {
       const scenesBody = (
-        <div className="flex flex-col flex-1 min-h-0">
+        <div ref={scenesPanelRef} className="flex flex-col flex-1 min-h-0">
           <div
             style={{
               display: "flex",
@@ -2309,10 +2360,17 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
             <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <button
                 onClick={() => setShowImages((v) => !v)}
-                title={showImages ? "Hide images" : "Show images"}
-                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                title={
+                  panelTooNarrowForImage
+                    ? "패널 폭이 좁아 이미지 컬럼이 자동으로 접혀 있습니다"
+                    : showImages
+                      ? "Hide images"
+                      : "Show images"
+                }
+                disabled={panelTooNarrowForImage}
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {showImages ? (
+                {effectiveShowImages ? (
                   <Image style={{ width: 14, height: 14 }} />
                 ) : (
                   <ImageOff style={{ width: 14, height: 14 }} />
@@ -2535,8 +2593,9 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
                           videoFormat={videoFormat}
                           sharedHeight={sharedHeight}
                           onContentHeight={handleContentHeight}
-                          showImages={showImages}
+                          showImages={effectiveShowImages}
                           onDropMoodImage={handleSceneDrop}
+                          maxImgWidth={maxImgWidth}
                         />
                       </div>
                     </React.Fragment>
