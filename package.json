@@ -117,7 +117,9 @@
       "icon": "public/favicon.ico"
     },
     "mac": {
-      "target": "dmg",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] }
+      ],
       "icon": "public/favicon.ico"
     }
   }
