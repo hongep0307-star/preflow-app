@@ -167,10 +167,16 @@ export const ContiStudio = ({
   const eventDivRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  /* ── 드로잉 상태 ── */
+  /* ── 드로잉 상태 ──
+   * brushSize 는 이제 "이미지 픽셀 기준 반지름" (해상도 독립).
+   * 화면 표시 픽셀 = brushSize × (eventDiv 폭 / 이미지 폭). drawCursorAt 에서 환산.
+   */
   const isDrawingRef = useRef(false);
-  const [brushSize, setBrushSize] = useState(30);
-  const brushSizeRef = useRef(30);
+  const BRUSH_MIN = 4;
+  const BRUSH_MAX = 200;
+  const BRUSH_DEFAULT = 40;
+  const [brushSize, setBrushSize] = useState(BRUSH_DEFAULT);
+  const brushSizeRef = useRef(BRUSH_DEFAULT);
   const toolModeRef = useRef<"brush" | "eraser">("brush");
   const [toolMode, setToolMode] = useState<"brush" | "eraser">("brush");
 
@@ -185,14 +191,52 @@ export const ContiStudio = ({
     toolModeRef.current = toolMode;
   }, [toolMode]);
 
-  /* ── Undo 스택 ── */
-  type InpaintSnap = { mask: ImageData; overlay: ImageData | null };
+  /* ── Undo 스택 (메모리 최적화) ──
+   * 풀 ImageData 대신 R-채널 1바이트씩만 저장 (4바이트 → 1바이트, 75% 절감).
+   * 오버레이는 마스크에서 결정론적이므로 저장하지 않고 undo 시점에 재구성.
+   * 1536x1024 이미지 기준: 기존 ~12MB/snap × 20 = ~250MB → ~1.6MB × 20 = ~32MB.
+   */
+  type InpaintSnap = { mask: Uint8Array; w: number; h: number };
   const inpaintUndoRef = useRef<InpaintSnap[]>([]);
   const [inpaintUndoCount, setInpaintUndoCount] = useState(0);
 
   /* ── 직전 페인트 좌표 (이미지 좌표계) — 빠른 드래그 보간용 ── */
   const lastPaintPtRef = useRef<{ x: number; y: number } | null>(null);
   const hasMaskRef = useRef(false);
+
+  /* ── 줌/팬 상태 ──
+   * viewport(고정) 안에서 canvasContainer 를 transform: translate+scale 로 변환.
+   * paintAt 은 eventDiv.getBoundingClientRect() 의 post-transform 크기를 사용하므로
+   *   x_image = clientX_local × (image.width / rect.width)
+   * 비율이 그대로 유지돼 줌/팬과 무관하게 정확히 동작.
+   */
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 8;
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const zoomRef = useRef(1);
+  const panRef = useRef({ x: 0, y: 0 });
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const isSpaceDownRef = useRef(false);
+  const isPanningRef = useRef(false);
+  const panStartRef = useRef<{ clientX: number; clientY: number; px: number; py: number } | null>(null);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+  useEffect(() => {
+    panRef.current = pan;
+  }, [pan]);
+
+  const resetZoom = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
+  // 새 이미지 로드 시 줌/팬 리셋
+  useEffect(() => {
+    resetZoom();
+  }, [currentScene.conti_image_url, resetZoom]);
 
   /* ── 인페인팅 상태 ── */
   const [inpaintPrompt, setInpaintPrompt] = useState("");
@@ -230,12 +274,60 @@ export const ContiStudio = ({
         return;
       }
       if (isEditing) return;
+
+      // ── Inpaint 단축키 ──
+      if (activeTab === "edit") {
+        // Space → 임시 팬 모드 (drag-to-pan)
+        if (e.code === "Space" && !isSpaceDownRef.current) {
+          isSpaceDownRef.current = true;
+          e.preventDefault();
+          return;
+        }
+        // [ / ] : 브러시 크기 -/+ (이미지 픽셀)
+        if (e.key === "[") {
+          setBrushSize((v) => Math.max(BRUSH_MIN, Math.round(v / 1.15)));
+          e.preventDefault();
+          return;
+        }
+        if (e.key === "]") {
+          setBrushSize((v) => Math.min(BRUSH_MAX, Math.round(v * 1.15) || v + 1));
+          e.preventDefault();
+          return;
+        }
+        // B / E : 도구 전환
+        if (e.key === "b" || e.key === "B") {
+          setToolMode("brush");
+          e.preventDefault();
+          return;
+        }
+        if (e.key === "e" || e.key === "E") {
+          setToolMode("eraser");
+          e.preventDefault();
+          return;
+        }
+        // 0 : 줌 리셋
+        if (e.key === "0") {
+          resetZoom();
+          e.preventDefault();
+          return;
+        }
+      }
+
       if (e.key === "ArrowLeft" && hasPrev) setCurrentIndex((i) => i - 1);
       if (e.key === "ArrowRight" && hasNext) setCurrentIndex((i) => i + 1);
     };
+    const upHandler = (e: KeyboardEvent) => {
+      if (e.code === "Space") {
+        isSpaceDownRef.current = false;
+      }
+    };
     window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose, hasPrev, hasNext, activeTab]);
+    window.addEventListener("keyup", upHandler);
+    return () => {
+      window.removeEventListener("keydown", handler);
+      window.removeEventListener("keyup", upHandler);
+    };
+  }, [onClose, hasPrev, hasNext, activeTab, resetZoom]);
 
   const otherScenes = allScenes.filter((s) => s.id !== currentScene.id && s.conti_image_url) as (Scene & {
     conti_image_url: string;
@@ -341,34 +433,70 @@ export const ContiStudio = ({
     return () => clearTimeout(timer);
   }, [activeTab, currentScene.conti_image_url]);
 
-  /* ━━━ Undo 스냅샷 ━━━ */
+  /* ━━━ Undo 스냅샷 (R-채널 1바이트 압축) ━━━ */
   const saveInpaintSnapshot = useCallback(() => {
     const mc = maskCanvasRef.current;
-    const oc = overlayCanvasRef.current;
     if (!mc || !mc.width) return;
-    const maskData = mc.getContext("2d")!.getImageData(0, 0, mc.width, mc.height);
-    const overlayData = oc ? oc.getContext("2d")!.getImageData(0, 0, oc.width, oc.height) : null;
+    const id = mc.getContext("2d")!.getImageData(0, 0, mc.width, mc.height);
+    const r = new Uint8Array(mc.width * mc.height);
+    for (let i = 0, j = 0; i < id.data.length; i += 4, j++) r[j] = id.data[i];
     inpaintUndoRef.current = [
       ...inpaintUndoRef.current.slice(-(MAX_INPAINT_UNDO - 1)),
-      { mask: maskData, overlay: overlayData },
+      { mask: r, w: mc.width, h: mc.height },
     ];
     setInpaintUndoCount(inpaintUndoRef.current.length);
   }, []);
+
+  /** R-채널 배열에서 마스크 + 오버레이를 결정론적으로 재구성 */
+  const restoreFromSnapshot = (snap: InpaintSnap) => {
+    const mc = maskCanvasRef.current;
+    const oc = overlayCanvasRef.current;
+    if (!mc) return false;
+    if (mc.width !== snap.w || mc.height !== snap.h) {
+      mc.width = snap.w;
+      mc.height = snap.h;
+    }
+    const mctx = mc.getContext("2d")!;
+    const mid = mctx.createImageData(snap.w, snap.h);
+    let hasAny = false;
+    for (let j = 0, i = 0; j < snap.mask.length; j++, i += 4) {
+      const v = snap.mask[j];
+      if (v > 0) hasAny = true;
+      mid.data[i] = v;
+      mid.data[i + 1] = v;
+      mid.data[i + 2] = v;
+      mid.data[i + 3] = v; // alpha = R 로 저장 → soft 마스크 가장자리도 보존
+    }
+    mctx.putImageData(mid, 0, 0);
+
+    if (oc) {
+      if (oc.width !== snap.w || oc.height !== snap.h) {
+        oc.width = snap.w;
+        oc.height = snap.h;
+      }
+      const octx = oc.getContext("2d")!;
+      const oid = octx.createImageData(snap.w, snap.h);
+      // 브러시 색(빨강) × 마스크 alpha 비율 0.85
+      for (let j = 0, i = 0; j < snap.mask.length; j++, i += 4) {
+        const a = snap.mask[j];
+        if (a > 0) {
+          oid.data[i] = 249;
+          oid.data[i + 1] = 66;
+          oid.data[i + 2] = 58;
+          oid.data[i + 3] = Math.round((a / 255) * 217); // 0.85 × 255
+        }
+      }
+      octx.putImageData(oid, 0, 0);
+    }
+    return hasAny;
+  };
 
   const handleUndoInpaint = () => {
     if (inpaintUndoRef.current.length === 0) return;
     const snap = inpaintUndoRef.current[inpaintUndoRef.current.length - 1];
     inpaintUndoRef.current = inpaintUndoRef.current.slice(0, -1);
     setInpaintUndoCount(inpaintUndoRef.current.length);
-    const mc = maskCanvasRef.current;
-    const oc = overlayCanvasRef.current;
-    if (mc) mc.getContext("2d")!.putImageData(snap.mask, 0, 0);
-    if (oc) {
-      if (snap.overlay) oc.getContext("2d")!.putImageData(snap.overlay, 0, 0);
-      else oc.getContext("2d")!.clearRect(0, 0, oc.width, oc.height);
-    }
-    const d = snap.mask.data;
-    const hasAny = d.some((v, i) => i % 4 === 0 && v > 0);
+    const hasAny = restoreFromSnapshot(snap);
     hasMaskRef.current = hasAny;
     setHasMask(hasAny);
     lastPaintPtRef.current = null;
@@ -426,11 +554,10 @@ export const ContiStudio = ({
     const oc = overlayCanvasRef.current;
     if (!mc || !mc.width || !mc.height || divW <= 0 || divH <= 0) return;
 
-    const sx = mc.width / divW;
-    const sy = mc.height / divH;
-    const x = cx * sx;
-    const y = cy * sy;
-    const r = brushSizeRef.current * ((sx + sy) / 2);
+    const x = cx * (mc.width / divW);
+    const y = cy * (mc.height / divH);
+    // brushSize 는 이미지 픽셀 단위 반지름 — 줌/창크기에 무관하게 일정한 굵기 보장
+    const r = brushSizeRef.current;
 
     const isErase = toolModeRef.current === "eraser";
     const composite: GlobalCompositeOperation = isErase ? "destination-out" : "source-over";
@@ -458,6 +585,7 @@ export const ContiStudio = ({
   const drawCursorAt = useCallback((clientX: number, clientY: number) => {
     const cc = cursorCanvasRef.current;
     const div = eventDivRef.current;
+    const ic = imageCanvasRef.current;
     if (!cc || !div) return;
     const rect = div.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
@@ -467,15 +595,19 @@ export const ContiStudio = ({
     }
     const x = clientX - rect.left;
     const y = clientY - rect.top;
+    // 화면 표시 반지름 = (이미지px 반지름) × (eventDiv visual폭 / 이미지 폭)
+    // 줌 시에도 brush 가 시각적으로 제대로 커지고 작아짐.
+    const scale = ic && ic.width > 0 ? rect.width / ic.width : 1;
+    const screenR = Math.max(1.5, brushSizeRef.current * scale);
     const ctx = cc.getContext("2d")!;
     ctx.clearRect(0, 0, cc.width, cc.height);
     ctx.beginPath();
-    ctx.arc(x, y, brushSizeRef.current, 0, Math.PI * 2);
+    ctx.arc(x, y, screenR, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(255,255,255,0.85)";
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(x, y, brushSizeRef.current, 0, Math.PI * 2);
+    ctx.arc(x, y, screenR, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(0,0,0,0.35)";
     ctx.lineWidth = 0.5;
     ctx.stroke();
@@ -492,9 +624,35 @@ export const ContiStudio = ({
    * `getCoalescedEvents()` 로 OS 가 한 프레임에 모은 모든 입력 샘플을 받아 보간에 사용,
    * 빠른 모션에서도 마스크가 끊기지 않도록 보장.
    */
+  /* ── 팬 동작 ── */
+  const startPan = (clientX: number, clientY: number) => {
+    isPanningRef.current = true;
+    panStartRef.current = { clientX, clientY, px: panRef.current.x, py: panRef.current.y };
+    clearCursor();
+  };
+  const movePan = (clientX: number, clientY: number) => {
+    const s = panStartRef.current;
+    if (!s) return;
+    setPan({ x: s.px + (clientX - s.clientX), y: s.py + (clientY - s.clientY) });
+  };
+  const endPan = () => {
+    isPanningRef.current = false;
+    panStartRef.current = null;
+  };
+
   const handleDrawPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (isGenerating) return;
+      // 팬 트리거: 중간버튼(button===1) 또는 space 누른 채 좌클릭
+      if (e.button === 1 || (e.button === 0 && isSpaceDownRef.current)) {
+        e.preventDefault();
+        const div = e.currentTarget;
+        try {
+          div.setPointerCapture(e.pointerId);
+        } catch {}
+        startPan(e.clientX, e.clientY);
+        return;
+      }
       if (e.button !== undefined && e.button !== 0) return;
       e.preventDefault();
       const div = e.currentTarget;
@@ -515,6 +673,10 @@ export const ContiStudio = ({
 
   const handleDrawPointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      if (isPanningRef.current) {
+        movePan(e.clientX, e.clientY);
+        return;
+      }
       const div = e.currentTarget;
       if (!isDrawingRef.current) {
         drawCursorAt(e.clientX, e.clientY);
@@ -542,6 +704,10 @@ export const ContiStudio = ({
       try {
         div.releasePointerCapture(e.pointerId);
       } catch {}
+      if (isPanningRef.current) {
+        endPan();
+        return;
+      }
       isDrawingRef.current = false;
       lastPaintPtRef.current = null;
     },
@@ -549,8 +715,37 @@ export const ContiStudio = ({
   );
 
   const handleDrawPointerLeave = useCallback(() => {
-    if (!isDrawingRef.current) clearCursor();
+    if (!isDrawingRef.current && !isPanningRef.current) clearCursor();
   }, [clearCursor]);
+
+  /* ── 휠 줌 (커서 위치 기준) ──
+   * React onWheel 은 passive 라 preventDefault 가 안 통하므로
+   * native addEventListener({passive:false}) 로 직접 등록.
+   */
+  useEffect(() => {
+    if (activeTab !== "edit") return;
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = vp.getBoundingClientRect();
+      const mx = e.clientX - r.left - r.width / 2;
+      const my = e.clientY - r.top - r.height / 2;
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const oldZoom = zoomRef.current;
+      const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, oldZoom * factor));
+      if (newZoom === oldZoom) return;
+      const k = newZoom / oldZoom;
+      const newPan = {
+        x: mx - (mx - panRef.current.x) * k,
+        y: my - (my - panRef.current.y) * k,
+      };
+      setZoom(newZoom);
+      setPan(newPan);
+    };
+    vp.addEventListener("wheel", onWheel, { passive: false });
+    return () => vp.removeEventListener("wheel", onWheel);
+  }, [activeTab, imageLoaded]);
 
   /* ━━━ Reset ━━━ */
   const handleResetMask = () => {
@@ -1228,21 +1423,35 @@ Edit request (applies ONLY inside the magenta region):
               }}
             />
           ) : activeTab === "edit" ? (
-            <div className="relative flex items-center justify-center w-full h-full">
+            <div
+              ref={viewportRef}
+              className="relative w-full h-full overflow-hidden"
+              style={{ touchAction: "none" }}
+            >
               {!imageLoaded && !imageError && (
-                <div className="text-muted-foreground text-sm flex items-center gap-2">
+                <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" /> Loading image...
                 </div>
               )}
-              {imageError && <div className="text-destructive text-sm">Failed to load image</div>}
+              {imageError && (
+                <div className="absolute inset-0 flex items-center justify-center text-destructive text-sm">
+                  Failed to load image
+                </div>
+              )}
 
-              {/* 캔버스 컨테이너 */}
+              {/* 캔버스 컨테이너 — 줌/팬 transform 대상.
+                  viewport 중심에 정렬한 뒤 translate(pan)+scale(zoom) 적용. */}
               <div
-                className="relative shrink-0"
+                className="absolute"
                 style={{
+                  left: "50%",
+                  top: "50%",
                   width: imageLoaded ? canvasSize.w : undefined,
                   height: imageLoaded ? canvasSize.h : undefined,
                   display: imageLoaded ? "block" : "none",
+                  transform: `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                  transformOrigin: "50% 50%",
+                  willChange: "transform",
                 }}
               >
                 {/* 레이어 1: 이미지 */}
@@ -1295,7 +1504,7 @@ Edit request (applies ONLY inside the magenta region):
               {/* 브러시 툴바 */}
               {imageLoaded && (
                 <div
-                  className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-2 rounded-none border border-white/[0.06]"
+                  className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-2 rounded-none border border-white/[0.06] z-10"
                   style={{ background: "hsl(var(--card)/0.95)", backdropFilter: "blur(8px)" }}
                 >
                   <button
@@ -1315,13 +1524,19 @@ Edit request (applies ONLY inside the magenta region):
                   <div className="w-px h-4 bg-white/10 mx-1" />
                   <input
                     type="range"
-                    min={5}
-                    max={80}
+                    min={BRUSH_MIN}
+                    max={BRUSH_MAX}
                     value={brushSize}
                     onChange={(e) => setBrushSize(Number(e.target.value))}
                     className="w-20"
+                    title={`Brush radius: ${brushSize} px (image)`}
                   />
-                  <span className="text-[11px] text-muted-foreground w-5 text-right">{brushSize}</span>
+                  <span
+                    className="text-[11px] text-muted-foreground w-10 text-right tabular-nums"
+                    title="Image-pixel radius (resolution-independent)"
+                  >
+                    {brushSize}px
+                  </span>
                   <div className="w-px h-4 bg-white/10 mx-1" />
                   <button
                     onClick={handleUndoInpaint}
@@ -1334,8 +1549,17 @@ Edit request (applies ONLY inside the magenta region):
                   <button
                     onClick={handleResetMask}
                     className="text-[11px] text-muted-foreground px-2 py-0.5 border border-white/[0.06] rounded-md hover:text-foreground transition-colors"
+                    title="Clear mask"
                   >
                     Reset
+                  </button>
+                  <div className="w-px h-4 bg-white/10 mx-1" />
+                  <button
+                    onClick={resetZoom}
+                    title="Reset zoom (0)"
+                    className="text-[11px] text-muted-foreground px-2 py-0.5 border border-white/[0.06] rounded-md hover:text-foreground transition-colors tabular-nums"
+                  >
+                    {Math.round(zoom * 100)}%
                   </button>
                 </div>
               )}
