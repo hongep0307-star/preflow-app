@@ -100,8 +100,7 @@ import {
 import { SortableContiCard } from "@/components/conti/SortableContiCard";
 import { RelightModal } from "@/components/conti/RelightModal";
 import { CameraVariationsModal } from "@/components/conti/CameraVariationsModal";
-// NOTE: ChangeAngleModal lives in the repo but is not wired — NB2 can't reliably
-// re-angle an existing image. Re-enable when a Qwen multi-angle backend lands.
+import { ChangeAngleModal } from "@/components/conti/ChangeAngleModal";
 import { StyleTransferConfirmModal } from "@/components/conti/StyleTransferConfirmModal";
 import { GenerateAllModal } from "@/components/conti/GenerateAllModal";
 import { SceneImageCropModal } from "@/components/conti/SceneImageCropModal";
@@ -1569,6 +1568,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const [adjustingScene, setAdjustingScene] = useState<Scene | null>(null);
   const [relightingScene, setRelightingScene] = useState<Scene | null>(null);
   const [cameraVariationsScene, setCameraVariationsScene] = useState<Scene | null>(null);
+  const [changeAngleScene, setChangeAngleScene] = useState<Scene | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("auto");
   const [cardSize, setCardSize] = useState<number>(videoFormat === "vertical" ? 240 : 300);
   const [showGenerateAllModal, setShowGenerateAllModal] = useState(false);
@@ -2306,8 +2306,8 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const [showModelMenu, setShowModelMenu] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const MODEL_OPTIONS: { id: ContiModel; name: string; desc: string }[] = [
-    { id: "nano-banana-2", name: "Nano Banana 2", desc: "구도+일관성 (기본)" },
-    { id: "gpt", name: "GPT", desc: "범용 생성" },
+    { id: "nano-banana-2", name: "Nano Banana 2", desc: "Consistency + composition (default)" },
+    { id: "gpt", name: "GPT", desc: "General purpose" },
   ];
   useEffect(() => {
     if (!showModelMenu) return;
@@ -3352,7 +3352,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                         >
                           <span
                             className="font-mono text-[9px] font-bold px-1.5 py-0.5 text-white shrink-0"
-                            style={{ background: isActive ? KR : "rgba(255,255,255,0.15)", borderRadius: 2 }}
+                            style={{ background: isActive ? KR : "rgba(255,255,255,0.15)", borderRadius: 0 }}
                           >
                             {`ver.${idx + 1}`}
                           </span>
@@ -3642,7 +3642,6 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                             {opt.desc}
                           </div>
                         </div>
-                        {isSelected && <div className="w-1.5 h-1.5" style={{ background: KR }} />}
                       </button>
                     );
                   })}
@@ -3825,6 +3824,9 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                           onCameraVariations={
                             scene.conti_image_url ? () => setCameraVariationsScene(scene) : undefined
                           }
+                          onChangeAngle={
+                            scene.conti_image_url ? () => setChangeAngleScene(scene) : undefined
+                          }
                           displayNumber={displayNum}
                           onTransitionTypeChange={handleTransitionTypeChange}
                           showInfo={showInfo}
@@ -3903,30 +3905,54 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           scene={cameraVariationsScene}
           videoFormat={videoFormat}
           onClose={() => setCameraVariationsScene(null)}
-          generate={async (overrideScene) => {
-            // Reuse the tab's regenerate context so variations share brief /
-            // style / mood / model with the normal Regenerate pipeline.
-            // `overrideScene` already has camera_angle replaced with the
-            // preset phrase by the modal.
+          generate={async (req) => {
+            // The modal dispatches two distinct generation paths per request:
             //
-            // IMPORTANT: do NOT pass the scene's current image as a reference
-            // here. NB2 interprets any "mostly-baked" reference as copy-mode
-            // and freezes the geometry (subject and background stay put, only
-            // surface effects change). Identity preservation comes from the
-            // separate, clean tagged_assets photos that generateConti already
-            // pulls via fetchTaggedAssets — that's how NB2's multi-reference
-            // consistency is actually meant to be used.
+            //   preserve → NB2 edit of the current scene image. Same pipeline
+            //              RelightModal and ChangeAngleModal use — source image
+            //              goes in as sourceImageUrl, the built prompt tells NB2
+            //              to keep every identity / environment element and
+            //              change only camera position. This is where we get
+            //              "NB2 의 장점인 일관성" back: identity comes from the
+            //              real source pixels, not a description paraphrase.
+            //
+            //   fresh    → classic generateConti with camera_angle overridden.
+            //              Identity anchors are tagged_assets photo refs; the
+            //              source scene image is intentionally ignored so NB2
+            //              is free to recompose from scratch with the preset's
+            //              camera phrase.
+            if (req.mode === "preserve") {
+              const { data, error } = await supabase.functions.invoke("openai-image", {
+                body: {
+                  mode: "inpaint",
+                  useNanoBanana: true,
+                  sourceImageUrl: req.sourceImageUrl,
+                  referenceImageUrls: [],
+                  prompt: req.prompt,
+                  projectId,
+                  sceneNumber: cameraVariationsScene.scene_number,
+                  imageSize: IMAGE_SIZE_MAP[videoFormat],
+                },
+              });
+              if (error) throw error;
+              const d = data as { publicUrl?: string; url?: string } | null;
+              const newUrl = d?.publicUrl ?? d?.url ?? null;
+              if (!newUrl) throw new Error("Preserve-source variation returned no image URL");
+              return newUrl;
+            }
+
+            // fresh mode
             const styleAnchor = currentStyle?.style_prompt ?? undefined;
             const styleImageUrl = currentStyle?.thumbnail_url ?? undefined;
             const newUrl = await generateConti({
-              scene: overrideScene,
+              scene: req.overrideScene,
               allScenes: activeScenes,
               projectId,
               videoFormat,
               briefAnalysis: briefAnalysisRef.current,
               styleAnchor,
               styleImageUrl,
-              moodReferenceUrl: getMoodReferenceUrl(overrideScene.scene_number),
+              moodReferenceUrl: getMoodReferenceUrl(req.overrideScene.scene_number),
               model: contiModel,
             });
             return newUrl;
@@ -3941,6 +3967,26 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             await updateVersionScenes(updated);
             bumpCache(target.scene_number);
             toast({ title: `Scene ${target.scene_number} updated with new camera angle.` });
+          }}
+        />
+      )}
+
+      {changeAngleScene && (
+        <ChangeAngleModal
+          scene={changeAngleScene}
+          projectId={projectId}
+          videoFormat={videoFormat}
+          onClose={() => setChangeAngleScene(null)}
+          onApplied={async (newUrl, previousUrl) => {
+            const target = changeAngleScene;
+            if (!target) return;
+            pushHistory(target.id, previousUrl);
+            await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", target.id);
+            const current = getSceneState(projectId)?.scenes ?? activeScenes;
+            const updated = current.map((s) => (s.id === target.id ? { ...s, conti_image_url: newUrl } : s));
+            await updateVersionScenes(updated);
+            bumpCache(target.scene_number);
+            toast({ title: `Scene ${target.scene_number} re-angled.` });
           }}
         />
       )}

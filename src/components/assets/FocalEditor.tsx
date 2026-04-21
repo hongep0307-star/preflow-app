@@ -59,7 +59,7 @@ export const FocalEditor = ({ url, initial, onSave, onClose }: Props) => {
     >
       <div className="bg-card rounded p-6 w-80 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <p className="text-sm font-semibold text-foreground mb-1">Adjust profile image</p>
-        <p className="text-[12px] text-muted-foreground mb-4">드래그로 위치 · 슬라이더로 크기를 조정하세요</p>
+        <p className="text-[12px] text-muted-foreground mb-4">Drag to reposition · use the slider to resize</p>
         <div className="flex justify-center mb-4">
           <div
             className="w-44 h-44 rounded-full overflow-hidden cursor-grab active:cursor-grabbing select-none"
@@ -80,7 +80,7 @@ export const FocalEditor = ({ url, initial, onSave, onClose }: Props) => {
         </div>
         <div className="mb-5">
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[12px] text-muted-foreground">크기</span>
+            <span className="text-[12px] text-muted-foreground">Size</span>
             <span className="text-[12px] font-medium" style={{ color: KR }}>
               {Math.round(scale * 100)}%
             </span>
@@ -101,7 +101,7 @@ export const FocalEditor = ({ url, initial, onSave, onClose }: Props) => {
         </div>
         <div className="flex gap-2 justify-end">
           <Button variant="ghost" size="sm" onClick={onClose}>
-            취소
+            Cancel
           </Button>
           <Button
             size="sm"
@@ -112,7 +112,7 @@ export const FocalEditor = ({ url, initial, onSave, onClose }: Props) => {
               onClose();
             }}
           >
-            적용
+            Apply
           </Button>
         </div>
       </div>

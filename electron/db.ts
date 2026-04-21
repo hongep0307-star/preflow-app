@@ -134,6 +134,14 @@ function createTables() {
     d.exec(`ALTER TABLE assets ADD COLUMN source_type TEXT DEFAULT 'upload'`);
   } catch (_) { /* column already exists */ }
 
+  // photo_crop was added later for the FocalEditor (profile-image drag + zoom).
+  // Existing DBs created before that addition don't have the column, so UPDATEs
+  // silently fail and any saved focal point vanishes on reload. Idempotent
+  // ALTER for those legacy DBs; no-op otherwise.
+  try {
+    d.exec(`ALTER TABLE assets ADD COLUMN photo_crop TEXT`);
+  } catch (_) { /* column already exists */ }
+
   d.exec(`
     CREATE TABLE IF NOT EXISTS scene_versions (
       id TEXT PRIMARY KEY,

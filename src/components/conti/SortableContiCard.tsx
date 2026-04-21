@@ -12,7 +12,6 @@ import {
   X,
   Lightbulb,
   Palette,
-  Images,
 } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -608,6 +607,7 @@ export const SortableContiCard = memo(
     onUseAsStyle,
     onRelight,
     onCameraVariations,
+    onChangeAngle,
     onTransitionTypeChange,
     displayNumber,
     showInfo,
@@ -650,6 +650,9 @@ export const SortableContiCard = memo(
     /** 카메라 베리에이션 모달을 연다. hasImage 일 때만 제공.
      *  씬 description + tagged_assets 를 reference 로 8 가지 카메라 앵글로 병렬 생성. */
     onCameraVariations?: () => void;
+    /** Change Angle 모달을 연다. hasImage 일 때만 제공.
+     *  원본 이미지를 그대로 유지한 채 yaw/pitch/zoom 만 자연어로 매핑해 카메라 이동. */
+    onChangeAngle?: () => void;
     onTransitionTypeChange?: (scene: Scene, newType: string) => void;
     displayNumber?: number;
     showInfo?: boolean;
@@ -831,14 +834,14 @@ export const SortableContiCard = memo(
             {scene.is_transition ? (
               <span
                 className="font-mono text-[10px] font-bold px-1.5 py-0.5 text-white shrink-0"
-                style={{ background: "#6b7280", borderRadius: 2 }}
+                style={{ background: "#6b7280", borderRadius: 0 }}
               >
                 TR
               </span>
             ) : (
               <span
                 className="font-mono text-[10px] font-bold px-1.5 py-0.5 text-white shrink-0"
-                style={{ background: KR, borderRadius: 2 }}
+                style={{ background: KR, borderRadius: 0 }}
               >
                 S{String(displayNumber ?? scene.scene_number).padStart(2, "0")}
               </span>
@@ -1305,8 +1308,12 @@ export const SortableContiCard = memo(
               </button>
             </div>
 
-            {/* Variants quick-access icons (Relight / Camera Variations / Use as Style) */}
-            {hasImage && (onRelight || onCameraVariations || onUseAsStyle) && (
+            {/* Variants quick-access icons (Relight / Use as Style).
+                Camera Variations / Change Angle 은 현재 NB2 단일 파이프라인으로는
+                원본 유지 + 앵글 변경이 안정적으로 안 되므로(모델 구조상 novel-view
+                synthesis 불가) 호버 퀵 아이콘에서 제거. 사이드패널 Variants 에는
+                "Unavailable" 로 여전히 노출되어 기능 존재 자체는 드러낸다. */}
+            {hasImage && (onRelight || onUseAsStyle) && (
               <div
                 style={{
                   position: "absolute",
@@ -1336,23 +1343,6 @@ export const SortableContiCard = memo(
                     }}
                   >
                     <Lightbulb className="w-3.5 h-3.5" />
-                  </button>
-                )}
-                {onCameraVariations && (
-                  <button
-                    title="Camera Variations"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onCameraVariations();
-                    }}
-                    className="flex items-center justify-center w-7 h-7 rounded-none text-white/90 hover:bg-white/20"
-                    style={{
-                      background: "rgba(0,0,0,0.55)",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <Images className="w-3.5 h-3.5" />
                   </button>
                 )}
                 {onUseAsStyle && (
@@ -1465,6 +1455,14 @@ export const SortableContiCard = memo(
                     ? () => {
                         setMenuOpen(false);
                         onCameraVariations();
+                      }
+                    : undefined
+                }
+                onChangeAngle={
+                  scene.conti_image_url && onChangeAngle
+                    ? () => {
+                        setMenuOpen(false);
+                        onChangeAngle();
                       }
                     : undefined
                 }

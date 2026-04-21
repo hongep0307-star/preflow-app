@@ -74,10 +74,30 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const getFocal = (id: string): FocalPoint => focalPoints[id] ?? { x: 50, y: 25, scale: 1.4 };
-  const saveFocal = (id: string, p: FocalPoint) => {
+  const saveFocal = async (id: string, p: FocalPoint) => {
+    // Optimistic local update keeps the UI snappy; the DB write below is awaited
+    // only to surface errors (swallowed previously by `.then(() => {})`, which
+    // is why users reported the crop reverting to default on refresh).
     const next = { ...focalPoints, [id]: p };
     setFocalPoints(next);
-    supabase.from("assets").update({ photo_crop: p as any }).eq("id", id).then(() => {});
+    try {
+      const { error } = await supabase.from("assets").update({ photo_crop: p as any }).eq("id", id);
+      if (error) {
+        console.error("[AssetsTab] saveFocal update failed:", error);
+        toast({
+          title: "Profile image adjustment was not saved",
+          description: typeof error === "object" && error && "message" in error ? String((error as any).message) : String(error),
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      console.error("[AssetsTab] saveFocal threw:", e);
+      toast({
+        title: "Profile image adjustment was not saved",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
   };
 
   const fetchAssets = useCallback(async () => {
@@ -612,7 +632,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
           );
         })()}
 
-      {/* ?? ?? ?? ??? ?? (1??, ?Â·??? + ?? ??) ?? */}
+      {/* ?? ?? ?? ??? ?? (1??, ?·??? + ?? ??) ?? */}
       {previewAsset && (
         <AssetDetailModal
           asset={previewAsset}
@@ -898,7 +918,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 <div>
                   <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
                     <Package className="w-3 h-3" /> Item Detail{" "}
-                    <span className="text-muted-foreground/40">(optional Â· auto-analyzable)</span>
+                    <span className="text-muted-foreground/40">(optional · auto-analyzable)</span>
                   </label>
                   <Textarea
                     value={itemDescription}
@@ -912,7 +932,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 <div>
                   <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
                     <MapPin className="w-3 h-3" /> Location Description{" "}
-                    <span className="text-muted-foreground/40">(optional Â· auto-analyzable)</span>
+                    <span className="text-muted-foreground/40">(optional · auto-analyzable)</span>
                   </label>
                   <Textarea
                     value={spaceDescription}

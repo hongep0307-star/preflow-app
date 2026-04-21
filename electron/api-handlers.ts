@@ -362,53 +362,131 @@ async function callVertexNB2(settings: any, prompt: string, imageUrls?: string[]
   const saKeyJson = settings.google_service_account_key;
   const gcpProjectId = settings.google_cloud_project_id;
   if (!saKeyJson || !gcpProjectId) throw new Error("Google Cloud credentials not configured");
-  const accessToken = await getVertexAccessToken(saKeyJson);
   const model = "gemini-3.1-flash-image-preview";
   const endpoint = `https://aiplatform.googleapis.com/v1/projects/${gcpProjectId}/locations/global/publishers/google/models/${model}:generateContent`;
   const parts: any[] = [{ text: prompt }];
+  // Image downloads + base64 encoding happen in parallel so a batch of Camera
+  // Variations doesn't queue on I/O before each NB2 request even goes out.
   if (imageUrls && imageUrls.length > 0) {
-    for (const url of imageUrls.slice(0, 14)) {
-      try { const buf = await downloadImage(url); parts.push({ inlineData: { mimeType: "image/png", data: buf.toString("base64") } }); } catch {}
+    const downloaded = await Promise.all(
+      imageUrls.slice(0, 14).map(async (url) => {
+        try { return await downloadImage(url); } catch { return null; }
+      }),
+    );
+    for (const buf of downloaded) {
+      if (buf) parts.push({ inlineData: { mimeType: "image/png", data: buf.toString("base64") } });
     }
   }
-  const res = await fetchWithRetry(
-    endpoint,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: aspectRatio ?? "9:16", imageSize: "1K" } } }),
-    },
-    { label: "vertex-nb2", timeoutMs: 180_000, retries: 1 },
-  );
-  if (!res.ok) throw new Error(`Vertex AI HTTP ${res.status}: ${await res.text()}`);
-  const result = (await res.json()) as any;
-  if (!result.candidates?.length) throw new Error("Vertex AI: no candidates");
-  for (const part of result.candidates[0].content?.parts || []) {
-    if (part.inlineData?.data) return Buffer.from(part.inlineData.data, "base64");
+  const body = JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: aspectRatio ?? "9:16", imageSize: "1K" } } });
+
+  /** Single attempt. Bubbles up a sentinel so the outer retry can decide to
+   *  refresh the cached access token on 401 (revoked/expired/wall-clock-drift). */
+  const attempt = async (): Promise<Buffer> => {
+    const accessToken = await getVertexAccessToken(saKeyJson);
+    const started = Date.now();
+    const res = await fetchWithRetry(
+      endpoint,
+      { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body },
+      { label: "vertex-nb2", timeoutMs: 180_000, retries: 1 },
+    );
+    if (res.status === 401) {
+      const msg = await res.text();
+      const err: any = new Error(`Vertex AI HTTP 401: ${msg}`);
+      err.__nb2Unauthorized = true;
+      throw err;
+    }
+    if (!res.ok) throw new Error(`Vertex AI HTTP ${res.status}: ${await res.text()}`);
+    const result = (await res.json()) as any;
+    const elapsed = Date.now() - started;
+    console.log(`[vertex-nb2] ok in ${elapsed}ms (refs=${Math.max(0, parts.length - 1)})`);
+    if (!result.candidates?.length) throw new Error("Vertex AI: no candidates");
+    for (const part of result.candidates[0].content?.parts || []) {
+      if (part.inlineData?.data) return Buffer.from(part.inlineData.data, "base64");
+    }
+    throw new Error("Vertex AI: no image in response");
+  };
+
+  try {
+    return await attempt();
+  } catch (e: any) {
+    if (e?.__nb2Unauthorized) {
+      console.warn("[vertex-nb2] access token rejected, invalidating cache and retrying once");
+      vertexTokenCache = null;
+      vertexTokenInflight = null;
+      return await attempt();
+    }
+    throw e;
   }
-  throw new Error("Vertex AI: no image in response");
 }
 
+/* ─────────────────────────────────────────────────────────────
+ * Vertex access-token cache.
+ *
+ * Every NB2 call used to fetch a fresh token (JWT sign → OAuth endpoint
+ * POST). At ~1–2s each that added up fast when firing off 8 Camera
+ * Variations in parallel — the OAuth hop alone was a noticeable chunk
+ * of per-call latency.
+ *
+ * Google-issued access tokens for service accounts are valid for 1h.
+ * We cache by service-account-key hash (so rotating the SA key
+ * invalidates the cache) and consider the token expired 5 minutes
+ * before its real expiry to absorb clock skew.
+ *
+ * In-flight de-dupe: concurrent callers during a cache miss share the
+ * SAME promise, so we never kick off more than one OAuth exchange at
+ * a time even under a burst.
+ * ───────────────────────────────────────────────────────────── */
+type CachedToken = { token: string; expiresAt: number };
+let vertexTokenCache: { keyHash: string; entry: CachedToken } | null = null;
+let vertexTokenInflight: { keyHash: string; promise: Promise<CachedToken> } | null = null;
+const TOKEN_LIFETIME_MS = 60 * 60 * 1000; // Google default
+const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
 async function getVertexAccessToken(saKeyJson: string): Promise<string> {
-  const sa = JSON.parse(saKeyJson);
-  const now = Math.floor(Date.now() / 1000);
-  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({ iss: sa.client_email, scope: "https://www.googleapis.com/auth/cloud-platform", aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600 })).toString("base64url");
-  const signingInput = `${header}.${payload}`;
-  const sign = crypto.createSign("RSA-SHA256"); sign.update(signingInput);
-  const signature = sign.sign(sa.private_key, "base64url");
-  const jwt = `${signingInput}.${signature}`;
-  const tokenRes = await fetchWithRetry(
-    "https://oauth2.googleapis.com/token",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
-    },
-    { label: "google-oauth", timeoutMs: 15_000, retries: 2 },
-  );
-  if (!tokenRes.ok) throw new Error(`Token exchange failed: ${await tokenRes.text()}`);
-  return ((await tokenRes.json()) as { access_token: string }).access_token;
+  const keyHash = crypto.createHash("sha256").update(saKeyJson).digest("hex");
+  const now = Date.now();
+
+  if (vertexTokenCache && vertexTokenCache.keyHash === keyHash && vertexTokenCache.entry.expiresAt - TOKEN_REFRESH_MARGIN_MS > now) {
+    return vertexTokenCache.entry.token;
+  }
+  if (vertexTokenInflight && vertexTokenInflight.keyHash === keyHash) {
+    const entry = await vertexTokenInflight.promise;
+    return entry.token;
+  }
+
+  const promise = (async (): Promise<CachedToken> => {
+    const sa = JSON.parse(saKeyJson);
+    const iat = Math.floor(now / 1000);
+    const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+    const payload = Buffer.from(JSON.stringify({ iss: sa.client_email, scope: "https://www.googleapis.com/auth/cloud-platform", aud: "https://oauth2.googleapis.com/token", iat, exp: iat + 3600 })).toString("base64url");
+    const signingInput = `${header}.${payload}`;
+    const sign = crypto.createSign("RSA-SHA256"); sign.update(signingInput);
+    const signature = sign.sign(sa.private_key, "base64url");
+    const jwt = `${signingInput}.${signature}`;
+    const tokenRes = await fetchWithRetry(
+      "https://oauth2.googleapis.com/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+      },
+      { label: "google-oauth", timeoutMs: 15_000, retries: 2 },
+    );
+    if (!tokenRes.ok) throw new Error(`Token exchange failed: ${await tokenRes.text()}`);
+    const json = (await tokenRes.json()) as { access_token: string; expires_in?: number };
+    const ttlMs = (json.expires_in ?? 3600) * 1000;
+    const entry: CachedToken = { token: json.access_token, expiresAt: Date.now() + Math.min(ttlMs, TOKEN_LIFETIME_MS) };
+    vertexTokenCache = { keyHash, entry };
+    return entry;
+  })();
+
+  vertexTokenInflight = { keyHash, promise };
+  try {
+    const entry = await promise;
+    return entry.token;
+  } finally {
+    if (vertexTokenInflight && vertexTokenInflight.keyHash === keyHash) vertexTokenInflight = null;
+  }
 }
 
 async function callGptGenerations(apiKey: string, prompt: string, size: string): Promise<Buffer> {

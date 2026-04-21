@@ -1086,6 +1086,7 @@ export const SidePanel = ({
   onUseAsStyle,
   onRelight,
   onCameraVariations,
+  onChangeAngle,
 }: {
   hasImage: boolean;
   openLeft: boolean;
@@ -1105,10 +1106,29 @@ export const SidePanel = ({
   /** Camera Variations 모달 열기. hasImage 일 때만 활성.
    *  씬 description + tagged_assets 로 다양한 카메라 앵글 이미지를 병렬 생성. */
   onCameraVariations?: () => void;
+  /** Change Angle 모달 열기. hasImage 일 때만 활성.
+   *  원본 이미지를 NB2 inpaint 경로로 보내 정체성은 유지하고 카메라 좌표(yaw/pitch/zoom)만 조정. */
+  onChangeAngle?: () => void;
 }) => {
   const [hovKey, setHovKey] = useState<string>("");
-  // Variants 그룹 기본 접힘
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // 그룹 항목은 hover 시 우측에 flyout 서브메뉴로 노출됨.
+  // 마우스 이동 중 틈이 생겨도 플라이아웃이 닫히지 않게 짧은 지연 후 닫는다.
+  const [hoveredGroupId, setHoveredGroupId] = useState<string | null>(null);
+  const flyoutCloseTimer = useRef<number | null>(null);
+  const cancelFlyoutClose = () => {
+    if (flyoutCloseTimer.current !== null) {
+      window.clearTimeout(flyoutCloseTimer.current);
+      flyoutCloseTimer.current = null;
+    }
+  };
+  const scheduleFlyoutClose = () => {
+    cancelFlyoutClose();
+    flyoutCloseTimer.current = window.setTimeout(() => {
+      setHoveredGroupId(null);
+      flyoutCloseTimer.current = null;
+    }, 120);
+  };
+  useEffect(() => () => cancelFlyoutClose(), []);
 
   const variantsChildren: SidePanelLeaf[] = [];
   if (hasImage && onRelight)
@@ -1119,13 +1139,20 @@ export const SidePanel = ({
       fn: onRelight,
       danger: false,
     });
-  if (hasImage && onCameraVariations)
+  // Camera Variations / Change Angle 은 현재 NB2(Gemini 3.1 Flash Image) 단일 경로로는
+  // 원본 유지 + 카메라 앵글 변경이 안정적으로 안 된다(모델이 단일 레퍼런스 이미지로부터
+  // 3D 씬을 재구성하지 못해서 freeze / 2D-pivot / redesign failure mode 로 빠짐).
+  // 전용 novel-view 모델(Qwen-Image-Edit Multi-Angle 등)을 붙이기 전까지는 사이드패널에
+  // 항목은 남겨두되 "Unavailable" 로 비활성화하여 기능의 존재를 알리면서 호출은 차단한다.
+  if (hasImage)
     variantsChildren.push({
       kind: "leaf",
       icon: <Images className="w-3.5 h-3.5" />,
       label: "Camera Variations",
-      fn: onCameraVariations,
+      fn: () => {},
       danger: false,
+      disabled: true,
+      hint: "Unavailable",
     });
   if (hasImage)
     variantsChildren.push({
@@ -1135,7 +1162,7 @@ export const SidePanel = ({
       fn: () => {},
       danger: false,
       disabled: true,
-      hint: "Coming soon",
+      hint: "Unavailable",
     });
   if (hasImage && onUseAsStyle)
     variantsChildren.push({
@@ -1267,9 +1294,11 @@ export const SidePanel = ({
       >
         {item.icon}
       </span>
-      <span style={{ flex: 1 }}>{item.label}</span>
+      <span style={{ flex: 1, whiteSpace: "nowrap" }}>{item.label}</span>
       {item.hint ? (
-        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 0.3 }}>{item.hint}</span>
+        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 0.3, whiteSpace: "nowrap" }}>
+          {item.hint}
+        </span>
       ) : null}
     </button>
   );
@@ -1285,7 +1314,8 @@ export const SidePanel = ({
         border: "1px solid rgba(255,255,255,0.08)",
         borderRadius: 0,
         minWidth: 184,
-        overflow: "hidden",
+        // overflow: hidden 금지 — 그룹 행의 hover 플라이아웃 서브메뉴가
+        // 메뉴 경계 바깥으로 뻗어나가야 하므로, 여기서 clip 되면 안 된다.
         boxShadow: "0 8px 28px rgba(0,0,0,0.5)",
       }}
     >
@@ -1294,16 +1324,26 @@ export const SidePanel = ({
           return <div key={`sep-${i}`} style={{ height: 1, background: "rgba(255,255,255,0.06)", margin: "2px 0" }} />;
         if (entry.kind === "leaf") return renderLeaf(entry, `leaf-${i}`);
         const key = `group-${entry.id}`;
-        const isOpen = !!expanded[entry.id];
+        const isFlyoutOpen = hoveredGroupId === entry.id;
+        // Hover 시 우측(기본) / openLeft 모드면 좌측에 서브메뉴가 떠오른다.
+        // 그룹 행과 서브메뉴 사이를 이동할 때 틈이 생기더라도 플라이아웃이
+        // 유지되도록 closeTimer 로 120ms 지연 후 닫는다.
         return (
-          <div key={key}>
+          <div
+            key={key}
+            style={{ position: "relative" }}
+            onMouseEnter={() => {
+              cancelFlyoutClose();
+              setHoveredGroupId(entry.id);
+              setHovKey(key);
+            }}
+            onMouseLeave={() => {
+              scheduleFlyoutClose();
+              setHovKey("");
+            }}
+          >
             <button
-              onMouseEnter={() => setHovKey(key)}
-              onMouseLeave={() => setHovKey("")}
-              onClick={(e) => {
-                e.stopPropagation();
-                setExpanded((m) => ({ ...m, [entry.id]: !m[entry.id] }));
-              }}
+              onClick={(e) => e.stopPropagation()}
               style={{
                 width: "100%",
                 display: "flex",
@@ -1311,11 +1351,11 @@ export const SidePanel = ({
                 gap: 10,
                 padding: "8px 14px",
                 fontSize: 12,
-                cursor: "pointer",
+                cursor: "default",
                 border: "none",
                 textAlign: "left",
                 fontFamily: "inherit",
-                background: hovKey === key ? "rgba(255,255,255,0.06)" : "transparent",
+                background: isFlyoutOpen || hovKey === key ? "rgba(255,255,255,0.06)" : "transparent",
                 color: "rgba(255,255,255,0.85)",
                 transition: "background 0.1s",
               }}
@@ -1325,15 +1365,30 @@ export const SidePanel = ({
               <ChevronRight
                 className="w-3 h-3"
                 style={{
-                  color: "rgba(255,255,255,0.35)",
-                  transition: "transform 0.12s",
-                  transform: isOpen ? "rotate(90deg)" : "none",
+                  color: isFlyoutOpen ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.35)",
+                  transform: openLeft ? "rotate(180deg)" : "none",
                 }}
               />
             </button>
-            {isOpen && (
-              <div style={{ background: "rgba(255,255,255,0.02)" }}>
-                {entry.children.map((c, j) => renderLeaf(c, `${key}-child-${j}`, 18))}
+            {isFlyoutOpen && entry.children.length > 0 && (
+              <div
+                onMouseEnter={cancelFlyoutClose}
+                onMouseLeave={scheduleFlyoutClose}
+                style={{
+                  position: "absolute",
+                  top: -1,
+                  ...(openLeft
+                    ? { right: "calc(100% - 2px)" }
+                    : { left: "calc(100% - 2px)" }),
+                  minWidth: 220,
+                  background: "#1c1c1c",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  boxShadow: "0 8px 28px rgba(0,0,0,0.55)",
+                  zIndex: 201,
+                  overflow: "hidden",
+                }}
+              >
+                {entry.children.map((c, j) => renderLeaf(c, `${key}-child-${j}`, 0))}
               </div>
             )}
           </div>
