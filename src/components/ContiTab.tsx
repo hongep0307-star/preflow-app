@@ -98,6 +98,10 @@ import {
   SidePanel,
 } from "@/components/conti/contiInternals";
 import { SortableContiCard } from "@/components/conti/SortableContiCard";
+import { RelightModal } from "@/components/conti/RelightModal";
+import { CameraVariationsModal } from "@/components/conti/CameraVariationsModal";
+// NOTE: ChangeAngleModal lives in the repo but is not wired — NB2 can't reliably
+// re-angle an existing image. Re-enable when a Qwen multi-angle backend lands.
 import { StyleTransferConfirmModal } from "@/components/conti/StyleTransferConfirmModal";
 import { GenerateAllModal } from "@/components/conti/GenerateAllModal";
 import { SceneImageCropModal } from "@/components/conti/SceneImageCropModal";
@@ -1563,6 +1567,8 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   );
   const [compareSceneNumber, setCompareSceneNumber] = useState<number | null>(null);
   const [adjustingScene, setAdjustingScene] = useState<Scene | null>(null);
+  const [relightingScene, setRelightingScene] = useState<Scene | null>(null);
+  const [cameraVariationsScene, setCameraVariationsScene] = useState<Scene | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("auto");
   const [cardSize, setCardSize] = useState<number>(videoFormat === "vertical" ? 240 : 300);
   const [showGenerateAllModal, setShowGenerateAllModal] = useState(false);
@@ -1953,6 +1959,73 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       toast({ variant: "destructive", title: "Failed to set thumbnail", description: e.message });
     }
   };
+
+  /**
+   * 씬카드 이미지를 프로젝트의 스타일 프리셋(style_presets)으로 등록 + 현재 프로젝트의 활성 스타일로 즉시 적용.
+   * - 해당 씬의 conti_image_url을 다운로드 → style-presets 버킷에 재업로드 → style_presets 행 insert
+   * - 등록 성공 시 projects.conti_style_id를 방금 만든 프리셋으로 업데이트 + currentStyle/projectInfo 클라이언트 상태 동기화
+   * - 스키마/경로 규약은 StylePickerModal.handleUploadStyle 과 동일.
+   */
+  const handleRegisterSceneAsStyle = useCallback(
+    async (scene: Scene) => {
+      if (!scene.conti_image_url) {
+        toast({ variant: "destructive", title: "No image to register" });
+        return;
+      }
+      try {
+        const resp = await fetch(scene.conti_image_url);
+        if (!resp.ok) throw new Error(`fetch failed (${resp.status})`);
+        const blob = await resp.blob();
+        const contentType = blob.type || "image/png";
+        const ext = contentType.includes("png")
+          ? "png"
+          : contentType.includes("webp")
+            ? "webp"
+            : contentType.includes("jpeg") || contentType.includes("jpg")
+              ? "jpg"
+              : "png";
+        const safeName = `scene-${scene.scene_number}-style-${Date.now()}.${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const storagePath = `${projectId}/${safeName}`;
+        const { error: upErr } = await supabase.storage
+          .from("style-presets")
+          .upload(storagePath, blob, { upsert: true, contentType });
+        if (upErr) throw upErr;
+        const { data: urlData } = supabase.storage.from("style-presets").getPublicUrl(storagePath);
+        const publicUrl = urlData.publicUrl;
+        const presetName = `Scene ${scene.scene_number}${scene.title ? ` – ${scene.title}` : ""}`.slice(0, 60);
+        const { data: inserted, error: insErr } = await supabase
+          .from("style_presets")
+          .insert({
+            name: presetName,
+            description: `From scene ${scene.scene_number}`,
+            thumbnail_url: publicUrl,
+            style_prompt: "Match the visual style, color palette, and artistic treatment of the reference image.",
+            is_default: false,
+            user_id: (await supabase.auth.getUser()).data.user?.id ?? null,
+          })
+          .select()
+          .single();
+        if (insErr) throw insErr;
+        const newPreset = inserted as StylePreset;
+        // 프로젝트의 활성 스타일로 즉시 승격
+        const { error: projErr } = await supabase
+          .from("projects")
+          .update({ conti_style_id: newPreset.id })
+          .eq("id", projectId);
+        if (projErr) throw projErr;
+        setCurrentStyle(newPreset);
+        setProjectInfo((prev) => ({ ...prev, conti_style_id: newPreset.id }));
+        toast({ title: `"${newPreset.name}" set as current style.` });
+      } catch (e: any) {
+        toast({
+          variant: "destructive",
+          title: "Failed to register style",
+          description: e?.message ?? String(e),
+        });
+      }
+    },
+    [projectId, toast],
+  );
 
   const handleDuplicateScene = async (scene: Scene) => {
     const tempNumber = 90000 + (Date.now() % 10000);
@@ -3745,6 +3818,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                             scene.conti_image_url ? () => handleSetThumbnail(scene.conti_image_url!) : undefined
                           }
                           onAdjustImage={scene.conti_image_url ? () => setAdjustingScene(scene) : undefined}
+                          onUseAsStyle={
+                            scene.conti_image_url ? () => handleRegisterSceneAsStyle(scene) : undefined
+                          }
+                          onRelight={scene.conti_image_url ? () => setRelightingScene(scene) : undefined}
+                          onCameraVariations={
+                            scene.conti_image_url ? () => setCameraVariationsScene(scene) : undefined
+                          }
                           displayNumber={displayNum}
                           onTransitionTypeChange={handleTransitionTypeChange}
                           showInfo={showInfo}
@@ -3794,6 +3874,73 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           onSaved={(sceneId, crop) => {
             updateVersionScenes(activeScenes.map((s) => (s.id === sceneId ? { ...s, conti_image_crop: crop } : s)));
             setAdjustingScene(null);
+          }}
+        />
+      )}
+
+      {relightingScene && (
+        <RelightModal
+          scene={relightingScene}
+          projectId={projectId}
+          videoFormat={videoFormat}
+          onClose={() => setRelightingScene(null)}
+          onApplied={async (newUrl, previousUrl) => {
+            const target = relightingScene;
+            if (!target) return;
+            pushHistory(target.id, previousUrl);
+            await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", target.id);
+            const current = getSceneState(projectId)?.scenes ?? activeScenes;
+            const updated = current.map((s) => (s.id === target.id ? { ...s, conti_image_url: newUrl } : s));
+            await updateVersionScenes(updated);
+            bumpCache(target.scene_number);
+            toast({ title: `Scene ${target.scene_number} relit.` });
+          }}
+        />
+      )}
+
+      {cameraVariationsScene && (
+        <CameraVariationsModal
+          scene={cameraVariationsScene}
+          videoFormat={videoFormat}
+          onClose={() => setCameraVariationsScene(null)}
+          generate={async (overrideScene) => {
+            // Reuse the tab's regenerate context so variations share brief /
+            // style / mood / model with the normal Regenerate pipeline.
+            // `overrideScene` already has camera_angle replaced with the
+            // preset phrase by the modal.
+            //
+            // IMPORTANT: do NOT pass the scene's current image as a reference
+            // here. NB2 interprets any "mostly-baked" reference as copy-mode
+            // and freezes the geometry (subject and background stay put, only
+            // surface effects change). Identity preservation comes from the
+            // separate, clean tagged_assets photos that generateConti already
+            // pulls via fetchTaggedAssets — that's how NB2's multi-reference
+            // consistency is actually meant to be used.
+            const styleAnchor = currentStyle?.style_prompt ?? undefined;
+            const styleImageUrl = currentStyle?.thumbnail_url ?? undefined;
+            const newUrl = await generateConti({
+              scene: overrideScene,
+              allScenes: activeScenes,
+              projectId,
+              videoFormat,
+              briefAnalysis: briefAnalysisRef.current,
+              styleAnchor,
+              styleImageUrl,
+              moodReferenceUrl: getMoodReferenceUrl(overrideScene.scene_number),
+              model: contiModel,
+            });
+            return newUrl;
+          }}
+          onApplied={async (newUrl, previousUrl) => {
+            const target = cameraVariationsScene;
+            if (!target) return;
+            pushHistory(target.id, previousUrl);
+            await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", target.id);
+            const current = getSceneState(projectId)?.scenes ?? activeScenes;
+            const updated = current.map((s) => (s.id === target.id ? { ...s, conti_image_url: newUrl } : s));
+            await updateVersionScenes(updated);
+            bumpCache(target.scene_number);
+            toast({ title: `Scene ${target.scene_number} updated with new camera angle.` });
           }}
         />
       )}

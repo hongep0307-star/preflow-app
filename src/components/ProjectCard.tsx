@@ -98,13 +98,13 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
       <div
         onClick={() => {
           // 라우팅 우선순위:
-          //  1) 콘티 작업 있음  → storyboard (Conti) 탭
-          //  2) Agent 씬카드 / 드래프트 있음 → agent 탭
-          //  3) 그 외 → brief (기본)
+          //  1) 콘티탭에 씬 카드가 하나라도 있음 (source='conti' 또는 scene_versions 존재) → storyboard 탭
+          //  2) Agent 탭에 씬 카드가 있음 (채팅 시작했지만 아직 콘티탭으로 안 넘김) → agent 탭
+          //  3) 그 외 (브리프/에셋까지만 또는 최초 상태) → brief (기본)
           let target = `/project/${project.id}`;
           if (sceneStats?.hasContiScenes) {
             target = `/project/${project.id}?tab=storyboard`;
-          } else if (sceneStats?.hasAgentScenes || sceneStats?.hasDraftVersion) {
+          } else if (sceneStats?.hasAgentScenes) {
             target = `/project/${project.id}?tab=agent`;
           }
           navigate(target);

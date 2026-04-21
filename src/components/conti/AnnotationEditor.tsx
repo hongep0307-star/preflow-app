@@ -13,14 +13,21 @@ import {
   Check,
   Crop,
   X,
+  ImagePlus,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
 /* ━━━ Types ━━━ */
-type ToolId = "select" | "text" | "pen" | "eraser" | "crop";
+type ToolId = "select" | "text" | "pen" | "eraser" | "crop" | "image";
+interface StrokePoint {
+  x: number;
+  y: number;
+  /** 필압 0~1. 마우스는 1 고정. 스타일러스/터치는 실제 값. */
+  p?: number;
+}
 interface Stroke {
   type: "path";
-  points: { x: number; y: number }[];
+  points: StrokePoint[];
   color: string;
   size: number;
   isEraser?: boolean;
@@ -36,15 +43,32 @@ interface TextObject {
   width: number;
   height: number;
 }
-type DrawAction = Stroke | TextObject;
+/** 알파 PNG 포함 일반 이미지 레이어. (x,y)는 top-left. */
+interface ImageLayer {
+  type: "image";
+  id: string;
+  src: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+type DrawAction = Stroke | TextObject | ImageLayer;
+type SelectableObj = TextObject | ImageLayer;
 type CropRatio = "free" | "16:9" | "9:16" | "1:1";
 type HandleId = "tl" | "tc" | "tr" | "ml" | "mr" | "bl" | "bc" | "br";
 
 /* ━━━ Constants ━━━ */
 const KR = "#f9423a";
+const DEFAULT_COLOR = "#ffffff"; // 브러시 & 텍스트 기본색 = 흰색
 const TEXT_FONT_SIZES = [12, 16, 20, 28, 36, 48];
 const MAX_UNDO = 20;
 const HANDLE_SIZE = 8;
+const BRUSH_MIN = 1;
+const BRUSH_MAX = 60;
+/** 필압 → 두께 변조 곡선: p 에 대한 min/max 스케일. 마우스는 1.0 고정. */
+const PRESSURE_MIN = 0.35;
+const PRESSURE_MAX = 1.0;
 const CROP_RATIO_OPTIONS: { id: CropRatio; label: string }[] = [
   { id: "free", label: "Free" },
   { id: "16:9", label: "16:9" },
@@ -63,6 +87,10 @@ const HANDLE_CURSOR: Record<string, string> = {
 };
 let _idCounter = 0;
 const genId = () => `txt_${Date.now()}_${_idCounter++}`;
+let _imgIdCounter = 0;
+const genImgId = () => `img_${Date.now()}_${_imgIdCounter++}`;
+/** 업로드 이미지 다운스케일 상한 (긴 변 픽셀). 메모리/undo 스택 보호용. */
+const MAX_IMAGE_LAYER_DIM = 2048;
 
 /* ━━━ URL helpers ━━━ */
 export const _originalUrlByScene = new Map<string, string>();
@@ -79,26 +107,33 @@ const measureText = (ctx: CanvasRenderingContext2D, text: string, fontSize: numb
   const m = ctx.measureText(text);
   return { width: m.width, height: fontSize * 1.2 };
 };
-const getHandles = (obj: TextObject) => {
-  const { x, y, width: w, height: h } = obj;
-  const ty = y - h;
+/** 오브젝트의 bounding rect (top-left 기준). 텍스트는 baseline 좌표를 top-left 로 변환. */
+const getBoundsRect = (obj: SelectableObj): { x: number; y: number; w: number; h: number } => {
+  if (obj.type === "textobj") return { x: obj.x, y: obj.y - obj.height, w: obj.width, h: obj.height };
+  return { x: obj.x, y: obj.y, w: obj.w, h: obj.h };
+};
+const getHandlesForBounds = (b: { x: number; y: number; w: number; h: number }) => {
+  const { x, y, w, h } = b;
   return [
-    { id: "tl" as HandleId, x, y: ty },
-    { id: "tc" as HandleId, x: x + w / 2, y: ty },
-    { id: "tr" as HandleId, x: x + w, y: ty },
-    { id: "ml" as HandleId, x, y: ty + h / 2 },
-    { id: "mr" as HandleId, x: x + w, y: ty + h / 2 },
-    { id: "bl" as HandleId, x, y: ty + h },
-    { id: "bc" as HandleId, x: x + w / 2, y: ty + h },
-    { id: "br" as HandleId, x: x + w, y: ty + h },
+    { id: "tl" as HandleId, x, y },
+    { id: "tc" as HandleId, x: x + w / 2, y },
+    { id: "tr" as HandleId, x: x + w, y },
+    { id: "ml" as HandleId, x, y: y + h / 2 },
+    { id: "mr" as HandleId, x: x + w, y: y + h / 2 },
+    { id: "bl" as HandleId, x, y: y + h },
+    { id: "bc" as HandleId, x: x + w / 2, y: y + h },
+    { id: "br" as HandleId, x: x + w, y: y + h },
   ];
 };
-const hitTestHandle = (obj: TextObject, px: number, py: number, tol: number): HandleId | null => {
+const getHandles = (obj: SelectableObj) => getHandlesForBounds(getBoundsRect(obj));
+const hitTestHandle = (obj: SelectableObj, px: number, py: number, tol: number): HandleId | null => {
   for (const h of getHandles(obj)) if (Math.abs(px - h.x) <= tol && Math.abs(py - h.y) <= tol) return h.id;
   return null;
 };
-const hitTestObj = (obj: TextObject, px: number, py: number) =>
-  px >= obj.x && px <= obj.x + obj.width && py >= obj.y - obj.height && py <= obj.y;
+const hitTestObj = (obj: SelectableObj, px: number, py: number) => {
+  const b = getBoundsRect(obj);
+  return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h;
+};
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  * ToolBtn / ActionBtn — 컴포넌트 외부에 정의 (★ 핵심 수정)
@@ -190,7 +225,7 @@ export const AnnotationEditor = ({
   const [tool, setTool] = useState<ToolId>("select");
   const [brushSize, setBrushSize] = useState(8);
   const [textFontSize, setTextFontSize] = useState(20);
-  const [color, setColor] = useState("#f9423a");
+  const [color, setColor] = useState(DEFAULT_COLOR);
   const colorInputRef = useRef<HTMLInputElement>(null);
   const [cropRatio, setCropRatio] = useState<CropRatio>(() => videoCropRatio(videoFormat));
   const [actions, setActions] = useState<DrawAction[]>([]);
@@ -212,7 +247,7 @@ export const AnnotationEditor = ({
     handleId?: HandleId;
     startX: number;
     startY: number;
-    origObj: TextObject;
+    origObj: SelectableObj;
   } | null>(null);
   const [cropCursor, setCropCursor] = useState("crosshair");
   const [cropRect, setCropRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
@@ -227,9 +262,18 @@ export const AnnotationEditor = ({
   /* ── refs ── */
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cursorCanvasRef = useRef<HTMLCanvasElement>(null);
-  const currentStroke = useRef<{ x: number; y: number }[]>([]);
-  const lastPoint = useRef<{ x: number; y: number } | null>(null);
+  const currentStroke = useRef<StrokePoint[]>([]);
+  const lastPoint = useRef<StrokePoint | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  /** ImageLayer src → 로드 완료된 HTMLImageElement. 재디코딩 방지. */
+  const imageLayerCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  /** ImageLayer 로드 완료시 redraw 트리거용. */
+  const [imageLayerTick, setImageLayerTick] = useState(0);
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
+  /** 드래그앤드롭으로 외부 파일이 에디터 위에 떠있는 상태. 오버레이 표시용. */
+  const [dragOverFiles, setDragOverFiles] = useState(false);
+  /** 중첩된 child 의 dragenter/leave 로 인한 깜박임 방지용 카운터. */
+  const dragCounterRef = useRef(0);
 
   /* ★ isDrawingRef — React 18 automatic batching 클로저 문제 해결
    * setIsDrawing(true)는 배치 업데이트라 같은 이벤트 사이클의
@@ -277,7 +321,105 @@ export const AnnotationEditor = ({
 
   /* ── text objects helper ── */
   const getTextObjects = useCallback(() => actions.filter((a): a is TextObject => a.type === "textobj"), [actions]);
-  const selectedObj = selectedId ? (getTextObjects().find((t) => t.id === selectedId) ?? null) : null;
+  /** 선택 가능한(텍스트 + 이미지) 액션. */
+  const getSelectableObjects = useCallback(
+    () => actions.filter((a): a is SelectableObj => a.type === "textobj" || a.type === "image"),
+    [actions],
+  );
+  const selectedObj: SelectableObj | null = selectedId
+    ? (getSelectableObjects().find((o) => o.id === selectedId) ?? null)
+    : null;
+
+  /* ── image layer helpers ── */
+  /** ImageLayer 의 src 를 HTMLImageElement 로 로드(1회 디코드), 캐시. 로드 완료시 redraw tick 증가. */
+  const ensureImageLayerLoaded = useCallback((src: string): HTMLImageElement | null => {
+    const cache = imageLayerCacheRef.current;
+    const cached = cache.get(src);
+    if (cached) return cached.complete ? cached : null;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => setImageLayerTick((t) => t + 1);
+    img.onerror = () => setImageLayerTick((t) => t + 1);
+    img.src = src;
+    cache.set(src, img);
+    return img.complete ? img : null;
+  }, []);
+
+  /** actions 변경시 새로운 ImageLayer 들의 로딩을 트리거. */
+  useEffect(() => {
+    for (const a of actions) {
+      if (a.type === "image") ensureImageLayerLoaded(a.src);
+    }
+  }, [actions, ensureImageLayerLoaded]);
+
+  /** File → dataURL. 긴 변이 MAX_IMAGE_LAYER_DIM 초과시 다운스케일 + 알파 보존 PNG 로 재인코딩. */
+  const fileToLayerDataUrl = useCallback(async (file: File): Promise<{ src: string; w: number; h: number }> => {
+    const readerUrl = await new Promise<string>((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result));
+      r.onerror = () => rej(r.error ?? new Error("read"));
+      r.readAsDataURL(file);
+    });
+    const img = await new Promise<HTMLImageElement>((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => rej(new Error("decode"));
+      im.src = readerUrl;
+    });
+    const iw = img.naturalWidth;
+    const ih = img.naturalHeight;
+    const longest = Math.max(iw, ih);
+    if (longest <= MAX_IMAGE_LAYER_DIM) return { src: readerUrl, w: iw, h: ih };
+    const scale = MAX_IMAGE_LAYER_DIM / longest;
+    const tw = Math.max(1, Math.round(iw * scale));
+    const th = Math.max(1, Math.round(ih * scale));
+    const c = document.createElement("canvas");
+    c.width = tw;
+    c.height = th;
+    c.getContext("2d")!.drawImage(img, 0, 0, tw, th);
+    return { src: c.toDataURL("image/png"), w: tw, h: th };
+  }, []);
+
+  /** 이미지 레이어 추가. 캔버스 중앙에 긴 변 = 캔버스 50% 로 배치. */
+  const addImageLayerFromFile = useCallback(
+    async (file: File) => {
+      try {
+        const { src, w: iw, h: ih } = await fileToLayerDataUrl(file);
+        const cv = canvasRef.current;
+        if (!cv) return;
+        const target = Math.max(cv.width, cv.height) * 0.5;
+        const ratio = iw / ih;
+        let w = target;
+        let h = target;
+        if (iw >= ih) {
+          w = target;
+          h = Math.round(target / ratio);
+        } else {
+          h = target;
+          w = Math.round(target * ratio);
+        }
+        const x = Math.round((cv.width - w) / 2);
+        const y = Math.round((cv.height - h) / 2);
+        const id = genImgId();
+        const layer: ImageLayer = { type: "image", id, src, x, y, w, h };
+        ensureImageLayerLoaded(src);
+        setActions((prev) => {
+          setRedoStack([]);
+          return [...prev.slice(-(MAX_UNDO - 1)), layer];
+        });
+        setTool("select");
+        setSelectedId(id);
+      } catch (err) {
+        console.error("Image layer add failed:", err);
+      }
+    },
+    [fileToLayerDataUrl, ensureImageLayerLoaded],
+  );
+
+  /** 툴바의 "Image" 버튼 클릭시 숨김 input 열기. */
+  const openImagePicker = useCallback(() => {
+    imageFileInputRef.current?.click();
+  }, []);
 
   /* ── crop aspect ── */
   const getCropAspect = useCallback((): number | null => {
@@ -324,6 +466,25 @@ export const AnnotationEditor = ({
     cc.getContext("2d")?.clearRect(0, 0, cc.width, cc.height);
   }, []);
 
+  /** 선택된 오브젝트 outline + 8 핸들. 텍스트/이미지 공통. */
+  const drawSelectionOverlay = useCallback((ctx: CanvasRenderingContext2D, obj: SelectableObj) => {
+    const b = getBoundsRect(obj);
+    ctx.save();
+    ctx.strokeStyle = KR;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.setLineDash([]);
+    for (const h of getHandlesForBounds(b)) {
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+      ctx.strokeStyle = KR;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+    }
+    ctx.restore();
+  }, []);
+
   /* ── redraw ── */
   const redraw = useCallback(() => {
     const cv = canvasRef.current;
@@ -332,61 +493,82 @@ export const AnnotationEditor = ({
     ctx.clearRect(0, 0, cv.width, cv.height);
     for (const a of actions) {
       if (a.type === "path" && a.points.length >= 1) {
-        /* ★ 핵심 수정: length > 1 → length >= 1
-         * 단일 클릭(점 1개)도 저장되는데 기존엔 redraw에서 skip →
-         * mouseup 후 캔버스가 원복되는 버그의 실제 원인 */
+        /* length >= 1 — 단일 클릭도 렌더 */
         ctx.save();
         ctx.globalCompositeOperation = a.isEraser ? "destination-out" : "source-over";
+        const strokeColor = a.isEraser ? "rgba(0,0,0,1)" : a.color;
         if (a.points.length === 1) {
-          // 단일 클릭: arc dot으로 그리기
-          ctx.fillStyle = a.isEraser ? "rgba(0,0,0,1)" : a.color;
+          const p0 = a.points[0];
+          const r = (a.size * (p0.p ?? 1)) / 2;
+          ctx.fillStyle = strokeColor;
           ctx.beginPath();
-          ctx.arc(a.points[0].x, a.points[0].y, a.size / 2, 0, Math.PI * 2);
+          ctx.arc(p0.x, p0.y, Math.max(0.5, r), 0, Math.PI * 2);
           ctx.fill();
         } else {
-          // 드래그: 선으로 그리기
-          ctx.strokeStyle = a.isEraser ? "rgba(0,0,0,1)" : a.color;
-          ctx.lineWidth = a.size;
+          // 필압 지원: 각 세그먼트를 평균 압력 기반 두께로 개별 stroke
+          // 점 수가 적으면 일정 두께(size) 로 fallback
+          ctx.strokeStyle = strokeColor;
           ctx.lineCap = "round";
           ctx.lineJoin = "round";
-          ctx.beginPath();
-          ctx.moveTo(a.points[0].x, a.points[0].y);
-          for (let i = 1; i < a.points.length; i++) ctx.lineTo(a.points[i].x, a.points[i].y);
-          ctx.stroke();
+          const hasPressure = a.points.some((pt) => pt.p !== undefined && pt.p !== 1);
+          if (hasPressure) {
+            for (let i = 1; i < a.points.length; i++) {
+              const a0 = a.points[i - 1];
+              const a1 = a.points[i];
+              const pAvg = ((a0.p ?? 1) + (a1.p ?? 1)) / 2;
+              ctx.lineWidth = Math.max(0.5, a.size * pAvg);
+              ctx.beginPath();
+              ctx.moveTo(a0.x, a0.y);
+              ctx.lineTo(a1.x, a1.y);
+              ctx.stroke();
+            }
+          } else {
+            ctx.lineWidth = a.size;
+            ctx.beginPath();
+            ctx.moveTo(a.points[0].x, a.points[0].y);
+            for (let i = 1; i < a.points.length; i++) ctx.lineTo(a.points[i].x, a.points[i].y);
+            ctx.stroke();
+          }
         }
         ctx.restore();
       } else if (a.type === "textobj") {
         ctx.fillStyle = a.color;
         ctx.font = `bold ${a.fontSize}px sans-serif`;
         ctx.fillText(a.text, a.x, a.y);
-        if (a.id === selectedId) {
-          const ty = a.y - a.height;
-          ctx.strokeStyle = KR;
-          ctx.lineWidth = 2;
+        if (a.id === selectedId) drawSelectionOverlay(ctx, a);
+      } else if (a.type === "image") {
+        const im = ensureImageLayerLoaded(a.src);
+        if (im && im.complete && im.naturalWidth > 0) {
+          ctx.drawImage(im, a.x, a.y, a.w, a.h);
+        } else {
+          ctx.save();
+          ctx.fillStyle = "rgba(255,255,255,0.04)";
+          ctx.fillRect(a.x, a.y, a.w, a.h);
+          ctx.strokeStyle = "rgba(255,255,255,0.25)";
           ctx.setLineDash([6, 4]);
-          ctx.strokeRect(a.x, ty, a.width, a.height);
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(a.x, a.y, a.w, a.h);
           ctx.setLineDash([]);
-          for (const h of getHandles(a)) {
-            ctx.fillStyle = "#fff";
-            ctx.fillRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
-            ctx.strokeStyle = KR;
-            ctx.lineWidth = 1.5;
-            ctx.strokeRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
-          }
+          ctx.restore();
         }
+        if (a.id === selectedId) drawSelectionOverlay(ctx, a);
       }
     }
     if (currentStroke.current.length > 1 && tool === "pen") {
       ctx.strokeStyle = color;
-      ctx.lineWidth = brushSize;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.globalCompositeOperation = "source-over";
-      ctx.beginPath();
-      ctx.moveTo(currentStroke.current[0].x, currentStroke.current[0].y);
-      for (let i = 1; i < currentStroke.current.length; i++)
-        ctx.lineTo(currentStroke.current[i].x, currentStroke.current[i].y);
-      ctx.stroke();
+      for (let i = 1; i < currentStroke.current.length; i++) {
+        const a0 = currentStroke.current[i - 1];
+        const a1 = currentStroke.current[i];
+        const pAvg = ((a0.p ?? 1) + (a1.p ?? 1)) / 2;
+        ctx.lineWidth = Math.max(0.5, brushSize * pAvg);
+        ctx.beginPath();
+        ctx.moveTo(a0.x, a0.y);
+        ctx.lineTo(a1.x, a1.y);
+        ctx.stroke();
+      }
     }
     if (tool === "crop" && cropRect) {
       ctx.fillStyle = "rgba(0,0,0,0.5)";
@@ -425,7 +607,22 @@ export const AnnotationEditor = ({
         ctx.strokeRect(ch.x - 4, ch.y - 4, 8, 8);
       }
     }
-  }, [actions, imgLoaded, tool, color, brushSize, selectedId, cropRect]);
+    // `imageLayerTick` 은 콜백 본문에서 직접 참조되지 않지만, ImageLayer 가 비동기로
+    // 디코드 완료될 때 이 값이 bump 되면서 redraw 의 identity 를 갱신하고, 하위
+    // useEffect 가 다시 실행되어 캔버스에 새로 로드된 이미지를 반영한다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    actions,
+    imgLoaded,
+    tool,
+    color,
+    brushSize,
+    selectedId,
+    cropRect,
+    drawSelectionOverlay,
+    ensureImageLayerLoaded,
+    imageLayerTick,
+  ]);
 
   useEffect(() => {
     redraw();
@@ -439,19 +636,29 @@ export const AnnotationEditor = ({
     redraw();
   }, [naturalSize, redraw]);
 
-  /* ★ toCanvas — offsetX/offsetY 사용으로 getBoundingClientRect 의존성 최소화
-   * rect.width=0 가드 추가 → Infinity 좌표 방지 */
-  const toCanvas = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  /* ★ toCanvas — clientX/clientY - rect 으로 계산.
+   * Pointer 이벤트 (+ coalesced samples) 는 offsetX/Y 가 항상 정확하진 않으므로
+   * rect 기반 변환으로 일관성 확보. rect.width=0 가드 유지. */
+  const toCanvas = (clientX: number, clientY: number) => {
     const cv = canvasRef.current;
     if (!cv) return { x: 0, y: 0 };
     const rect = cv.getBoundingClientRect();
     if (!rect.width || !rect.height) return { x: 0, y: 0 };
-    // offsetX/Y: 이벤트 타겟 기준 CSS 픽셀 좌표 (getBoundingClientRect 없이 직접 접근)
-    let cssX = e.nativeEvent.offsetX;
-    let cssY = e.nativeEvent.offsetY;
+    let cssX = clientX - rect.left;
+    let cssY = clientY - rect.top;
     if (flipH) cssX = rect.width - cssX;
     if (flipV) cssY = rect.height - cssY;
     return { x: cssX * (cv.width / rect.width), y: cssY * (cv.height / rect.height) };
+  };
+
+  /* 필압 → 유효 압력.
+   * - 마우스: 1.0 고정 (PointerEvent.pressure 는 버튼 눌렀을 때 0.5 기본 → 오해 방지)
+   * - 스타일러스/터치: PRESSURE_MIN~MAX 범위로 매핑
+   */
+  const effectivePressure = (pointerType: string | undefined, rawPressure: number | undefined): number => {
+    if (pointerType === "mouse" || pointerType === undefined) return 1;
+    const p = typeof rawPressure === "number" && rawPressure > 0 ? rawPressure : 0.5;
+    return Math.max(0, Math.min(1, PRESSURE_MIN + (PRESSURE_MAX - PRESSURE_MIN) * p));
   };
 
   /* ── snapshot helpers ── */
@@ -464,7 +671,7 @@ export const AnnotationEditor = ({
 
   /* ── select handlers ── */
   const handleSelectDown = (p: { x: number; y: number }) => {
-    const textObjs = getTextObjects();
+    const selObjs = getSelectableObjects();
     const cv = canvasRef.current;
     const tol = cv ? HANDLE_SIZE * (cv.width / (effectiveSize.w || cv.width)) : HANDLE_SIZE;
     if (selectedObj) {
@@ -478,43 +685,155 @@ export const AnnotationEditor = ({
         return;
       }
     }
-    for (let i = textObjs.length - 1; i >= 0; i--) {
-      if (hitTestObj(textObjs[i], p.x, p.y)) {
-        setSelectedId(textObjs[i].id);
-        setDragState({ mode: "move", startX: p.x, startY: p.y, origObj: { ...textObjs[i] } });
+    // 위에서 아래로 쌓인 순서대로 hit-test (나중 추가 오브젝트가 상단)
+    for (let i = selObjs.length - 1; i >= 0; i--) {
+      if (hitTestObj(selObjs[i], p.x, p.y)) {
+        setSelectedId(selObjs[i].id);
+        setDragState({ mode: "move", startX: p.x, startY: p.y, origObj: { ...selObjs[i] } });
         return;
       }
     }
     setSelectedId(null);
   };
 
-  const handleSelectMove = (p: { x: number; y: number }) => {
+  const handleSelectMove = (p: { x: number; y: number }, opts?: { shiftKey?: boolean }) => {
     if (!dragState || !selectedObj) return;
+    const shiftKey = !!opts?.shiftKey;
     const dx = p.x - dragState.startX,
       dy = p.y - dragState.startY;
     const orig = dragState.origObj;
     if (dragState.mode === "move") {
-      setActions((prev) =>
-        prev.map((a) => (a.type === "textobj" && a.id === orig.id ? { ...orig, x: orig.x + dx, y: orig.y + dy } : a)),
-      );
-    } else if (dragState.mode === "resize" && dragState.handleId) {
+      if (orig.type === "textobj") {
+        setActions((prev) =>
+          prev.map((a) =>
+            a.type === "textobj" && a.id === orig.id ? { ...orig, x: orig.x + dx, y: orig.y + dy } : a,
+          ),
+        );
+      } else {
+        setActions((prev) =>
+          prev.map((a) =>
+            a.type === "image" && a.id === orig.id ? { ...orig, x: orig.x + dx, y: orig.y + dy } : a,
+          ),
+        );
+      }
+      return;
+    }
+    if (dragState.mode === "resize" && dragState.handleId) {
       const hid = dragState.handleId;
-      if (["tl", "tr", "bl", "br"].includes(hid)) {
-        const scaleRef = hid === "tl" || hid === "tr" ? -dy : dy;
-        const scale = Math.max(0.3, 1 + scaleRef / orig.height);
-        const newFs = Math.max(8, Math.round(orig.fontSize * scale));
-        const cv = canvasRef.current;
-        if (cv) {
-          const m = measureText(cv.getContext("2d")!, orig.text, newFs);
-          setActions((prev) =>
-            prev.map((a) =>
-              a.type === "textobj" && a.id === orig.id
-                ? { ...orig, fontSize: newFs, width: m.width, height: m.height }
-                : a,
-            ),
-          );
+      if (orig.type === "textobj") {
+        // 텍스트는 코너 핸들로만 폰트 크기 스케일 (기존 동작 유지)
+        if (["tl", "tr", "bl", "br"].includes(hid)) {
+          const scaleRef = hid === "tl" || hid === "tr" ? -dy : dy;
+          const scale = Math.max(0.3, 1 + scaleRef / orig.height);
+          const newFs = Math.max(8, Math.round(orig.fontSize * scale));
+          const cv = canvasRef.current;
+          if (cv) {
+            const m = measureText(cv.getContext("2d")!, orig.text, newFs);
+            setActions((prev) =>
+              prev.map((a) =>
+                a.type === "textobj" && a.id === orig.id
+                  ? { ...orig, fontSize: newFs, width: m.width, height: m.height }
+                  : a,
+              ),
+            );
+          }
+        }
+        return;
+      }
+      // ImageLayer 리사이즈: top-left 기준으로 각 핸들별 (x, y, w, h) 조정.
+      // shiftKey = true 일 때
+      //   - 코너 핸들: 원본 aspect 고정. dx/dy 중 더 큰 변화를 기준으로 다른 축 산출.
+      //   - 사이드 핸들: 주 축은 그대로, 수직 축도 같은 비율로 함께 스케일 + 위아래(or 좌우) 대칭 중심 고정.
+      let { x, y, w, h } = orig;
+      const MIN = 16;
+      const aspect = orig.w / Math.max(1, orig.h);
+      const isCorner = hid === "tl" || hid === "tr" || hid === "bl" || hid === "br";
+
+      if (shiftKey && isCorner) {
+        const signX = hid === "tr" || hid === "br" ? 1 : -1;
+        const signY = hid === "bl" || hid === "br" ? 1 : -1;
+        // 두 축 중 변화가 큰 쪽을 "주 축"으로 삼아 다른 축을 aspect 로 파생.
+        const wCand = Math.max(MIN, orig.w + signX * dx);
+        const hCand = Math.max(MIN, orig.h + signY * dy);
+        if (Math.abs(wCand - orig.w) * (1 / aspect) >= Math.abs(hCand - orig.h)) {
+          w = wCand;
+          h = Math.max(MIN, w / aspect);
+        } else {
+          h = hCand;
+          w = Math.max(MIN, h * aspect);
+        }
+        // anchor(반대편 코너)를 고정해 x,y 재계산
+        if (hid === "tl") {
+          x = orig.x + (orig.w - w);
+          y = orig.y + (orig.h - h);
+        } else if (hid === "tr") {
+          x = orig.x;
+          y = orig.y + (orig.h - h);
+        } else if (hid === "bl") {
+          x = orig.x + (orig.w - w);
+          y = orig.y;
+        } else {
+          x = orig.x;
+          y = orig.y;
+        }
+      } else {
+        switch (hid) {
+          case "br":
+            w = Math.max(MIN, orig.w + dx);
+            h = Math.max(MIN, orig.h + dy);
+            break;
+          case "bl":
+            w = Math.max(MIN, orig.w - dx);
+            h = Math.max(MIN, orig.h + dy);
+            x = orig.x + (orig.w - w);
+            break;
+          case "tr":
+            w = Math.max(MIN, orig.w + dx);
+            h = Math.max(MIN, orig.h - dy);
+            y = orig.y + (orig.h - h);
+            break;
+          case "tl":
+            w = Math.max(MIN, orig.w - dx);
+            h = Math.max(MIN, orig.h - dy);
+            x = orig.x + (orig.w - w);
+            y = orig.y + (orig.h - h);
+            break;
+          case "tc":
+            h = Math.max(MIN, orig.h - dy);
+            y = orig.y + (orig.h - h);
+            if (shiftKey) {
+              // 대칭 스케일: 중심 고정
+              w = Math.max(MIN, h * aspect);
+              x = orig.x + (orig.w - w) / 2;
+            }
+            break;
+          case "bc":
+            h = Math.max(MIN, orig.h + dy);
+            if (shiftKey) {
+              w = Math.max(MIN, h * aspect);
+              x = orig.x + (orig.w - w) / 2;
+            }
+            break;
+          case "ml":
+            w = Math.max(MIN, orig.w - dx);
+            x = orig.x + (orig.w - w);
+            if (shiftKey) {
+              h = Math.max(MIN, w / aspect);
+              y = orig.y + (orig.h - h) / 2;
+            }
+            break;
+          case "mr":
+            w = Math.max(MIN, orig.w + dx);
+            if (shiftKey) {
+              h = Math.max(MIN, w / aspect);
+              y = orig.y + (orig.h - h) / 2;
+            }
+            break;
         }
       }
+      setActions((prev) =>
+        prev.map((a) => (a.type === "image" && a.id === orig.id ? { ...orig, x, y, w, h } : a)),
+      );
     }
   };
 
@@ -649,6 +968,9 @@ export const AnnotationEditor = ({
           tc.fillStyle = a.color;
           tc.font = `bold ${a.fontSize}px sans-serif`;
           tc.fillText(a.text, a.x, a.y);
+        } else if (a.type === "image") {
+          const im = imageLayerCacheRef.current.get(a.src);
+          if (im && im.complete && im.naturalWidth > 0) tc.drawImage(im, a.x, a.y, a.w, a.h);
         }
       }
       ctx.drawImage(tmp, cr.x, cr.y, cr.w, cr.h, 0, 0, cr.w, cr.h);
@@ -660,24 +982,84 @@ export const AnnotationEditor = ({
     setTool("select");
   };
 
-  /* ━━━ Mouse handlers ━━━
-   * ★ 수정 포인트:
-   * 1. isDrawingRef.current 동기 설정 (batching 문제 해결)
-   * 2. pen mousedown: moveTo/lineTo 동일 좌표 → arc fill (단일 클릭 버그)
-   * 3. eraser mousedown: 그리기 코드 추가 (원래 없었음)
-   * 4. handlePointerMove: isDrawing state → isDrawingRef.current
-   * 5. toCanvas: offsetX/offsetY + rect=0 가드
+  /* ━━━ Pointer handlers ━━━
+   * React Mouse events → Pointer events 마이그레이션:
+   *   - 마우스 / 스타일러스 / 터치 통합 처리
+   *   - setPointerCapture → 캔버스 밖으로 나가도 드래그 유지
+   *   - getCoalescedEvents() → 빠른 이동 시 OS 가 모은 중간 샘플 복원 → 선 끊김 방지
+   *   - pressure 채집 → per-point 두께 변조
    */
-  const handlePointerDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const p = toCanvas(e);
+
+  const drawPenSegment = (
+    ctx: CanvasRenderingContext2D,
+    from: StrokePoint,
+    to: StrokePoint,
+    scale: number,
+  ) => {
+    const pAvg = ((from.p ?? 1) + (to.p ?? 1)) / 2;
+    if (tool === "pen") {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(0.5, brushSize * pAvg);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.globalCompositeOperation = "source-over";
+    } else {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.lineWidth = Math.max(0.5, brushSize * scale * pAvg);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+    }
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+    if (tool === "eraser") ctx.globalCompositeOperation = "source-over";
+  };
+
+  const drawInitialDot = (ctx: CanvasRenderingContext2D, pt: StrokePoint, scale: number) => {
+    ctx.save();
+    const pressure = pt.p ?? 1;
+    if (tool === "pen") {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, Math.max(0.5, (brushSize * pressure) / 2), 0, Math.PI * 2);
+      ctx.fill();
+    } else if (tool === "eraser") {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.fillStyle = "rgba(0,0,0,1)";
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, Math.max(0.5, (brushSize * scale * pressure) / 2), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    // 마우스 우클릭/중간클릭 무시
+    if (e.button !== 0 && e.button !== undefined) return;
+    const canvasPos = toCanvas(e.clientX, e.clientY);
+    const pressure = effectivePressure(e.pointerType, e.pressure);
+    const p: StrokePoint = { x: canvasPos.x, y: canvasPos.y, p: pressure };
+
     if (tool === "crop") {
       handleCropDown(p);
       isDrawingRef.current = true;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* 일부 브라우저/환경에서 capture 실패 → 무시 */
+      }
       return;
     }
     if (tool === "select") {
       handleSelectDown(p);
       isDrawingRef.current = true;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
       return;
     }
     if (tool === "text") {
@@ -689,40 +1071,32 @@ export const AnnotationEditor = ({
       (textInputRef as any)._canvasPos = p;
       return;
     }
+    if (tool === "image") {
+      // image 툴은 파일 업로드 전용 — 캔버스 입력으로 그리지 않음
+      openImagePicker();
+      return;
+    }
+    e.preventDefault();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
     isDrawingRef.current = true;
     currentStroke.current = [p];
     lastPoint.current = p;
     const cv = canvasRef.current;
     if (!cv) return;
     const ctx = cv.getContext("2d")!;
-    if (tool === "pen") {
-      /* ★ 단일 클릭 즉시 dot: arc fill
-       * 기존: moveTo(p) + lineTo(p) → 길이 0 패스 → 아무것도 안 그려짐 */
-      ctx.save();
-      ctx.globalCompositeOperation = "source-over";
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, brushSize / 2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    } else if (tool === "eraser") {
-      /* ★ 단일 클릭 즉시 지우기: 기존에 코드 자체가 없었음 */
-      const rect = cv.getBoundingClientRect();
-      const scale = rect.width > 0 ? cv.width / rect.width : 1;
-      ctx.save();
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.fillStyle = "rgba(0,0,0,1)";
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, (brushSize * scale) / 2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
+    const rect = cv.getBoundingClientRect();
+    const scale = rect.width > 0 ? cv.width / rect.width : 1;
+    drawInitialDot(ctx, p, scale);
   };
 
-  const handlePointerMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (tool === "pen" || tool === "eraser") drawCursorAt(e.clientX, e.clientY);
     if (tool === "crop") {
-      const cp = toCanvas(e);
+      const cp = toCanvas(e.clientX, e.clientY);
       if (cropDrag?.handleId) {
         setCropCursor(HANDLE_CURSOR[cropDrag.handleId] ?? "crosshair");
       } else if (cropRect) {
@@ -745,48 +1119,43 @@ export const AnnotationEditor = ({
         setCropCursor("crosshair");
       }
     }
-    /* ★ isDrawing state → isDrawingRef.current */
     if (!isDrawingRef.current) return;
-    const p = toCanvas(e);
     if (tool === "crop") {
-      handleCropMove(p);
+      handleCropMove(toCanvas(e.clientX, e.clientY));
       return;
     }
     if (tool === "select") {
-      handleSelectMove(p);
+      handleSelectMove(toCanvas(e.clientX, e.clientY), { shiftKey: e.shiftKey });
       return;
     }
     const cv = canvasRef.current;
     if (!cv || !lastPoint.current) return;
     const ctx = cv.getContext("2d")!;
-    if (tool === "pen") {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = brushSize;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.globalCompositeOperation = "source-over";
-      ctx.beginPath();
-      ctx.moveTo(lastPoint.current.x, lastPoint.current.y);
-      ctx.lineTo(p.x, p.y);
-      ctx.stroke();
-    } else if (tool === "eraser") {
-      const rect = cv.getBoundingClientRect();
-      const scale = rect.width > 0 ? cv.width / rect.width : 1;
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.lineWidth = brushSize * scale;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.beginPath();
-      ctx.moveTo(lastPoint.current.x, lastPoint.current.y);
-      ctx.lineTo(p.x, p.y);
-      ctx.stroke();
-      ctx.globalCompositeOperation = "source-over";
+    const rect = cv.getBoundingClientRect();
+    const scale = rect.width > 0 ? cv.width / rect.width : 1;
+
+    // OS 가 한 프레임에 모은 중간 샘플들 — 빠른 드래그에서 점 끊김 제거
+    const coalesced =
+      typeof e.nativeEvent.getCoalescedEvents === "function" ? e.nativeEvent.getCoalescedEvents() : [];
+    const samples = coalesced.length > 0 ? coalesced : [e.nativeEvent];
+    for (const s of samples) {
+      const pos = toCanvas((s as PointerEvent).clientX, (s as PointerEvent).clientY);
+      const pr = effectivePressure((s as PointerEvent).pointerType ?? e.pointerType, (s as PointerEvent).pressure);
+      const pt: StrokePoint = { x: pos.x, y: pos.y, p: pr };
+      if (lastPoint.current) drawPenSegment(ctx, lastPoint.current, pt, scale);
+      currentStroke.current.push(pt);
+      lastPoint.current = pt;
     }
-    currentStroke.current.push(p);
-    lastPoint.current = p;
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e?: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
     if (tool === "crop") {
@@ -814,9 +1183,12 @@ export const AnnotationEditor = ({
     redraw();
   };
 
-  const handlePointerLeave = () => {
+  const handlePointerLeave = (e: React.PointerEvent<HTMLCanvasElement>) => {
     clearCursor();
-    handlePointerUp();
+    // setPointerCapture 가 걸려있으면 pointerleave 는 거의 오지 않음.
+    // 안전장치로만 처리.
+    if (!isDrawingRef.current) return;
+    handlePointerUp(e);
   };
 
   /* ── text commit ── */
@@ -891,6 +1263,14 @@ export const AnnotationEditor = ({
     });
   };
 
+  /* ★ 키보드 핸들러는 useEffect 한 번만 바인딩되므로 stale closure 방지용 ref */
+  const undoRef = useRef(undo);
+  const redoRef = useRef(redo);
+  useEffect(() => {
+    undoRef.current = undo;
+    redoRef.current = redo;
+  });
+
   const prevColorRef = useRef(color);
   useEffect(() => {
     if (color !== prevColorRef.current && selectedId && tool === "select" && !editingTextId)
@@ -937,26 +1317,56 @@ export const AnnotationEditor = ({
         if (a.type === "path" && a.points.length >= 1) {
           ctx.save();
           ctx.globalCompositeOperation = a.isEraser ? "destination-out" : "source-over";
+          const strokeColor = a.isEraser ? "rgba(0,0,0,1)" : a.color;
           if (a.points.length === 1) {
-            ctx.fillStyle = a.isEraser ? "rgba(0,0,0,1)" : a.color;
+            const p0 = a.points[0];
+            ctx.fillStyle = strokeColor;
             ctx.beginPath();
-            ctx.arc(a.points[0].x, a.points[0].y, a.size / 2, 0, Math.PI * 2);
+            ctx.arc(p0.x, p0.y, Math.max(0.5, (a.size * (p0.p ?? 1)) / 2), 0, Math.PI * 2);
             ctx.fill();
           } else {
-            ctx.strokeStyle = a.isEraser ? "rgba(0,0,0,1)" : a.color;
-            ctx.lineWidth = a.size;
+            ctx.strokeStyle = strokeColor;
             ctx.lineCap = "round";
             ctx.lineJoin = "round";
-            ctx.beginPath();
-            ctx.moveTo(a.points[0].x, a.points[0].y);
-            for (let i = 1; i < a.points.length; i++) ctx.lineTo(a.points[i].x, a.points[i].y);
-            ctx.stroke();
+            const hasPressure = a.points.some((pt) => pt.p !== undefined && pt.p !== 1);
+            if (hasPressure) {
+              for (let i = 1; i < a.points.length; i++) {
+                const a0 = a.points[i - 1];
+                const a1 = a.points[i];
+                const pAvg = ((a0.p ?? 1) + (a1.p ?? 1)) / 2;
+                ctx.lineWidth = Math.max(0.5, a.size * pAvg);
+                ctx.beginPath();
+                ctx.moveTo(a0.x, a0.y);
+                ctx.lineTo(a1.x, a1.y);
+                ctx.stroke();
+              }
+            } else {
+              ctx.lineWidth = a.size;
+              ctx.beginPath();
+              ctx.moveTo(a.points[0].x, a.points[0].y);
+              for (let i = 1; i < a.points.length; i++) ctx.lineTo(a.points[i].x, a.points[i].y);
+              ctx.stroke();
+            }
           }
           ctx.restore();
         } else if (a.type === "textobj") {
           ctx.fillStyle = a.color;
           ctx.font = `bold ${a.fontSize}px sans-serif`;
           ctx.fillText(a.text, a.x, a.y);
+        } else if (a.type === "image") {
+          // 저장 전에 모든 이미지 레이어 디코드 완료 보장
+          let im = imageLayerCacheRef.current.get(a.src);
+          if (!im || !im.complete || im.naturalWidth === 0) {
+            im = await new Promise<HTMLImageElement>((res, rej) => {
+              const n = new Image();
+              n.crossOrigin = "anonymous";
+              n.onload = () => res(n);
+              n.onerror = () => rej(new Error("image layer decode"));
+              n.src = a.src;
+            });
+            imageLayerCacheRef.current.set(a.src, im);
+          }
+          ctx.drawImage(im, a.x, a.y, a.w, a.h);
         }
       }
       const blob = await new Promise<Blob>((res, rej) =>
@@ -975,23 +1385,96 @@ export const AnnotationEditor = ({
     }
   };
 
-  /* ── keyboard ── */
+  /* ── keyboard ──
+   *   Undo/Redo: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z
+   *   Delete: 선택된 텍스트 삭제
+   *   Tools: V(select) / T(text) / P(pen) / E(eraser) / C(crop)
+   *   Brush size: [ / ]  (Shift = x5)
+   *   텍스트 입력 / 작업 대상 input·textarea·contentEditable 에선 무시
+   */
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === "INPUT") return;
-      if ((e.metaKey || e.ctrlKey) && e.key === "z") {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      const isEditingField =
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        t?.isContentEditable === true ||
+        !!textInput; // 텍스트 입력 중엔 모든 단축키 차단
+
+      // Ctrl/Cmd+Z → Undo, Ctrl/Cmd+Shift+Z → Redo.
+      // e.code === "KeyZ" 로 비교: Shift 조합에서 e.key 가 "Z"/"z" 레이아웃별로 달라지는 문제 회피.
+      if ((e.metaKey || e.ctrlKey) && (e.code === "KeyZ" || e.key === "z" || e.key === "Z")) {
+        if (isEditingField) return;
         e.preventDefault();
-        e.shiftKey ? redo() : undo();
+        if (e.shiftKey) redoRef.current();
+        else undoRef.current();
+        return;
       }
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
+      // Ctrl/Cmd+Y → Redo (일반 윈도우 관행)
+      if ((e.metaKey || e.ctrlKey) && (e.code === "KeyY" || e.key === "y" || e.key === "Y")) {
+        if (isEditingField) return;
         e.preventDefault();
-        setActions((prev) => prev.filter((a) => !(a.type === "textobj" && a.id === selectedId)));
+        redoRef.current();
+        return;
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedId && !isEditingField) {
+        e.preventDefault();
+        setActions((prev) =>
+          prev.filter((a) => !((a.type === "textobj" || a.type === "image") && a.id === selectedId)),
+        );
         setSelectedId(null);
+        return;
+      }
+
+      if (isEditingField) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      // 툴 단축키 — 일부는 Text 탭 활성 중엔 충돌 가능하므로 editingField 가드로 보호됨
+      switch (e.key.toLowerCase()) {
+        case "v":
+          e.preventDefault();
+          setTool("select");
+          return;
+        case "t":
+          e.preventDefault();
+          setTool("text");
+          setSelectedId(null);
+          return;
+        case "p":
+          e.preventDefault();
+          setTool("pen");
+          setSelectedId(null);
+          return;
+        case "e":
+          e.preventDefault();
+          setTool("eraser");
+          setSelectedId(null);
+          return;
+        case "c":
+          e.preventDefault();
+          setTool("crop");
+          setSelectedId(null);
+          return;
+        case "i":
+          e.preventDefault();
+          setTool("image");
+          setSelectedId(null);
+          openImagePicker();
+          return;
+      }
+
+      // 브러시 크기: [ / ]  (Shift = ±5)
+      if (e.key === "[" || e.key === "]") {
+        e.preventDefault();
+        const delta = (e.key === "]" ? 1 : -1) * (e.shiftKey ? 5 : 1);
+        setBrushSize((s) => Math.min(BRUSH_MAX, Math.max(BRUSH_MIN, s + delta)));
       }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [selectedId]);
+  }, [selectedId, textInput, openImagePicker]);
 
   const transform = `${flipH ? "scaleX(-1)" : ""} ${flipV ? "scaleY(-1)" : ""}`.trim() || undefined;
   const hasChanges = actions.length > 0 || flipH || flipV || !!croppedImgSrc;
@@ -1000,6 +1483,7 @@ export const AnnotationEditor = ({
     if (tool === "select") return dragState ? "grabbing" : "default";
     if (tool === "text") return "text";
     if (tool === "crop") return cropCursor;
+    if (tool === "image") return "copy";
     return "crosshair";
   };
 
@@ -1012,8 +1496,59 @@ export const AnnotationEditor = ({
       </div>
     );
 
+  /* ━━━ Drag & Drop: 외부 파일(이미지/알파 PNG)을 캔버스에 드롭 → 레이어로 추가 ━━━
+   * 중첩 엘리먼트로 인한 dragenter/dragleave 플리커는 ref 카운터로 상쇄. */
+  const hasImageFiles = (dt: DataTransfer | null) => {
+    if (!dt) return false;
+    if (dt.types?.includes("Files")) return true;
+    if (dt.items && dt.items.length > 0) {
+      for (let i = 0; i < dt.items.length; i++) {
+        const it = dt.items[i];
+        if (it.kind === "file" && it.type.startsWith("image/")) return true;
+      }
+    }
+    return false;
+  };
+  const handleEditorDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasImageFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dragCounterRef.current += 1;
+    setDragOverFiles(true);
+  };
+  const handleEditorDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasImageFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const handleEditorDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasImageFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) setDragOverFiles(false);
+  };
+  const handleEditorDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasImageFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setDragOverFiles(false);
+    const files = Array.from(e.dataTransfer.files ?? []).filter((f) => f.type.startsWith("image/"));
+    if (files.length === 0) return;
+    // 여러 장이 한 번에 들어오면 겹치지 않도록 순차 추가 (각각 중앙 배치 후 offset 은 다음 개선)
+    (async () => {
+      for (const f of files) {
+        await addImageLayerFromFile(f);
+      }
+    })();
+  };
+
   return (
-    <div className="relative w-full h-full flex flex-col items-center justify-center">
+    <div
+      className="relative w-full h-full flex flex-col items-center justify-center"
+      onDragEnter={handleEditorDragEnter}
+      onDragOver={handleEditorDragOver}
+      onDragLeave={handleEditorDragLeave}
+      onDrop={handleEditorDrop}
+    >
       <div
         className="relative shrink-0"
         style={{ width: effectiveSize.w || undefined, height: effectiveSize.h || undefined, transform }}
@@ -1035,13 +1570,14 @@ export const AnnotationEditor = ({
             cursor: getCursor(),
             touchAction: "none",
           }}
-          onMouseDown={handlePointerDown}
-          onMouseMove={handlePointerMove}
-          onMouseUp={handlePointerUp}
-          onMouseLeave={handlePointerLeave}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
           onDoubleClick={(e) => {
             if (tool !== "select") return;
-            const p = toCanvas(e);
+            const p = toCanvas(e.clientX, e.clientY);
             const objs = getTextObjects();
             for (let i = objs.length - 1; i >= 0; i--) {
               if (hitTestObj(objs[i], p.x, p.y)) {
@@ -1138,13 +1674,13 @@ export const AnnotationEditor = ({
             <ToolBtn
               isActive={tool === "select"}
               icon={MousePointer2}
-              label="Select"
+              label="Select (V)"
               onClick={() => setTool("select")}
             />
             <ToolBtn
               isActive={tool === "text"}
               icon={Type}
-              label="Text"
+              label="Text (T)"
               onClick={() => {
                 setTool("text");
                 setSelectedId(null);
@@ -1153,7 +1689,7 @@ export const AnnotationEditor = ({
             <ToolBtn
               isActive={tool === "pen"}
               icon={Pen}
-              label="Pen"
+              label="Pen (P)"
               onClick={() => {
                 setTool("pen");
                 setSelectedId(null);
@@ -1162,7 +1698,7 @@ export const AnnotationEditor = ({
             <ToolBtn
               isActive={tool === "eraser"}
               icon={Eraser}
-              label="Eraser"
+              label="Eraser (E)"
               onClick={() => {
                 setTool("eraser");
                 setSelectedId(null);
@@ -1171,10 +1707,32 @@ export const AnnotationEditor = ({
             <ToolBtn
               isActive={tool === "crop"}
               icon={Crop}
-              label="Crop"
+              label="Crop (C)"
               onClick={() => {
                 setTool("crop");
                 setSelectedId(null);
+              }}
+            />
+            <ToolBtn
+              isActive={tool === "image"}
+              icon={ImagePlus}
+              label="Add image / alpha PNG (I)"
+              onClick={() => {
+                setTool("image");
+                setSelectedId(null);
+                openImagePicker();
+              }}
+            />
+            <input
+              ref={imageFileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void addImageLayerFromFile(f);
+                // 같은 파일 재선택도 허용
+                e.target.value = "";
               }}
             />
             <div className="w-px h-5 bg-white/10 mx-1" />
@@ -1201,12 +1759,13 @@ export const AnnotationEditor = ({
               <>
                 <input
                   type="range"
-                  min={1}
-                  max={60}
+                  min={BRUSH_MIN}
+                  max={BRUSH_MAX}
                   value={brushSize}
                   onChange={(e) => setBrushSize(Number(e.target.value))}
                   className="w-20 h-1 cursor-pointer"
                   style={{ accentColor: KR }}
+                  title="Brush size ( [ / ] )"
                 />
                 <span className="text-[10px] text-white/50 min-w-[28px] text-center">{brushSize}px</span>
                 <div className="w-px h-5 bg-white/10 mx-1" />
@@ -1278,6 +1837,24 @@ export const AnnotationEditor = ({
           </>
         )}
       </div>
+      {dragOverFiles && (
+        <div
+          className="pointer-events-none absolute inset-0 flex items-center justify-center"
+          style={{
+            background: "rgba(249,66,58,0.08)",
+            border: "2px dashed rgba(249,66,58,0.6)",
+            zIndex: 50,
+          }}
+        >
+          <div
+            className="flex items-center gap-2 px-4 py-2 text-[12px] font-semibold text-white"
+            style={{ background: "rgba(20,20,20,0.85)", border: "1px solid rgba(249,66,58,0.5)" }}
+          >
+            <ImagePlus className="w-4 h-4" />
+            Drop image to add as layer
+          </div>
+        </div>
+      )}
     </div>
   );
 };

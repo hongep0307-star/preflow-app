@@ -367,18 +367,15 @@ const DashboardPage = () => {
             const activeVersionId = (p as any).active_version_id;
 
             // 탭 결정용 보유 여부 (버전 우선 순위와 독립)
-            // hasContiScenes: scenes 테이블 또는 scene_versions 어디서든 conti_image_url 이 세팅된
-            //                 씬이 하나라도 있으면 콘티 작업 존재로 간주 (source 값과 무관)
+            // hasContiScenes: 콘티탭에 씬 카드가 한 장이라도 있으면 true
+            //   - scenes 테이블에 source='conti' 가 하나라도 있거나
+            //   - scene_versions(콘티탭 버전 스냅샷)가 하나라도 존재하면 콘티 작업이 시작된 것으로 간주
             const projScenes = sc?.filter((s) => s.project_id === p.id) ?? [];
             const projVersions = sv?.filter((v) => v.project_id === p.id) ?? [];
-            const hasContiInScenesTable = projScenes.some((s: any) => !!s.conti_image_url);
-            const hasContiInVersions = projVersions.some((v: any) => {
-              const arr = Array.isArray(v.scenes) ? v.scenes : [];
-              return arr.some((s: any) => !!s?.conti_image_url);
-            });
-            const hasContiScenes = hasContiInScenesTable || hasContiInVersions;
-            const hasAgentScenes = projScenes.some((s: any) => s.source === "agent");
+            const hasContiInScenesTable = projScenes.some((s: any) => s.source === "conti");
             const hasDraftVersion = projVersions.length > 0;
+            const hasContiScenes = hasContiInScenesTable || hasDraftVersion;
+            const hasAgentScenes = projScenes.some((s: any) => s.source === "agent");
 
             // 1순위: active_version_id 기준
             if (activeVersionId) {

@@ -177,6 +177,20 @@ export const ContiStudio = ({
   const BRUSH_DEFAULT = 40;
   const [brushSize, setBrushSize] = useState(BRUSH_DEFAULT);
   const brushSizeRef = useRef(BRUSH_DEFAULT);
+
+  /* brush strength — 0~100%
+   * 100% = 마스크 안 100% 모델 출력으로 교체 (기존 동작과 동일)
+   * 50%  = 마스크 안 = 원본 50% + 모델 50% 블렌드 → "살짝만 수정"
+   * NB2 에 보내는 마스크도 grayscale 로 attenuate 해서 모델이 "약한 개입" 신호를 받음.
+   */
+  const STRENGTH_MIN = 10;
+  const STRENGTH_MAX = 100;
+  const STRENGTH_DEFAULT = 85;
+  const [brushStrength, setBrushStrength] = useState(STRENGTH_DEFAULT);
+  const brushStrengthRef = useRef(STRENGTH_DEFAULT);
+  useEffect(() => {
+    brushStrengthRef.current = brushStrength;
+  }, [brushStrength]);
   const toolModeRef = useRef<"brush" | "eraser">("brush");
   const [toolMode, setToolMode] = useState<"brush" | "eraser">("brush");
 
@@ -302,6 +316,17 @@ export const ContiStudio = ({
         }
         if (e.key === "e" || e.key === "E") {
           setToolMode("eraser");
+          e.preventDefault();
+          return;
+        }
+        // Shift + [ / ] : 브러시 강도 -/+
+        if (e.shiftKey && (e.key === "{" || e.key === "[")) {
+          setBrushStrength((v) => Math.max(STRENGTH_MIN, v - 5));
+          e.preventDefault();
+          return;
+        }
+        if (e.shiftKey && (e.key === "}" || e.key === "]")) {
+          setBrushStrength((v) => Math.min(STRENGTH_MAX, v + 5));
           e.preventDefault();
           return;
         }
@@ -433,21 +458,24 @@ export const ContiStudio = ({
     return () => clearTimeout(timer);
   }, [activeTab, currentScene.conti_image_url]);
 
-  /* ━━━ Undo 스냅샷 (R-채널 1바이트 압축) ━━━ */
+  /* ━━━ Undo 스냅샷 (alpha-채널 1바이트 압축)
+   * soft 브러시의 알파 그라디언트를 보존하기 위해 R 대신 alpha 채널 저장.
+   * mask canvas 는 항상 white(R=G=B=255)라 alpha 만 있으면 완전 복원 가능.
+   */
   const saveInpaintSnapshot = useCallback(() => {
     const mc = maskCanvasRef.current;
     if (!mc || !mc.width) return;
     const id = mc.getContext("2d")!.getImageData(0, 0, mc.width, mc.height);
-    const r = new Uint8Array(mc.width * mc.height);
-    for (let i = 0, j = 0; i < id.data.length; i += 4, j++) r[j] = id.data[i];
+    const a = new Uint8Array(mc.width * mc.height);
+    for (let i = 3, j = 0; i < id.data.length; i += 4, j++) a[j] = id.data[i];
     inpaintUndoRef.current = [
       ...inpaintUndoRef.current.slice(-(MAX_INPAINT_UNDO - 1)),
-      { mask: r, w: mc.width, h: mc.height },
+      { mask: a, w: mc.width, h: mc.height },
     ];
     setInpaintUndoCount(inpaintUndoRef.current.length);
   }, []);
 
-  /** R-채널 배열에서 마스크 + 오버레이를 결정론적으로 재구성 */
+  /** alpha-채널 배열에서 마스크 + 오버레이를 결정론적으로 재구성 */
   const restoreFromSnapshot = (snap: InpaintSnap) => {
     const mc = maskCanvasRef.current;
     const oc = overlayCanvasRef.current;
@@ -460,12 +488,13 @@ export const ContiStudio = ({
     const mid = mctx.createImageData(snap.w, snap.h);
     let hasAny = false;
     for (let j = 0, i = 0; j < snap.mask.length; j++, i += 4) {
-      const v = snap.mask[j];
-      if (v > 0) hasAny = true;
-      mid.data[i] = v;
-      mid.data[i + 1] = v;
-      mid.data[i + 2] = v;
-      mid.data[i + 3] = v; // alpha = R 로 저장 → soft 마스크 가장자리도 보존
+      const a = snap.mask[j];
+      if (a > 0) hasAny = true;
+      // mask canvas 는 항상 white + alpha 변조
+      mid.data[i] = 255;
+      mid.data[i + 1] = 255;
+      mid.data[i + 2] = 255;
+      mid.data[i + 3] = a;
     }
     mctx.putImageData(mid, 0, 0);
 
@@ -502,7 +531,26 @@ export const ContiStudio = ({
     lastPaintPtRef.current = null;
   };
 
-  /** 한 점에 dot 찍기 (mousedown 시점 — 직전 좌표 없을 때) */
+  /* ━━━ 소프트 엣지 스탬프 브러시 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   * - radialGradient 로 중심=1 → feather 시작점까지 유지 → 반지름=0 으로 감쇠
+   * - 세그먼트는 촘촘한 스탬프로 구현 (lineWidth 스트로크는 feather 를 지원하지 않음)
+   * - BRUSH_FEATHER = 0.25 → 반지름의 75% 까지 solid, 나머지 25% 에서 soft fade
+   */
+  const BRUSH_FEATHER = 0.25;
+
+  /** 색상 문자열에서 rgba 성분 추출 (rgb/rgba 둘 다 지원). */
+  const parseRgba = (c: string): [number, number, number, number] => {
+    const m = c.match(/rgba?\(([^)]+)\)/);
+    if (!m) return [255, 255, 255, 1];
+    const parts = m[1].split(/\s*,\s*/);
+    const r = Number(parts[0]) || 0;
+    const g = Number(parts[1]) || 0;
+    const b = Number(parts[2]) || 0;
+    const a = parts[3] !== undefined ? Number(parts[3]) : 1;
+    return [r, g, b, a];
+  };
+
+  /** 한 점에 soft-edge 스탬프 찍기 */
   const drawDot = (
     ctx: CanvasRenderingContext2D,
     x: number,
@@ -511,16 +559,23 @@ export const ContiStudio = ({
     composite: GlobalCompositeOperation,
     fill: string,
   ) => {
+    if (r < 0.5) return;
     ctx.save();
     ctx.globalCompositeOperation = composite;
-    ctx.fillStyle = fill;
+    const [cr, cg, cb, ca] = parseRgba(fill);
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+    const solidStop = Math.max(0, Math.min(1, 1 - BRUSH_FEATHER));
+    grad.addColorStop(0, `rgba(${cr},${cg},${cb},${ca})`);
+    grad.addColorStop(solidStop, `rgba(${cr},${cg},${cb},${ca})`);
+    grad.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+    ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   };
 
-  /** 직전 좌표 → 현재 좌표를 굵은 라인으로 연결 (보간) */
+  /** 두 점을 soft-edge 스탬프 열로 연결 (스탬핑) */
   const drawSegment = (
     ctx: CanvasRenderingContext2D,
     fromX: number,
@@ -531,56 +586,63 @@ export const ContiStudio = ({
     composite: GlobalCompositeOperation,
     stroke: string,
   ) => {
-    ctx.save();
-    ctx.globalCompositeOperation = composite;
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = r * 2;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    ctx.moveTo(fromX, fromY);
-    ctx.lineTo(toX, toY);
-    ctx.stroke();
-    ctx.restore();
+    if (r < 0.5) return;
+    const dx = toX - fromX;
+    const dy = toY - fromY;
+    const dist = Math.hypot(dx, dy);
+    // 스탬프 간격: 반지름의 20% — 소프트 엣지가 겹쳐서 스트로크 내부는 꽉 차고 외곽만 페더됨
+    const step = Math.max(1, r * 0.2);
+    const n = Math.max(1, Math.ceil(dist / step));
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      drawDot(ctx, fromX + dx * t, fromY + dy * t, r, composite, stroke);
+    }
   };
 
   /**
    * 한 포인터 샘플을 마스크에 반영.
-   * 직전 좌표가 있으면 보간 라인을, 없으면 단발 dot 을 찍는다.
-   * 빠른 드래그(마우스 이동 이벤트 간격이 큰 경우)에도 점선처럼 끊기지 않도록 보장.
+   * 직전 좌표가 있으면 스탬프 열로, 없으면 단발 dot 을 찍는다.
+   * pressure 는 반지름에만 변조 적용 (마우스는 고정 1.0).
    */
-  const paintAt = useCallback((cx: number, cy: number, divW: number, divH: number) => {
-    const mc = maskCanvasRef.current;
-    const oc = overlayCanvasRef.current;
-    if (!mc || !mc.width || !mc.height || divW <= 0 || divH <= 0) return;
+  const paintAt = useCallback(
+    (cx: number, cy: number, divW: number, divH: number, pressure: number = 1, pointerType = "mouse") => {
+      const mc = maskCanvasRef.current;
+      const oc = overlayCanvasRef.current;
+      if (!mc || !mc.width || !mc.height || divW <= 0 || divH <= 0) return;
 
-    const x = cx * (mc.width / divW);
-    const y = cy * (mc.height / divH);
-    // brushSize 는 이미지 픽셀 단위 반지름 — 줌/창크기에 무관하게 일정한 굵기 보장
-    const r = brushSizeRef.current;
+      const x = cx * (mc.width / divW);
+      const y = cy * (mc.height / divH);
+      // pressure 반경 변조: 마우스는 1.0 고정, 스타일러스/터치만 0.35~1.0 범위
+      const pfactor = pointerType === "mouse" ? 1 : 0.35 + 0.65 * Math.max(0, Math.min(1, pressure));
+      const r = brushSizeRef.current * pfactor;
 
-    const isErase = toolModeRef.current === "eraser";
-    const composite: GlobalCompositeOperation = isErase ? "destination-out" : "source-over";
-    const maskColor = "rgba(255,255,255,1)";
-    const overlayColor = isErase ? "rgba(0,0,0,1)" : "rgba(249,66,58,0.85)";
+      const isErase = toolModeRef.current === "eraser";
+      const composite: GlobalCompositeOperation = isErase ? "destination-out" : "source-over";
+      // 마스크 자체는 항상 alpha=1 (사용자에게 브러시가 또렷이 보이도록).
+      // strength 는 extract 단계에서 알파를 스케일해서 적용 (시각 피드백과 분리).
+      const maskColor = "rgba(255,255,255,1)";
+      const overlayColor = isErase ? "rgba(0,0,0,1)" : "rgba(249,66,58,0.85)";
 
-    const mctx = mc.getContext("2d")!;
-    const octx = oc?.getContext("2d") ?? null;
-    const prev = lastPaintPtRef.current;
+      const mctx = mc.getContext("2d")!;
+      const octx = oc?.getContext("2d") ?? null;
+      const prev = lastPaintPtRef.current;
 
-    if (prev) {
-      drawSegment(mctx, prev.x, prev.y, x, y, r, composite, maskColor);
-      if (octx) drawSegment(octx, prev.x, prev.y, x, y, r, composite, overlayColor);
-    }
-    drawDot(mctx, x, y, r, composite, maskColor);
-    if (octx) drawDot(octx, x, y, r, composite, overlayColor);
+      if (prev) {
+        drawSegment(mctx, prev.x, prev.y, x, y, r, composite, maskColor);
+        if (octx) drawSegment(octx, prev.x, prev.y, x, y, r, composite, overlayColor);
+      } else {
+        drawDot(mctx, x, y, r, composite, maskColor);
+        if (octx) drawDot(octx, x, y, r, composite, overlayColor);
+      }
 
-    lastPaintPtRef.current = { x, y };
-    if (!isErase && !hasMaskRef.current) {
-      hasMaskRef.current = true;
-      setHasMask(true);
-    }
-  }, []);
+      lastPaintPtRef.current = { x, y };
+      if (!isErase && !hasMaskRef.current) {
+        hasMaskRef.current = true;
+        setHasMask(true);
+      }
+    },
+    [],
+  );
 
   const drawCursorAt = useCallback((clientX: number, clientY: number) => {
     const cc = cursorCanvasRef.current;
@@ -666,7 +728,14 @@ export const ContiStudio = ({
 
       const rect = div.getBoundingClientRect();
       drawCursorAt(e.clientX, e.clientY);
-      paintAt(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+      paintAt(
+        e.clientX - rect.left,
+        e.clientY - rect.top,
+        rect.width,
+        rect.height,
+        e.pressure,
+        e.pointerType,
+      );
     },
     [isGenerating, paintAt, drawCursorAt, saveInpaintSnapshot],
   );
@@ -683,15 +752,30 @@ export const ContiStudio = ({
         return;
       }
       const rect = div.getBoundingClientRect();
+      const pointerType = e.pointerType;
       // OS 가 한 프레임에 모은 모든 중간 샘플들 — 빠른 드래그에서 점이 끊기지 않게 함
       const samples =
         typeof e.nativeEvent.getCoalescedEvents === "function" ? e.nativeEvent.getCoalescedEvents() : [];
       if (samples.length > 0) {
         for (const s of samples) {
-          paintAt(s.clientX - rect.left, s.clientY - rect.top, rect.width, rect.height);
+          paintAt(
+            s.clientX - rect.left,
+            s.clientY - rect.top,
+            rect.width,
+            rect.height,
+            (s as PointerEvent).pressure ?? e.pressure,
+            pointerType,
+          );
         }
       } else {
-        paintAt(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+        paintAt(
+          e.clientX - rect.left,
+          e.clientY - rect.top,
+          rect.width,
+          rect.height,
+          e.pressure,
+          pointerType,
+        );
       }
       drawCursorAt(e.clientX, e.clientY);
     },
@@ -771,22 +855,28 @@ export const ContiStudio = ({
   const featherPxFor = (w: number, h: number) =>
     Math.max(2, Math.round(Math.min(w, h) * FEATHER_FRACTION));
 
-  /** mask canvas → 동일 해상도의 white-on-transparent 캔버스 (필요 시 페더링) */
+  /**
+   * mask canvas → 동일 해상도의 white-on-transparent 캔버스.
+   * 브러시가 이미 soft 엣지(alpha 그라디언트)로 칠하므로 alpha 값을 그대로 보존.
+   * strength 는 최대 alpha 를 스케일 → 50%면 mask 중심도 0.5 로 제한 → 합성 시 원본 50% 유지.
+   */
   const buildSoftMaskCanvas = (
     mc: HTMLCanvasElement,
     targetW: number,
     targetH: number,
     featherPx: number,
+    strength01: number = 1,
   ): HTMLCanvasElement => {
-    // 1) 마스크 데이터를 흰색 alpha 마스크로 변환 (R 채널 기준)
     const src = mc.getContext("2d")!.getImageData(0, 0, mc.width, mc.height);
     const tmp = document.createElement("canvas");
     tmp.width = mc.width;
     tmp.height = mc.height;
     const tctx = tmp.getContext("2d")!;
     const tid = tctx.createImageData(mc.width, mc.height);
+    const s = Math.max(0, Math.min(1, strength01));
     for (let i = 0; i < src.data.length; i += 4) {
-      const a = src.data[i] > 0 ? 255 : 0;
+      // mask canvas 는 "쓰여짐 = 알파" 방식. R/G/B 는 항상 255 이므로 alpha 만 읽음.
+      const a = Math.round(src.data[i + 3] * s);
       tid.data[i] = 255;
       tid.data[i + 1] = 255;
       tid.data[i + 2] = 255;
@@ -794,11 +884,11 @@ export const ContiStudio = ({
     }
     tctx.putImageData(tid, 0, 0);
 
-    // 2) 타겟 해상도로 리스케일 + 가우시안 블러로 soft edge 생성
     const out = document.createElement("canvas");
     out.width = targetW;
     out.height = targetH;
     const octx = out.getContext("2d")!;
+    // 경계 솔기 제거용 추가 블러 (브러시 자체 feather 와 합쳐서 자연스러움)
     if (featherPx > 0) {
       octx.filter = `blur(${featherPx}px)`;
     }
@@ -807,7 +897,10 @@ export const ContiStudio = ({
     return out;
   };
 
-  /** 마스크 추출 (모델 전달용 PNG, base64) — GPT edits 폴백 경로용 hard mask */
+  /**
+   * 마스크 추출 (모델 전달용 PNG, base64) — GPT edits 폴백 경로용.
+   * 브러시가 soft 엣지라 alpha 채널을 읽고, 임계(alpha > 32) 기준으로 painted 판정.
+   */
   const extractMaskBase64 = (): string | null => {
     const mc = maskCanvasRef.current;
     const ic = imageCanvasRef.current;
@@ -821,7 +914,7 @@ export const ContiStudio = ({
     const rawCtx = rawMask.getContext("2d")!;
     const rawID = rawCtx.createImageData(mc.width, mc.height);
     for (let i = 0; i < src.data.length; i += 4) {
-      const painted = src.data[i] > 128;
+      const painted = src.data[i + 3] > 32;
       rawID.data[i] = painted ? 255 : 0;
       rawID.data[i + 1] = painted ? 255 : 0;
       rawID.data[i + 2] = painted ? 255 : 0;
@@ -842,10 +935,15 @@ export const ContiStudio = ({
    *   - 마스크 안: 모델출력 (페더된 가장자리로 자연스럽게 블렌드)
    *   - 마스크 밖: 원본 픽셀 그대로 (수학적으로 보존)
    * 반환: composite 결과의 PNG Blob
+   * 인자 ic/mc 는 detached snapshot 을 받을 수 있도록 옵션 처리 (없으면 ref 사용).
    */
-  const compositeInpaintResult = async (generatedUrl: string): Promise<Blob | null> => {
-    const ic = imageCanvasRef.current;
-    const mc = maskCanvasRef.current;
+  const compositeInpaintResult = async (
+    generatedUrl: string,
+    icArg?: HTMLCanvasElement | null,
+    mcArg?: HTMLCanvasElement | null,
+  ): Promise<Blob | null> => {
+    const ic = icArg ?? imageCanvasRef.current;
+    const mc = mcArg ?? maskCanvasRef.current;
     if (!ic || !mc) return null;
     const W = ic.width;
     const H = ic.height;
@@ -868,9 +966,10 @@ export const ContiStudio = ({
     gctx.imageSmoothingQuality = "high";
     gctx.drawImage(genImg, 0, 0, W, H);
 
-    // 3) soft mask 생성
+    // 3) soft mask 생성 (strength 반영)
     const featherPx = featherPxFor(W, H);
-    const softMask = buildSoftMaskCanvas(mc, W, H, featherPx);
+    const strength01 = brushStrengthRef.current / 100;
+    const softMask = buildSoftMaskCanvas(mc, W, H, featherPx, strength01);
 
     // 4) (gen ∩ softMask) → 마스크 영역만 남긴 모델출력
     const maskedGen = document.createElement("canvas");
@@ -962,6 +1061,304 @@ export const ContiStudio = ({
     } catch {
       return null;
     }
+  };
+
+  /* ━━━━━━━━━━━ ROI (Region-of-Interest) 인페인트 파이프라인 ━━━━━━━━━━━
+   * 왜 필요한가:
+   *   NB2(Gemini 3.1)는 멀티모달 generateContent API라 "별도 mask 파라미터" 가 없고
+   *   전체 이미지를 재렌더한다. 이로 인해 unmasked 영역이 미묘하게 변형되거나
+   *   모델이 브러시 영역이 아닌 엉뚱한 부분을 편집하는 문제가 발생.
+   *
+   * 해결:
+   *   1. 클라이언트가 마스크 bbox 주변만 크롭(ROI) → 모델이 재렌더할 수 있는 범위 자체를
+   *      ROI로 물리적으로 제한.
+   *   2. B/W 바이너리 마스크도 별도 이미지로 함께 전달 → 고전적 inpaint 관습
+   *      (흰=편집, 검=유지) 에 매칭되는 신호 제공.
+   *   3. 합성 시 ROI 자리에만 paste-back → ROI 밖 픽셀은 원본과 bit-identical 보장.
+   */
+  type BBox = { x: number; y: number; w: number; h: number };
+
+  /** 마스크 canvas의 alpha>0 영역 bbox (이미지 좌표). 비어있으면 null. */
+  const computeMaskBBox = (mc: HTMLCanvasElement): BBox | null => {
+    const ctx = mc.getContext("2d");
+    if (!ctx) return null;
+    const { data } = ctx.getImageData(0, 0, mc.width, mc.height);
+    let minX = mc.width,
+      minY = mc.height,
+      maxX = -1,
+      maxY = -1;
+    const W = mc.width;
+    for (let y = 0; y < mc.height; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = (y * W + x) * 4;
+        if (data[idx] > 0) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) return null;
+    return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+  };
+
+  /**
+   * bbox 확장:
+   *   1. pad = max(bbox 짧은변의 padFraction, minPadPx) 만큼 사방으로 확장
+   *   2. ROI의 짧은 변이 minSize 미만이면 minSize 까지 키움
+   *   3. NB2 지원 aspect(9:16, 16:9, 1:1) 중 ROI 비율에 가장 가까운 것에 맞춰 확장
+   *      (NB2 출력과 ROI 비율이 일치 → paste-back 시 stretch 없음)
+   *   4. 이미지 경계로 clamp
+   */
+  const padBBox = (
+    bb: BBox,
+    imgW: number,
+    imgH: number,
+    padFraction = 0.35,
+    minPadPx = 48,
+    minSize = 384,
+  ): BBox => {
+    const padRaw = Math.max(minPadPx, Math.round(Math.min(bb.w, bb.h) * padFraction));
+    let x = bb.x - padRaw;
+    let y = bb.y - padRaw;
+    let w = bb.w + padRaw * 2;
+    let h = bb.h + padRaw * 2;
+
+    // 최소 크기 보장
+    if (w < minSize) {
+      const add = minSize - w;
+      x -= Math.round(add / 2);
+      w = minSize;
+    }
+    if (h < minSize) {
+      const add = minSize - h;
+      y -= Math.round(add / 2);
+      h = minSize;
+    }
+
+    // NB2 aspect 맞춤 확장 (중심 고정) — 로그 거리로 가장 가까운 aspect 선택
+    const targets = [16 / 9, 1, 9 / 16];
+    const ratio = w / h;
+    const target = targets.reduce(
+      (best, t) =>
+        Math.abs(Math.log(t) - Math.log(ratio)) < Math.abs(Math.log(best) - Math.log(ratio)) ? t : best,
+      targets[0],
+    );
+
+    if (Math.abs(ratio - target) > 0.02) {
+      if (ratio < target) {
+        // 너무 세로로 김 → 가로 확장
+        const newW = Math.round(h * target);
+        x -= Math.round((newW - w) / 2);
+        w = newW;
+      } else {
+        // 너무 가로로 김 → 세로 확장
+        const newH = Math.round(w / target);
+        y -= Math.round((newH - h) / 2);
+        h = newH;
+      }
+    }
+
+    // 이미지 경계로 clamp (ROI를 이미지 안으로 밀어넣음, 크기 유지 시도)
+    if (x < 0) {
+      x = 0;
+    }
+    if (y < 0) {
+      y = 0;
+    }
+    if (x + w > imgW) {
+      x = Math.max(0, imgW - w);
+      w = Math.min(w, imgW);
+    }
+    if (y + h > imgH) {
+      y = Math.max(0, imgH - h);
+      h = Math.min(h, imgH);
+    }
+    return { x, y, w, h };
+  };
+
+  /** source canvas를 bbox로 크롭한 새 canvas */
+  const cropCanvas = (src: HTMLCanvasElement, bb: BBox): HTMLCanvasElement => {
+    const out = document.createElement("canvas");
+    out.width = bb.w;
+    out.height = bb.h;
+    const ctx = out.getContext("2d")!;
+    ctx.drawImage(src, bb.x, bb.y, bb.w, bb.h, 0, 0, bb.w, bb.h);
+    return out;
+  };
+
+  /**
+   * mask canvas → 그레이스케일 마스크 (흰=편집, 검=유지, 회색=부분 편집).
+   * 모델(NB2/GPT) 전송용. ROI crop 지원.
+   * brightness = alpha * strength → strength 50%이면 중심 픽셀도 ~127 회색 → 모델이
+   * "약한 개입" 신호로 인식.
+   */
+  const buildBinaryMaskCanvas = (
+    mc: HTMLCanvasElement,
+    bb?: BBox,
+    strength01: number = 1,
+  ): HTMLCanvasElement => {
+    const srcX = bb?.x ?? 0;
+    const srcY = bb?.y ?? 0;
+    const W = bb?.w ?? mc.width;
+    const H = bb?.h ?? mc.height;
+    const srcCtx = mc.getContext("2d")!;
+    const srcID = srcCtx.getImageData(srcX, srcY, W, H);
+    const out = document.createElement("canvas");
+    out.width = W;
+    out.height = H;
+    const ctx = out.getContext("2d")!;
+    const id = ctx.createImageData(W, H);
+    const s = Math.max(0, Math.min(1, strength01));
+    for (let i = 0; i < srcID.data.length; i += 4) {
+      const a = srcID.data[i + 3];
+      const v = Math.round(a * s);
+      id.data[i] = v;
+      id.data[i + 1] = v;
+      id.data[i + 2] = v;
+      id.data[i + 3] = 255;
+    }
+    ctx.putImageData(id, 0, 0);
+    return out;
+  };
+
+  /** 원본 crop 위에 마젠타 마스크를 칠한 이미지 (NB2용 추가 시각 힌트) */
+  const buildMagentaOverlayCanvas = (
+    ic: HTMLCanvasElement,
+    mc: HTMLCanvasElement,
+    bb?: BBox,
+  ): HTMLCanvasElement => {
+    const cropped = bb ? cropCanvas(ic, bb) : (() => {
+      const c = document.createElement("canvas");
+      c.width = ic.width;
+      c.height = ic.height;
+      c.getContext("2d")!.drawImage(ic, 0, 0);
+      return c;
+    })();
+    const W = cropped.width;
+    const H = cropped.height;
+    const featherPx = featherPxFor(W, H);
+    const dilatePx = Math.max(2, Math.round(featherPx * 1.5));
+    const dilated = document.createElement("canvas");
+    dilated.width = W;
+    dilated.height = H;
+    const dctx = dilated.getContext("2d")!;
+    dctx.filter = `blur(${dilatePx}px)`;
+    if (bb) {
+      dctx.drawImage(mc, bb.x, bb.y, bb.w, bb.h, 0, 0, W, H);
+    } else {
+      dctx.drawImage(mc, 0, 0, W, H);
+    }
+    dctx.filter = "none";
+    const dImg = dctx.getImageData(0, 0, W, H);
+    const ctx = cropped.getContext("2d")!;
+    const id = ctx.getImageData(0, 0, W, H);
+    for (let i = 0; i < dImg.data.length; i += 4) {
+      if (dImg.data[i + 3] > 8) {
+        id.data[i] = 255;
+        id.data[i + 1] = 0;
+        id.data[i + 2] = 255;
+        id.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(id, 0, 0);
+    return cropped;
+  };
+
+  /** canvas → Blob → 업로드 → public URL */
+  const uploadCanvasAsImage = async (
+    canvas: HTMLCanvasElement,
+    projectId: string,
+    tag: string,
+  ): Promise<string | null> => {
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), "image/png"));
+    if (!blob) return null;
+    const path = `${projectId}/temp-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
+    const { error } = await supabase.storage
+      .from("contis")
+      .upload(path, blob, { upsert: true, contentType: "image/png" });
+    if (error) return null;
+    return supabase.storage.from("contis").getPublicUrl(path).data.publicUrl;
+  };
+
+  /**
+   * ROI 결과를 원본 이미지 위에 paste-back 합성.
+   *   - ROI 바깥: 원본 픽셀 그대로 (bit-identical)
+   *   - ROI 안: (모델출력 ∩ soft mask) 블렌드
+   */
+  const compositeROIInpaintResult = async (
+    generatedUrl: string,
+    bb: BBox,
+    icArg?: HTMLCanvasElement | null,
+    mcArg?: HTMLCanvasElement | null,
+  ): Promise<Blob | null> => {
+    const ic = icArg ?? imageCanvasRef.current;
+    const mc = mcArg ?? maskCanvasRef.current;
+    if (!ic || !mc) return null;
+    const W = ic.width;
+    const H = ic.height;
+    if (!W || !H) return null;
+
+    const genImg: HTMLImageElement = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.crossOrigin = "anonymous";
+      im.onload = () => resolve(im);
+      im.onerror = (e) => reject(e);
+      im.src = generatedUrl;
+    });
+
+    // ROI 크기로 리스케일
+    const genROI = document.createElement("canvas");
+    genROI.width = bb.w;
+    genROI.height = bb.h;
+    const gctx = genROI.getContext("2d")!;
+    gctx.imageSmoothingQuality = "high";
+    gctx.drawImage(genImg, 0, 0, bb.w, bb.h);
+
+    // ROI 범위의 soft mask (브러시 soft 엣지 알파 + strength 스케일 보존)
+    const featherPx = featherPxFor(bb.w, bb.h);
+    const strength01 = brushStrengthRef.current / 100;
+    const softMask = document.createElement("canvas");
+    softMask.width = bb.w;
+    softMask.height = bb.h;
+    const smctx = softMask.getContext("2d")!;
+    const srcID = mc.getContext("2d")!.getImageData(bb.x, bb.y, bb.w, bb.h);
+    const whiteAlpha = document.createElement("canvas");
+    whiteAlpha.width = bb.w;
+    whiteAlpha.height = bb.h;
+    const wctx = whiteAlpha.getContext("2d")!;
+    const wid = wctx.createImageData(bb.w, bb.h);
+    for (let i = 0; i < srcID.data.length; i += 4) {
+      const a = Math.round(srcID.data[i + 3] * strength01);
+      wid.data[i] = 255;
+      wid.data[i + 1] = 255;
+      wid.data[i + 2] = 255;
+      wid.data[i + 3] = a;
+    }
+    wctx.putImageData(wid, 0, 0);
+    smctx.filter = `blur(${featherPx}px)`;
+    smctx.drawImage(whiteAlpha, 0, 0);
+    smctx.filter = "none";
+
+    // (genROI ∩ softMask)
+    const maskedGen = document.createElement("canvas");
+    maskedGen.width = bb.w;
+    maskedGen.height = bb.h;
+    const mgctx = maskedGen.getContext("2d")!;
+    mgctx.drawImage(genROI, 0, 0);
+    mgctx.globalCompositeOperation = "destination-in";
+    mgctx.drawImage(softMask, 0, 0);
+
+    // 최종: 원본 전체 + ROI 자리에 maskedGen
+    const out = document.createElement("canvas");
+    out.width = W;
+    out.height = H;
+    const octx = out.getContext("2d")!;
+    octx.drawImage(ic, 0, 0);
+    octx.drawImage(maskedGen, bb.x, bb.y);
+
+    return await new Promise<Blob | null>((resolve) => out.toBlob((b) => resolve(b), "image/png"));
   };
 
   const toggleSceneRef = (s: (typeof otherScenes)[0]) => {
@@ -1131,16 +1528,45 @@ export const ContiStudio = ({
     });
     const fmt = videoFormat;
 
-    // ── 원본 비율 보존: 로드된 캔버스 크기에서 imageSize 계산 ──
-    // imageCanvasRef에 실제 이미지가 그려져 있으므로 W/H가 정확함
+    // ── 캔버스 스냅샷 (detached offscreen copies) ──────────────────────
+    // onClose() 후 edit 탭이 언마운트되면 canvas ref 들이 null 이 되므로,
+    // 비동기 파이프라인에서 쓸 image/mask 캔버스를 미리 detached 복사본으로 만들어둠.
     const ic = imageCanvasRef.current;
-    const imageSize =
-      ic && ic.width > 0 && ic.height > 0 ? computeImageSizeFromDimensions(ic.width, ic.height) : IMAGE_SIZE_MAP[fmt];
+    const mcRef = maskCanvasRef.current;
+    const icSnapshot: HTMLCanvasElement | null = (() => {
+      if (!ic || ic.width === 0 || ic.height === 0) return null;
+      const c = document.createElement("canvas");
+      c.width = ic.width;
+      c.height = ic.height;
+      c.getContext("2d")!.drawImage(ic, 0, 0);
+      return c;
+    })();
+    const mcSnapshot: HTMLCanvasElement | null = (() => {
+      if (!mcRef || mcRef.width === 0 || mcRef.height === 0) return null;
+      const c = document.createElement("canvas");
+      c.width = mcRef.width;
+      c.height = mcRef.height;
+      c.getContext("2d")!.drawImage(mcRef, 0, 0);
+      return c;
+    })();
+
+    // ── ROI 적용 판정 ──
+    let roi: BBox | null = null;
+    let useROI = false;
+    if (!maskEmptyVal && icSnapshot && mcSnapshot) {
+      const tight = computeMaskBBox(mcSnapshot);
+      if (tight) {
+        const padded = padBBox(tight, icSnapshot.width, icSnapshot.height);
+        const coverage = (padded.w * padded.h) / (icSnapshot.width * icSnapshot.height);
+        roi = padded;
+        useROI = coverage < 0.7;
+        console.log("[Inpaint:roi]", { tight, padded, coverage: coverage.toFixed(3), useROI });
+      }
+    }
 
     onClose();
     (async () => {
       try {
-        // ── inpaint는 단일 API 호출 → 카드에 "1/1" 표시
         onStageChange?.(sceneId, "generating");
 
         const imgRes = await fetch(sceneImageUrl);
@@ -1152,82 +1578,129 @@ export const ContiStudio = ({
         });
         const customRefUrls = await uploadCustomRefsAndGetUrls();
 
-        // 브러시가 있으면 마스크 오버레이 레퍼런스 생성 — NB2 가 "수정 영역" 을 시각으로 인식
-        const maskOverlayUrl = !maskEmptyVal ? await uploadMaskOverlayAndGetUrl(sceneProjectId) : null;
-
-        // ── refs 배치 전략 ─────────────────────────────────────
-        // NB2 는 이미지 장수가 늘수록 "합성" 해버리는 경향이 강해지므로,
-        // 브러시 인페인트 시에는 의도적으로 총 3장 (원본 + 마스크 오버레이 + 태그 1장) 으로 제한.
-        //   · 서버가 sourceImageUrl 을 [0] 에 prepend 하므로 여기서는 [overlay, tag] 만 넘김.
-        //   · mood/selectedRefs/custom 는 브러시 모드에서 제외 (noise 감소).
-        //   · 태그가 없으면 [overlay] 만.
-        //
-        // 브러시 없을 때(전체 편집)는 기존대로 asset+mood+selected+custom 합쳐서 3장까지.
         const primaryAssetRef = assetRefUrls[0] ?? null;
-        let referenceImageUrls: string[];
-        if (maskOverlayUrl) {
-          referenceImageUrls = [maskOverlayUrl];
-          if (primaryAssetRef) referenceImageUrls.push(primaryAssetRef);
+        const hasTagRef = !!primaryAssetRef;
+
+        /* ━━━ ROI 모드 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+         * 클라이언트가 마스크 bbox 주변만 잘라 NB2 에게 전달.
+         * NB2 는 ROI 만 재생성할 수 있으므로 물리적으로 편집 범위가 제한됨.
+         * 결과를 원본 위 ROI 자리에 paste-back → 마스크 밖은 bit-identical 보장.
+         * ────────────────────────────────────────────────────────── */
+        let nbSourceUrl: string;
+        let nbRefUrls: string[];
+        let nbImageSize: string;
+        let maskPrefix: string;
+
+        if (useROI && roi && icSnapshot && mcSnapshot) {
+          const strength01 = brushStrengthRef.current / 100;
+          const roiSource = cropCanvas(icSnapshot, roi);
+          const roiMask = buildBinaryMaskCanvas(mcSnapshot, roi, strength01);
+          const roiOverlay = buildMagentaOverlayCanvas(icSnapshot, mcSnapshot, roi);
+
+          const [roiSourceUrl, roiMaskUrl, roiOverlayUrl] = await Promise.all([
+            uploadCanvasAsImage(roiSource, sceneProjectId, "roi-src"),
+            uploadCanvasAsImage(roiMask, sceneProjectId, "roi-mask"),
+            uploadCanvasAsImage(roiOverlay, sceneProjectId, "roi-ovl"),
+          ]);
+
+          if (!roiSourceUrl || !roiMaskUrl) {
+            throw new Error("ROI upload failed");
+          }
+
+          nbSourceUrl = roiSourceUrl;
+          nbRefUrls = [roiMaskUrl];
+          if (roiOverlayUrl) nbRefUrls.push(roiOverlayUrl);
+          if (primaryAssetRef) nbRefUrls.push(primaryAssetRef);
+          nbImageSize = computeImageSizeFromDimensions(roi.w, roi.h);
+
+          maskPrefix = `INPAINT REGION EDIT — precision mode.
+
+You receive a CROPPED region of a larger scene plus a binary mask.
+
+Reference images (exact order):
+  [1] SOURCE — a cropped region of a scene. This is the canvas you must respect.
+  [2] MASK   — binary mask aligned 1:1 with SOURCE. WHITE = the area you MUST edit. BLACK = the area you MUST preserve pixel-for-pixel.
+  [3] OVERLAY (optional) — SOURCE with the edit region visually painted magenta (#FF00FF). Use it as a redundant visual cue; magenta must NOT appear in your output.${hasTagRef ? `
+  [4] TAG_ASSET — a reference photo showing the identity of the object to paint inside the WHITE mask region.` : ""}
+
+Hard output rules — ALL must hold:
+ 1. For every BLACK mask pixel in [2], the corresponding pixel in your output MUST equal [1] SOURCE exactly (same color, same texture, same detail). Do NOT re-render, re-light, re-color, or re-frame any black-mask pixel.
+ 2. For WHITE mask pixels in [2], paint the requested content. Blend seamlessly with SOURCE's lighting, color grading, perspective, and texture at the white/black boundary.
+ 3. Output aspect ratio and framing MUST match SOURCE. Do NOT crop, rotate, pan, or zoom. The edit is strictly local.
+ 4. Output size and subject placement must match SOURCE. Treat SOURCE as an immutable background layer onto which the white-mask region is the only paintable area.${hasTagRef ? `
+ 5. TAG_ASSET identity match (REQUIRED):
+    - The object painted inside the WHITE region MUST be recognizably the same specific object shown in [4]. Match exact shape, silhouette, proportions, materials, colors, surface finish, markings/logos/text, and distinguishing details.
+    - Adapt only the viewing angle, lighting, and scale to blend with SOURCE. Do NOT copy [4]'s background or photo framing into the output.` : ""}
+
+Self-check before emitting pixels:
+ - If any black-mask pixel of your planned output differs from SOURCE → STOP and restart from rule 1.
+ - If the WHITE region is not filled with the requested content blending naturally → restart from rule 2.${hasTagRef ? `
+ - If the painted object is not immediately recognizable as the specific object in [4] → restart from rule 5.` : ""}
+
+Edit instruction (applies strictly inside the WHITE mask region):
+`;
         } else {
-          referenceImageUrls = [...assetRefUrls, ...moodRefUrls, ...selectedRefs, ...customRefUrls].slice(0, 3);
+          /* ━━━ 전체 이미지 모드 (마스크 없음 또는 ROI가 거의 전체) ━━━━
+           * 기존 동작 유지 + 마스크 있으면 B/W 마스크를 레퍼런스로 추가 전송.
+           */
+          let binaryMaskUrl: string | null = null;
+          let magentaOverlayUrl: string | null = null;
+          if (!maskEmptyVal && icSnapshot && mcSnapshot) {
+            const strength01 = brushStrengthRef.current / 100;
+            const binMask = buildBinaryMaskCanvas(mcSnapshot, undefined, strength01);
+            const magOverlay = buildMagentaOverlayCanvas(icSnapshot, mcSnapshot);
+            [binaryMaskUrl, magentaOverlayUrl] = await Promise.all([
+              uploadCanvasAsImage(binMask, sceneProjectId, "mask-bw"),
+              uploadCanvasAsImage(magOverlay, sceneProjectId, "mask-ovl"),
+            ]);
+          }
+
+          nbSourceUrl = sceneImageUrl;
+          if (!maskEmptyVal && (binaryMaskUrl || magentaOverlayUrl)) {
+            nbRefUrls = [];
+            if (binaryMaskUrl) nbRefUrls.push(binaryMaskUrl);
+            if (magentaOverlayUrl) nbRefUrls.push(magentaOverlayUrl);
+            if (primaryAssetRef) nbRefUrls.push(primaryAssetRef);
+          } else {
+            nbRefUrls = [...assetRefUrls, ...moodRefUrls, ...selectedRefs, ...customRefUrls].slice(0, 3);
+          }
+          nbImageSize =
+            icSnapshot && icSnapshot.width > 0 && icSnapshot.height > 0
+              ? computeImageSizeFromDimensions(icSnapshot.width, icSnapshot.height)
+              : IMAGE_SIZE_MAP[fmt];
+
+          maskPrefix = !maskEmptyVal
+            ? `INPAINT EDIT — full-image mode with binary mask.
+
+Reference images (exact order):
+  [1] SOURCE — the original full scene. This is your canvas.
+  [2] MASK   — binary mask aligned 1:1 with SOURCE. WHITE = the area you MUST edit. BLACK = the area you MUST preserve pixel-for-pixel.${magentaOverlayUrl ? `
+  [3] OVERLAY — SOURCE with edit region painted magenta (#FF00FF). Redundant visual cue; magenta must NOT appear in the output.` : ""}${hasTagRef ? `
+  [${magentaOverlayUrl ? 4 : 3}] TAG_ASSET — identity reference for the object to paint inside the WHITE region.` : ""}
+
+Hard output rules — ALL must hold:
+ 1. For every BLACK mask pixel, output pixel MUST equal SOURCE exactly. Same composition, crop, camera angle, aspect ratio, lighting, color grading, subject poses, background, and other objects.
+ 2. For WHITE mask pixels, paint the requested content and blend seamlessly.
+ 3. Do NOT move, resize, crop, or duplicate any subject outside the WHITE region.
+ 4. Aspect ratio must match SOURCE.${hasTagRef ? `
+ 5. The object painted inside WHITE MUST be recognizably the same specific object in TAG_ASSET.` : ""}
+
+Edit instruction (applies strictly inside the WHITE mask region):
+`
+            : "";
         }
 
         console.log("[Inpaint:refs-debug]", {
-          useNanoBanana,
-          hasMaskOverlay: !!maskOverlayUrl,
-          primaryAssetRef,
-          droppedRefsWhenMasked: maskOverlayUrl
-            ? {
-                extraAssetsDropped: assetRefUrls.slice(1),
-                moodRefUrls,
-                selectedRefs,
-                customRefUrls,
-              }
-            : null,
-          finalReferenceImageUrls: referenceImageUrls,
+          useROI,
+          roi,
+          nbSourceUrl,
+          nbRefUrls,
+          nbImageSize,
+          hasTagRef,
         });
 
-        // Gemini 가 SOURCE + TAG 를 직접 보고 PRESERVE + TAG_IDENTITY 블록을 생성하도록 두 이미지 base64 전달
         const tagImageBase64 = primaryAssetRef ? await urlToBase64(primaryAssetRef) : null;
         const rawEnrichedPrompt = await buildEnrichedPrompt(imageBase64, tagImageBase64 ?? undefined);
-        // ── NB2 mask-overlay prompt ───────────────────────────
-        // Reference image order passed to NB2 is (3장 구성):
-        //   [1] SOURCE      ← 원본 (서버에서 prepend) — 반드시 보존할 "캔버스"
-        //   [2] MASK_HINT   ← 원본 + 브러시 영역을 #FF00FF 로 칠한 합성 PNG
-        //   [3] TAG_ASSET   ← 바꿔서 그려 넣을 오브젝트의 정체성 (있을 때)
-        //
-        // 핵심 문제 2 개 타겟:
-        //   A. 원본 유지가 안 됨        → "픽셀 복사 → 마젠타만 교체" 를 여러 각도로 강제
-        //   B. 태그 이미지가 너무 강함 → TAG_ASSET 은 식별정보(shape/color/material)만,
-        //                                배경/조명/구도/시점/스케일은 절대 복제 금지
-        const hasTagRef = !!primaryAssetRef;
-        const maskPrefix = maskOverlayUrl
-          ? `CRITICAL INPAINTING TASK — read carefully before generating.
-
-Reference images (exact order):
-  [1] SOURCE     — the original scene. This is your canvas.
-  [2] MASK_HINT  — identical to SOURCE except the region that MUST be edited is painted pure magenta #FF00FF.${hasTagRef ? `
-  [3] TAG_ASSET  — a reference photo showing the identity of the object to place inside the magenta region.` : ""}
-
-Hard output rules — ALL must hold:
- 1. Your output MUST start from [1] SOURCE, pixel-for-pixel. Treat [1] as an immutable background layer.
- 2. Only the pixels inside the magenta region of [2] may change. Every other pixel of your output MUST be pixel-identical to [1] SOURCE — same composition, same crop, same camera angle, same aspect ratio, same lighting, same color grading, same subject poses and positions, same background, same other objects. Do NOT re-render, re-light, re-color, re-frame, re-pose, or re-paint any unmasked pixel.
- 3. Inside the magenta region, paint the requested content so it blends into SOURCE. The magenta color must NOT appear in the final output.
- 4. Do NOT move, resize, crop, or duplicate the subject. Do NOT add or remove any object outside the magenta region.${hasTagRef ? `
- 5. TAG_ASSET identity match (REQUIRED):
-    - The object you paint inside the magenta region MUST be recognizably the same specific object as in [3]. Match its exact shape, silhouette, proportions, materials, colors, surface finish, markings/logos/text, and all distinguishing attachments or details.
-    - A viewer familiar with [3] must immediately recognize the painted object as the same model/design. Do NOT produce a generic or "similar" version.
-    - Refer to the TAG_IDENTITY: block in the edit request below — every feature listed there must appear on the painted object.
-    - You MAY adapt only the object's viewing angle, lighting, and scale to match SOURCE naturally. Do NOT copy [3]'s background, surroundings, or photo framing into the output.` : ""}
-
-Self-check before emitting pixels:
- - If your planned output changes ANY unmasked pixel of SOURCE → STOP and restart from rule 1.${hasTagRef ? `
- - If your planned object would NOT be immediately recognizable as the specific object in [3] → STOP and restart from rule 5.
- - If your planned output copies [3]'s background or framing → STOP and restart from rule 5.` : ""}
-
-Edit request (applies ONLY inside the magenta region):
-`
-          : "";
         const enrichedPrompt = maskPrefix + rawEnrichedPrompt;
 
         const body: Record<string, any> = {
@@ -1235,29 +1708,31 @@ Edit request (applies ONLY inside the magenta region):
           imageBase64,
           maskBase64: maskB64,
           prompt: enrichedPrompt,
-          // NB2 가 실패했을 때만 GPT edits 로 폴백. 브러시 없을 때 GPT 로 억지로 돌리지 않음.
           forceGpt: false,
           projectId: sceneProjectId,
           sceneNumber,
-          imageSize, // ← 원본 비율 기반 계산값
-          referenceImageUrls,
+          imageSize: nbImageSize,
+          referenceImageUrls: nbRefUrls,
           useNanoBanana,
-          sourceImageUrl: sceneImageUrl,
+          sourceImageUrl: nbSourceUrl,
         };
         const { data, error } = await supabase.functions.invoke("openai-image", { body });
         if (error) throw new Error(error.message);
         if (data?.error) throw new Error(data.error?.message ?? "Inpainting failed");
-        console.log("[Inpaint] used model:", data.usedModel ?? "unknown", "| imageSize:", imageSize);
+        console.log("[Inpaint] used model:", data.usedModel ?? "unknown", "| imageSize:", nbImageSize);
         const generatedUrl = data.publicUrl;
         if (!generatedUrl) throw new Error("No image URL returned");
 
-        // ── 클라이언트 합성: 마스크 밖은 원본 픽셀로 강제 보존 ─────────
-        // NB2/Gemini 같은 generative 모델은 unmasked 영역도 다시 렌더하는 경향이 있어,
-        // 클라이언트에서 (원본) + (모델출력 ∩ soft mask) 로 합성해 보존 보장 + 자연스러운 경계.
+        /* ━━━ 클라이언트 합성: 마스크 밖 픽셀 원본 보존 보장 ━━━
+         * ROI 모드: 원본 + ROI 자리에 (gen ∩ soft mask) paste-back
+         * 전체 모드: 원본 + (gen ∩ soft mask)                        */
         let publicUrl = generatedUrl;
         if (!maskEmptyVal) {
           try {
-            const blob = await compositeInpaintResult(generatedUrl);
+            const blob =
+              useROI && roi
+                ? await compositeROIInpaintResult(generatedUrl, roi, icSnapshot, mcSnapshot)
+                : await compositeInpaintResult(generatedUrl, icSnapshot, mcSnapshot);
             if (blob) {
               const compositePath = `${sceneProjectId}/scene-${sceneNumber}-inpaint-composite-${Date.now()}.png`;
               const { error: upErr } = await supabase.storage
@@ -1265,7 +1740,7 @@ Edit request (applies ONLY inside the magenta region):
                 .upload(compositePath, blob, { upsert: true, contentType: "image/png" });
               if (!upErr) {
                 publicUrl = supabase.storage.from("contis").getPublicUrl(compositePath).data.publicUrl;
-                console.log("[Inpaint] client-composited (preserved unmasked pixels):", publicUrl);
+                console.log("[Inpaint] client-composited:", { useROI, url: publicUrl });
               } else {
                 console.warn("[Inpaint] composite upload failed, using raw model output:", upErr.message);
               }
@@ -1277,11 +1752,10 @@ Edit request (applies ONLY inside the magenta region):
 
         await supabase.from("scenes").update({ conti_image_url: publicUrl }).eq("id", sceneId);
         onSaveInpaint(publicUrl);
-        toast({ title: "Inpainting complete ✨" });
+        toast({ title: "Inpainting complete" });
       } catch (e: any) {
         toast({ title: "Inpainting failed", description: e.message, variant: "destructive" });
       } finally {
-        // stage 초기화 — 카드 스피너 해제
         onStageChange?.(sceneId, null);
         onEditGeneratingChange?.(sceneId, false);
       }
@@ -1371,7 +1845,7 @@ Edit request (applies ONLY inside the magenta region):
                   styleImageUrl,
                 });
                 onSaveInpaint(newUrl);
-                toast({ title: "Regeneration complete ✨" });
+                toast({ title: "Regeneration complete" });
               } catch (e: any) {
                 toast({ title: "Regeneration failed", description: e.message, variant: "destructive" });
               } finally {
@@ -1522,20 +1996,48 @@ Edit request (applies ONLY inside the magenta region):
                     <Eraser className="w-3.5 h-3.5" />
                   </button>
                   <div className="w-px h-4 bg-white/10 mx-1" />
+                  <span
+                    className="text-[10px] text-muted-foreground uppercase tracking-wide"
+                    title="Brush size (image-pixel radius)"
+                  >
+                    Size
+                  </span>
                   <input
                     type="range"
                     min={BRUSH_MIN}
                     max={BRUSH_MAX}
                     value={brushSize}
                     onChange={(e) => setBrushSize(Number(e.target.value))}
-                    className="w-20"
-                    title={`Brush radius: ${brushSize} px (image)`}
+                    className="w-16"
+                    title={`Brush radius: ${brushSize} px (image).  Shortcuts: [ and ]`}
                   />
                   <span
-                    className="text-[11px] text-muted-foreground w-10 text-right tabular-nums"
+                    className="text-[11px] text-muted-foreground w-9 text-right tabular-nums"
                     title="Image-pixel radius (resolution-independent)"
                   >
                     {brushSize}px
+                  </span>
+                  <div className="w-px h-4 bg-white/10 mx-1" />
+                  <span
+                    className="text-[10px] text-muted-foreground uppercase tracking-wide"
+                    title="Edit strength — lower = subtler edit, preserves more original"
+                  >
+                    Strength
+                  </span>
+                  <input
+                    type="range"
+                    min={STRENGTH_MIN}
+                    max={STRENGTH_MAX}
+                    value={brushStrength}
+                    onChange={(e) => setBrushStrength(Number(e.target.value))}
+                    className="w-16"
+                    title={`Edit strength: ${brushStrength}%.  Lower = preserves more original.  Shortcuts: Shift+[ and Shift+]`}
+                  />
+                  <span
+                    className="text-[11px] text-muted-foreground w-9 text-right tabular-nums"
+                    title="Lower strength = subtler edit, original structure preserved"
+                  >
+                    {brushStrength}%
                   </span>
                   <div className="w-px h-4 bg-white/10 mx-1" />
                   <button

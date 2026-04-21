@@ -1,6 +1,19 @@
 import { useState, useRef, memo, useEffect, useCallback } from "react";
 import type { GeneratingStage } from "@/lib/conti";
-import { Sparkles, Download, RefreshCw, GripVertical, Upload, History, RotateCcw, Move, X } from "lucide-react";
+import {
+  Sparkles,
+  Download,
+  RefreshCw,
+  GripVertical,
+  Upload,
+  History,
+  RotateCcw,
+  Move,
+  X,
+  Lightbulb,
+  Palette,
+  Images,
+} from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { KR, type Scene, type Asset } from "./contiTypes";
@@ -592,6 +605,9 @@ export const SortableContiCard = memo(
     onSelect,
     onSetThumbnail,
     onAdjustImage,
+    onUseAsStyle,
+    onRelight,
+    onCameraVariations,
     onTransitionTypeChange,
     displayNumber,
     showInfo,
@@ -627,6 +643,13 @@ export const SortableContiCard = memo(
     onSelect: (v: boolean) => void;
     onSetThumbnail?: () => void;
     onAdjustImage?: () => void;
+    /** 이 씬 이미지를 스타일 프리셋으로 등록한다. hasImage 일 때만 제공. */
+    onUseAsStyle?: () => void;
+    /** 조명 변경(Relight) 모달을 연다. hasImage 일 때만 제공. */
+    onRelight?: () => void;
+    /** 카메라 베리에이션 모달을 연다. hasImage 일 때만 제공.
+     *  씬 description + tagged_assets 를 reference 로 8 가지 카메라 앵글로 병렬 생성. */
+    onCameraVariations?: () => void;
     onTransitionTypeChange?: (scene: Scene, newType: string) => void;
     displayNumber?: number;
     showInfo?: boolean;
@@ -1282,6 +1305,76 @@ export const SortableContiCard = memo(
               </button>
             </div>
 
+            {/* Variants quick-access icons (Relight / Camera Variations / Use as Style) */}
+            {hasImage && (onRelight || onCameraVariations || onUseAsStyle) && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: 8,
+                  left: 8,
+                  zIndex: 5,
+                  display: "flex",
+                  gap: 4,
+                  opacity: imgHov ? 1 : 0,
+                  transition: "opacity 0.15s",
+                  pointerEvents: imgHov ? "auto" : "none",
+                }}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                {onRelight && (
+                  <button
+                    title="Relight"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRelight();
+                    }}
+                    className="flex items-center justify-center w-7 h-7 rounded-none text-white/90 hover:bg-white/20"
+                    style={{
+                      background: "rgba(0,0,0,0.55)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Lightbulb className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                {onCameraVariations && (
+                  <button
+                    title="Camera Variations"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCameraVariations();
+                    }}
+                    className="flex items-center justify-center w-7 h-7 rounded-none text-white/90 hover:bg-white/20"
+                    style={{
+                      background: "rgba(0,0,0,0.55)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Images className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                {onUseAsStyle && (
+                  <button
+                    title="Use as Style"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onUseAsStyle();
+                    }}
+                    className="flex items-center justify-center w-7 h-7 rounded-none text-white/90 hover:bg-white/20"
+                    style={{
+                      background: "rgba(0,0,0,0.55)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Palette className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Regenerate */}
             {hasImage && (
               <div
@@ -1351,6 +1444,30 @@ export const SortableContiCard = memo(
                     : undefined
                 }
                 onAdjustImage={scene.conti_image_url ? openAdjust : undefined}
+                onUseAsStyle={
+                  scene.conti_image_url && onUseAsStyle
+                    ? () => {
+                        setMenuOpen(false);
+                        onUseAsStyle();
+                      }
+                    : undefined
+                }
+                onRelight={
+                  scene.conti_image_url && onRelight
+                    ? () => {
+                        setMenuOpen(false);
+                        onRelight();
+                      }
+                    : undefined
+                }
+                onCameraVariations={
+                  scene.conti_image_url && onCameraVariations
+                    ? () => {
+                        setMenuOpen(false);
+                        onCameraVariations();
+                      }
+                    : undefined
+                }
               />
             </div>
           )}

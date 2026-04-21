@@ -1,5 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Copy, Trash2, Columns2, Upload, Paintbrush, X, ImageIcon, Crop } from "lucide-react";
+import {
+  Copy,
+  Trash2,
+  Columns2,
+  Upload,
+  Paintbrush,
+  X,
+  ImageIcon,
+  Crop,
+  Palette,
+  Lightbulb,
+  Sparkles,
+  ChevronRight,
+  Move3d,
+  Images,
+} from "lucide-react";
 import { KR, KR_BG, ACFG, ASSET_ICON, type Asset } from "./contiTypes";
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1036,6 +1051,26 @@ export const DescriptionField = ({
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // SidePanel
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+/* SidePanel 내부 타입: 단일 항목 / 구분선(null) / 확장형 그룹 */
+type SidePanelLeaf = {
+  kind: "leaf";
+  icon: React.ReactNode;
+  label: string;
+  fn: () => void;
+  danger: boolean;
+  disabled?: boolean;
+  /** 비활성 항목에 우측에 표시할 부가 라벨 (e.g. "Coming soon") */
+  hint?: string;
+};
+type SidePanelGroup = {
+  kind: "group";
+  id: string;
+  icon: React.ReactNode;
+  label: string;
+  children: SidePanelLeaf[];
+};
+type SidePanelEntry = SidePanelLeaf | SidePanelGroup | null;
+
 export const SidePanel = ({
   hasImage,
   openLeft,
@@ -1048,6 +1083,9 @@ export const SidePanel = ({
   onInpaint,
   onSetThumbnail,
   onAdjustImage,
+  onUseAsStyle,
+  onRelight,
+  onCameraVariations,
 }: {
   hasImage: boolean;
   openLeft: boolean;
@@ -1060,29 +1098,182 @@ export const SidePanel = ({
   onInpaint: () => void;
   onSetThumbnail?: () => void;
   onAdjustImage?: () => void;
+  /** 씬 이미지를 스타일 프리셋으로 등록. hasImage 일 때만 활성. */
+  onUseAsStyle?: () => void;
+  /** Relight 모달 열기. hasImage 일 때만 활성. */
+  onRelight?: () => void;
+  /** Camera Variations 모달 열기. hasImage 일 때만 활성.
+   *  씬 description + tagged_assets 로 다양한 카메라 앵글 이미지를 병렬 생성. */
+  onCameraVariations?: () => void;
 }) => {
-  const [hovIdx, setHovIdx] = useState(-1);
-  const items: ({ icon: React.ReactNode; label: string; fn: () => void; danger: boolean } | null)[] = [
-    { icon: <Copy className="w-3.5 h-3.5" />, label: "Duplicate scene", fn: onDuplicate, danger: false },
+  const [hovKey, setHovKey] = useState<string>("");
+  // Variants 그룹 기본 접힘
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  const variantsChildren: SidePanelLeaf[] = [];
+  if (hasImage && onRelight)
+    variantsChildren.push({
+      kind: "leaf",
+      icon: <Lightbulb className="w-3.5 h-3.5" />,
+      label: "Relight",
+      fn: onRelight,
+      danger: false,
+    });
+  if (hasImage && onCameraVariations)
+    variantsChildren.push({
+      kind: "leaf",
+      icon: <Images className="w-3.5 h-3.5" />,
+      label: "Camera Variations",
+      fn: onCameraVariations,
+      danger: false,
+    });
+  if (hasImage)
+    variantsChildren.push({
+      kind: "leaf",
+      icon: <Move3d className="w-3.5 h-3.5" />,
+      label: "Change Angle",
+      fn: () => {},
+      danger: false,
+      disabled: true,
+      hint: "Coming soon",
+    });
+  if (hasImage && onUseAsStyle)
+    variantsChildren.push({
+      kind: "leaf",
+      icon: <Palette className="w-3.5 h-3.5" />,
+      label: "Use as Style",
+      fn: onUseAsStyle,
+      danger: false,
+    });
+
+  const entries: SidePanelEntry[] = [
+    { kind: "leaf", icon: <Copy className="w-3.5 h-3.5" />, label: "Duplicate scene", fn: onDuplicate, danger: false },
     ...(hasMultipleVersions
-      ? [{ icon: <Columns2 className="w-3.5 h-3.5" />, label: "Compare versions", fn: onCompare, danger: false }]
+      ? [
+          {
+            kind: "leaf" as const,
+            icon: <Columns2 className="w-3.5 h-3.5" />,
+            label: "Compare versions",
+            fn: onCompare,
+            danger: false,
+          },
+        ]
       : []),
     ...(hasImage
-      ? [{ icon: <Paintbrush className="w-3.5 h-3.5" />, label: "Inpaint", fn: onInpaint, danger: false }]
+      ? [
+          {
+            kind: "leaf" as const,
+            icon: <Paintbrush className="w-3.5 h-3.5" />,
+            label: "Inpaint",
+            fn: onInpaint,
+            danger: false,
+          },
+        ]
       : []),
     ...(hasImage && onSetThumbnail
-      ? [{ icon: <ImageIcon className="w-3.5 h-3.5" />, label: "Set as Thumbnail", fn: onSetThumbnail, danger: false }]
+      ? [
+          {
+            kind: "leaf" as const,
+            icon: <ImageIcon className="w-3.5 h-3.5" />,
+            label: "Set as Thumbnail",
+            fn: onSetThumbnail,
+            danger: false,
+          },
+        ]
       : []),
     ...(hasImage && onAdjustImage
-      ? [{ icon: <Crop className="w-3.5 h-3.5" />, label: "Adjust Image", fn: onAdjustImage, danger: false }]
+      ? [
+          {
+            kind: "leaf" as const,
+            icon: <Crop className="w-3.5 h-3.5" />,
+            label: "Adjust Image",
+            fn: onAdjustImage,
+            danger: false,
+          },
+        ]
+      : []),
+    // Variants 서브메뉴 — hasImage + 최소 한 개의 AI 액션 핸들러가 있을 때만 노출
+    ...(hasImage && variantsChildren.length > 0
+      ? [
+          {
+            kind: "group" as const,
+            id: "variants",
+            icon: <Sparkles className="w-3.5 h-3.5" />,
+            label: "Variants",
+            children: variantsChildren,
+          },
+        ]
       : []),
     null,
-    { icon: <Upload className="w-3.5 h-3.5" />, label: "Upload Image", fn: onUpload, danger: false },
+    { kind: "leaf", icon: <Upload className="w-3.5 h-3.5" />, label: "Upload Image", fn: onUpload, danger: false },
     ...(hasImage
-      ? [{ icon: <X className="w-3.5 h-3.5" />, label: "Delete image", fn: onDeleteImage, danger: true } as const]
+      ? [
+          {
+            kind: "leaf" as const,
+            icon: <X className="w-3.5 h-3.5" />,
+            label: "Delete image",
+            fn: onDeleteImage,
+            danger: true,
+          },
+        ]
       : []),
-    { icon: <Trash2 className="w-3.5 h-3.5" />, label: "Delete scene", fn: onDelete, danger: true },
+    { kind: "leaf", icon: <Trash2 className="w-3.5 h-3.5" />, label: "Delete scene", fn: onDelete, danger: true },
   ];
+
+  const renderLeaf = (item: SidePanelLeaf, key: string, indent = 0) => (
+    <button
+      key={key}
+      onMouseEnter={() => !item.disabled && setHovKey(key)}
+      onMouseLeave={() => setHovKey("")}
+      disabled={item.disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!item.disabled) item.fn();
+      }}
+      style={{
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: `8px 14px 8px ${14 + indent}px`,
+        fontSize: 12,
+        cursor: item.disabled ? "default" : "pointer",
+        border: "none",
+        textAlign: "left",
+        fontFamily: "inherit",
+        background:
+          !item.disabled && hovKey === key
+            ? item.danger
+              ? "rgba(220,38,38,0.12)"
+              : "rgba(255,255,255,0.06)"
+            : "transparent",
+        color: item.disabled
+          ? "rgba(255,255,255,0.35)"
+          : item.danger
+            ? "#f87171"
+            : "rgba(255,255,255,0.85)",
+        transition: "background 0.1s",
+      }}
+    >
+      <span
+        style={{
+          color: item.disabled
+            ? "rgba(255,255,255,0.25)"
+            : item.danger
+              ? "#f87171"
+              : "rgba(255,255,255,0.4)",
+          display: "flex",
+        }}
+      >
+        {item.icon}
+      </span>
+      <span style={{ flex: 1 }}>{item.label}</span>
+      {item.hint ? (
+        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 0.3 }}>{item.hint}</span>
+      ) : null}
+    </button>
+  );
+
   return (
     <div
       style={{
@@ -1093,44 +1284,59 @@ export const SidePanel = ({
         background: "#1c1c1c",
         border: "1px solid rgba(255,255,255,0.08)",
         borderRadius: 0,
-        minWidth: 168,
+        minWidth: 184,
         overflow: "hidden",
         boxShadow: "0 8px 28px rgba(0,0,0,0.5)",
       }}
     >
-      {items.map((item, i) => {
-        if (!item) return <div key={i} style={{ height: 1, background: "rgba(255,255,255,0.06)", margin: "2px 0" }} />;
+      {entries.map((entry, i) => {
+        if (!entry)
+          return <div key={`sep-${i}`} style={{ height: 1, background: "rgba(255,255,255,0.06)", margin: "2px 0" }} />;
+        if (entry.kind === "leaf") return renderLeaf(entry, `leaf-${i}`);
+        const key = `group-${entry.id}`;
+        const isOpen = !!expanded[entry.id];
         return (
-          <button
-            key={i}
-            onMouseEnter={() => setHovIdx(i)}
-            onMouseLeave={() => setHovIdx(-1)}
-            onClick={(e) => {
-              e.stopPropagation();
-              item.fn();
-            }}
-            style={{
-              width: "100%",
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "8px 14px",
-              fontSize: 12,
-              cursor: "pointer",
-              border: "none",
-              textAlign: "left",
-              fontFamily: "inherit",
-              background:
-                hovIdx === i ? (item.danger ? "rgba(220,38,38,0.12)" : "rgba(255,255,255,0.06)") : "transparent",
-              color: item.danger ? "#f87171" : "rgba(255,255,255,0.85)",
-              transition: "background 0.1s",
-            }}
-          >
-            <span style={{ color: item.danger ? "#f87171" : "rgba(255,255,255,0.4)", display: "flex" }}>
-              {item.icon}
-            </span>
-            {item.label}
-          </button>
+          <div key={key}>
+            <button
+              onMouseEnter={() => setHovKey(key)}
+              onMouseLeave={() => setHovKey("")}
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded((m) => ({ ...m, [entry.id]: !m[entry.id] }));
+              }}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "8px 14px",
+                fontSize: 12,
+                cursor: "pointer",
+                border: "none",
+                textAlign: "left",
+                fontFamily: "inherit",
+                background: hovKey === key ? "rgba(255,255,255,0.06)" : "transparent",
+                color: "rgba(255,255,255,0.85)",
+                transition: "background 0.1s",
+              }}
+            >
+              <span style={{ color: "rgba(255,255,255,0.4)", display: "flex" }}>{entry.icon}</span>
+              <span style={{ flex: 1 }}>{entry.label}</span>
+              <ChevronRight
+                className="w-3 h-3"
+                style={{
+                  color: "rgba(255,255,255,0.35)",
+                  transition: "transform 0.12s",
+                  transform: isOpen ? "rotate(90deg)" : "none",
+                }}
+              />
+            </button>
+            {isOpen && (
+              <div style={{ background: "rgba(255,255,255,0.02)" }}>
+                {entry.children.map((c, j) => renderLeaf(c, `${key}-child-${j}`, 18))}
+              </div>
+            )}
+          </div>
         );
       })}
     </div>
