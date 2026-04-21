@@ -12,7 +12,6 @@ const common = {
 
 async function run() {
   await build({ ...common, entryPoints: ["electron/main.ts"] });
-  await build({ ...common, entryPoints: ["electron/preload.ts"] });
   console.log("[electron-build] Build done.");
 }
 

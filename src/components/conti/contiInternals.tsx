@@ -449,8 +449,7 @@ export const LocationField = ({
                 {a.photo_url ? (
                   <img
                     src={a.photo_url}
-                    style={{ width: 24, height: 16, objectFit: "cover", borderRadius: 0, flexShrink: 0 }}
-                  />
+                    style={{ width: 24, height: 16, objectFit: "cover", borderRadius: 0, flexShrink: 0 }} loading="lazy" decoding="async" />
                 ) : (
                   <div style={{ width: 24, height: 16, borderRadius: 0, background: cfg.bg, flexShrink: 0 }} />
                 )}
@@ -923,7 +922,7 @@ export const DescriptionField = ({
                 onMouseMove={() => setSelectedIdx(idx)}
               >
                 {asset.photo_url ? (
-                  <img src={asset.photo_url} className="w-6 h-6 rounded-none object-cover shrink-0" />
+                  <img src={asset.photo_url} className="w-6 h-6 rounded-none object-cover shrink-0" loading="lazy" decoding="async" />
                 ) : (
                   <div
                     className="w-6 h-6 rounded-none flex items-center justify-center shrink-0"

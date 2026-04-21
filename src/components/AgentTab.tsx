@@ -4,17 +4,14 @@ import { supabase } from "@/lib/supabase";
 import { callClaude } from "@/lib/claude";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
-import ReactMarkdown from "react-markdown";
 import {
   Plus,
   Clapperboard,
-  Loader2,
   Send,
   Lightbulb,
   X,
   Check,
   ImagePlus,
-  Sparkles,
   RotateCcw,
   Image,
   ImageOff,
@@ -54,10 +51,8 @@ import {
   type ParsedScene,
   type FocalPoint,
   type RightPanel,
-  briefFieldToString,
   formatTime,
   fileToBase64,
-  loadFocalMap,
   toMoodImages,
   extractScenesFromText,
   resolveAsset,
@@ -72,951 +67,27 @@ import {
   subscribeChatGen,
   parseMessageSegments,
   remapMessageForHistory,
-  type MessageSegment,
   ACFG,
   ASSET_ICON,
 } from "./agent/agentTypes";
-import { KNOWLEDGE_SCENE_DESIGN, KNOWLEDGE_GENRE_CONVENTIONS } from "@/lib/directorKnowledgeBase";
-import { buildHookExecutionGuide } from "@/lib/hookLibrary";
 import { MoodIdeationPanel } from "./agent/MoodIdeationPanel";
 import AgentAbcdPanel from "./agent/AgentAbcdPanel";
 import {
   SortableSceneCard,
   EditablePendingSceneCard,
-  TagChip,
-  MentionDropdown,
   AgentInlineField,
 } from "./agent/AgentSceneCards";
 import { ConfirmScenesModal, SendToContiModal, LoadVersionModal } from "./agent/AgentModals";
-
-// ── System prompt & constants ──
-
-const FORMAT_CONTEXT: Record<string, string> = {
-  vertical: "세로형(9:16) 영상. 모바일 퍼스트 플랫폼.",
-  horizontal: "가로형(16:9) 영상. TV/Youtube.",
-  square: "정방형(1:1) 영상. SNS 플랫폼.",
-};
-const LANG_DIRECTIVE_KO = `CRITICAL LANGUAGE RULE — KOREAN OUTPUT (한국어)
-ALL output text MUST be in Korean. This applies to EVERY field in EVERY block:
-- scene block: title, description, camera_angle, location, mood — ALL Korean
-- strategy block: ALL Korean
-- storylines block: title, synopsis, mood — ALL Korean
-- conversational chat messages: Korean
-
-The knowledge base above defines cinematic terms in English (ECU, BCU, CU, MS, LS, VLS, OTS, POV, Eye Level, Low Angle, High Angle, Push In, Pull Out, Dolly, Pan, Tilt, Crane, Whip Pan, etc.).
-You MUST translate them to Korean cinematic vocabulary in EVERY output field. The English acronym may follow ONLY in parentheses.
-- ECU → 익스트림 클로즈업(ECU)
-- BCU → 빅 클로즈업(BCU)
-- CU → 클로즈업(CU)
-- MCU → 미디엄 클로즈업(MCU)
-- MS → 미디엄 숏(MS)
-- MLS → 미디엄 롱 숏(MLS)
-- LS → 롱 숏(LS)
-- VLS / ELS → 베리 롱 숏(VLS) / 익스트림 롱 숏(ELS)
-- OTS → 오버 더 숄더(OTS)
-- POV → 주관적 시점(POV)
-- Eye Level → 아이 레벨
-- Low Angle → 로우 앵글
-- High Angle → 하이 앵글
-- Bird's Eye → 버즈 아이
-- Dutch Angle → 더치 앵글
-- Push In → 푸시 인
-- Pull Out → 풀 아웃
-- Dolly → 달리
-- Pan / Tilt → 팬 / 틸트
-- Crane / Jib → 크레인 / 집
-- Whip Pan → 휩 팬
-- Static → 고정 숏
-
-ONLY exceptions: proper nouns, asset @tag_name, brand names.
-DO NOT write camera_angle in pure English.
-  ✓ GOOD: "camera_angle": "베리 롱 숏(VLS), 아이 레벨, 슬로우 푸시 인"
-  ✓ GOOD: "camera_angle": "미디엄 숏 → 클로즈업, 로우 앵글, 슬로우 달리"
-  ✗ BAD:  "camera_angle": "Very long shot with slow push in"
-  ✗ BAD:  "camera_angle": "MS / Eye Level / Static"
-DO NOT write location in pure English.
-  ✓ GOOD: "location": "전술 무기고 내부"
-  ✗ BAD:  "location": "Tactical armory"
-DO NOT write mood in pure English.
-  ✓ GOOD: "mood": "긴장감, 차가운 청록 톤, 미니멀"
-  ✗ BAD:  "mood": "Tense, cool teal tones, minimal"
-DO NOT prefix description with a camera header like "VLS / Eye Level / Slow Push In —". Camera info belongs ONLY in camera_angle.
-
-`;
-
-const LANG_DIRECTIVE_EN = `CRITICAL LANGUAGE RULE — ENGLISH OUTPUT
-ALL output text MUST be in English. This applies to EVERY field in EVERY block:
-- scene block: title, description, camera_angle, location, mood — ALL English
-- strategy block: ALL English
-- storylines block: title, synopsis, mood — ALL English
-- conversational chat messages: English
-DO NOT use Korean in any field. ONLY exception: asset @tag_name (kept as registered).
-  ✓ GOOD: "title": "First Light", "description": "Wide establishing shot of rooftop...", "camera_angle": "Extreme wide, low angle, slow dolly-in", "location": "Urban rooftop at sunrise", "mood": "Hopeful, golden warmth, cinematic"
-  ✗ BAD:  Any Korean characters (가-힣) in any field.
-
-`;
-
-const SYSTEM_PROMPT_BASE = `당신은 'Agent'입니다. 광고 영상 기획 전문가이자 칸 광고제 수상 경력의 Creative Director입니다.
-
-[역할]
-1인 영상 프로듀서를 위한 시나리오 개발을 돕는 AI 에이전트 디렉터입니다.
-
-[디렉터 행동 원칙]
-1. 모호한 피드백 → 2~3가지 해석안 제시 후 확인
-2. 스토리에 불리한 요청 → 디렉터 관점 우려 먼저 표명
-3. 씬 확정/수정 시 자동 검수 (요소 전환, Hook→CTA 곡선, 씬 수 적절성, 30% 숏사이즈 변화 등)
-4. 좋은 아이디어는 디렉터 관점 포인트 1~2개 추가 제안
-5. 씬 간 감정 곡선의 기복과 에너지 전환 관리 (숨고르기 씬 필수)
-
-[씬 필드 역할 분리 — 절대 중복 금지]
-- description: 화면 안에서 "무엇이 일어나는지" — 인물 행동, 표정, 감정, 시각적 디테일, 사운드/카피 큐. **카메라(숏사이즈/앵글/무빙) 표기는 절대 넣지 말 것.** 절대 "MS / Eye Level / Static —" 같은 카메라 헤더 prefix를 붙이지 말 것.
-- camera_angle: 카메라 전용 필드. 숏사이즈 + 앵글 + 무빙을 한 문장으로.
-- location: 장소만.
-- mood: 감정/색감 키워드만.
-같은 정보를 두 필드에 동시에 쓰지 말 것.
-
-${KNOWLEDGE_SCENE_DESIGN}
-
-${KNOWLEDGE_GENRE_CONVENTIONS}
-
-PHASE 1 — 시놉시스 제안
-\`\`\`storylines
-[{ "id": "A", "title": "안 제목", "synopsis": "3~4문장 시놉시스", "mood": "키워드1, 키워드2, 키워드3" }]
-\`\`\`
-
-[storylines 필수 규칙 — 반드시 준수]
-- 본문 텍스트에서 "X안"으로 언급하는 모든 안은 반드시 같은 응답의 storylines 블록에 해당 id가 존재해야 한다. 예: "A안"을 언급하면 블록에 id:"A"가 있어야 한다.
-- storylines 블록에 없는 id를 텍스트에서 절대 언급하지 말 것. 블록에 A, B만 있으면 텍스트에서 C안, D안 등을 절대 쓰지 말 것.
-- 추가 안을 제안할 때도 storylines 블록의 id와 텍스트의 안 번호를 반드시 일치시킬 것. 이전 대화에서 A~C를 제안했고 새로운 안을 추가한다면, 새 블록의 id를 "D", "E"로 하고 텍스트에서도 D안, E안으로 언급할 것.
-- 이미 storylines를 제시한 대화에서 사용자가 명시적으로 재제안을 요청하지 않는 한, 후속 응답에서 storylines 블록을 재생성하지 말 것.
-- [중요] 이전 응답 전체에 걸쳐 등장한 모든 storylines 블록의 id를 누적적으로 기억할 것. 예: 첫 응답에서 A,B,C를 제시하고 두번째 응답에서 D,E,F를 추가했다면, 현재 유효한 안은 A,B,C,D,E,F 여섯 개다. 사용자가 그중 어떤 id를 선택해도(예: "D안 ... 선택합니다"), 절대 "그런 id는 없다"고 답하지 말고, 가장 최근에 그 id를 정의한 storylines 블록의 내용을 기준으로 곧바로 다음 단계(전략/씬 디벨롭)로 진행할 것.
-
-PHASE 2 — 씬 디벨롭
-\`\`\`strategy
-목표/타겟/USP/톤앤매너/핵심전략
-\`\`\`
-
-\`\`\`scene
-{ "scene_number": 1, "title": "", "description": "", "camera_angle": "", "location": "", "mood": "", "duration_sec": 8, "tagged_assets": [] }
-\`\`\`
-
-[Phase 2 전환 필수 규칙 — 절대 준수]
-- 사용자가 storylines 중 하나를 선택했다는 신호(예: "A안 ... 선택합니다", "이 안으로 진행", "1번으로 갈게요", "pick A", "go with option B")를 보내면 **반드시 같은 응답 안에 \`\`\`strategy 블록 1개 + \`\`\`scene 블록 여러 개를 포함**해서 응답할 것. 대화형 평문(prose)으로만 씬을 설명하고 code fence 를 생략하는 것은 금지이다.
-- scene 블록은 반드시 **각 씬마다 별도의 \`\`\`scene 펜스**로 감싸고, 내부는 유효한 JSON 이어야 한다. 하나의 펜스에 여러 씬을 배열로 묶지 말 것.
-- 씬 개수는 이 응답 앞쪽의 [페이싱 규칙] 의 scene_count.recommended 를 우선 기준으로 하되, min~max 범위 안에서만 조절한다. 사용자가 다른 숫자를 명시하지 않은 한 recommended 값을 선택한다.
-- Phase 2 진입 시 storylines 블록을 다시 출력하지 말 것. (사용자가 "다른 안 추가 제안" 같이 명시적으로 요청한 경우에만 재생성)
-- scene_number 는 1 부터 오름차순 정수, 중복 없이.
-- 씬 응답이 길어지더라도 \`\`\`scene 블록은 반드시 JSON 으로만 채우고 그 안에 주석·설명 문장을 넣지 말 것. 부가 설명은 블록 밖에 쓸 것.
-
-[duration_sec 규칙]
-- 반드시 모든 씬에 duration_sec을 숫자로 제안할 것
-- 포맷별 권 imgs: vertical(9:16) 씬당 5~10초 / horizontal(16:9) 씬당 8~15초 / square(1:1) 씬당 5~10초
-- 전체 합산이 광고 길이(보통 15초·30초·60초)에 맞도록 배분할 것
-- Hook 씬은 짧게(3~5초), CTA 씬은 여유있게(5~8초) 배분 권 imgs
-
-[tagged_assets 규칙 — MANDATORY]
-- 프로젝트에 등록된 에셋 라이브러리가 하나라도 존재하면, 모든 씬은 **기본적으로 등록된 에셋을 최우선 활용**한다.
-- 사용자가 "새 캐릭터/장소/소품을 만들어" 같이 **명시적**으로 새 에셋 창작을 요청하지 않는 한, 등록된 캐릭터·장소·소품 외의 새 인물/공간을 임의로 등장시키지 말 것.
-- description·location·mood 자연어 안에 등록 에셋이 등장할 때마다 반드시 해당 @tag_name을 그대로 표기할 것 (예: "@민준이 카메라를 든 채 거리를 걷는다").
-- 각 씬의 tagged_assets 배열에는 그 씬에서 등장한 모든 등록 태그를 **중복 없이 전부 포함**할 것. 등장했는데 배열에서 빠뜨리는 것은 오류다.
-- 등록되지 않은 임의의 태그는 **절대 사용 금지**. tagged_assets에는 오직 라이브러리에 있는 tag_name만 올릴 수 있다.
-- 캐릭터 에셋이 1개 이상 등록되어 있다면, 스토리보드 전체에서 해당 캐릭터들을 **주요 등장인물로 기본 설정**할 것 (사용자의 다른 지시가 없는 한).
-- 해당 씬에 등장하는 등록 에셋이 하나도 없을 때만 tagged_assets: [].`;
-
-// 매 user 메시지 직전에 LLM 에게 재주지시키는 에셋 활용 체크리스트.
-// 시스템 프롬프트의 [tagged_assets 규칙] 과 별개로, 사용자 입력 바로 앞에 붙여서
-// LLM 순응도를 최대화한다. (chat UI / DB 에는 저장하지 않고 API payload 에만 prepend)
-const buildAssetUsageReminder = (assets: Asset[], lang: "ko" | "en" = "ko"): string => {
-  if (!assets?.length) return "";
-  const toTag = (a: Asset) => (a.tag_name.startsWith("@") ? a.tag_name : `@${a.tag_name}`);
-  const chars = assets.filter((a) => !a.asset_type || a.asset_type === "character");
-  const items = assets.filter((a) => a.asset_type === "item");
-  const bgs = assets.filter((a) => a.asset_type === "background");
-  const sections: string[] = [];
-  if (chars.length) sections.push(`캐릭터(${chars.length}): ${chars.map(toTag).join(", ")}`);
-  if (items.length) sections.push(`소품(${items.length}): ${items.map(toTag).join(", ")}`);
-  if (bgs.length) sections.push(`배경(${bgs.length}): ${bgs.map(toTag).join(", ")}`);
-  if (!sections.length) return "";
-  if (lang === "en") {
-    return [
-      "[ASSET USAGE CHECKLIST — MUST FOLLOW]",
-      ...sections,
-      "1) Use registered assets as the default choice when drafting or revising scenes.",
-      "2) Do NOT introduce new characters/locations/props unless the user explicitly asks you to.",
-      "3) Whenever a registered asset appears in description/location, spell its @tag_name exactly.",
-      "4) Every scene's tagged_assets array MUST include ALL registered tags that appear in that scene.",
-      "5) Never invent tags that are not in the registered list above.",
-      "",
-    ].join("\n");
-  }
-  return [
-    "[에셋 활용 체크리스트 — 반드시 지킬 것]",
-    ...sections,
-    "1) 드래프트/수정 응답에서 위 등록 에셋을 기본값으로 최우선 활용한다.",
-    "2) 사용자가 명시적으로 '새로 만들어'라고 요청하지 않는 한, 새 인물/장소/소품을 임의로 등장시키지 않는다.",
-    "3) description·location에 등록 에셋이 등장할 때는 반드시 해당 @tag_name 을 정확히 표기한다.",
-    "4) 각 씬의 tagged_assets 배열에는 그 씬에서 등장한 등록 태그를 전부 포함한다.",
-    "5) 등록되지 않은 임의의 태그는 절대 쓰지 않는다.",
-    "",
-  ].join("\n");
-};
-
-const buildCharacterContext = (assets: Asset[]): string => {
-  if (!assets?.length) return "";
-  const chars = assets.filter((a) => !a.asset_type || a.asset_type === "character");
-  const items = assets.filter((a) => a.asset_type === "item");
-  const bgs = assets.filter((a) => a.asset_type === "background");
-  const secs: string[] = [];
-  if (chars.length)
-    secs.push(
-      `[캐릭터]\n${chars.map((a) => `- ${a.tag_name}: ${a.ai_description ?? "no description"}${a.role_description ? ` / 역할: ${a.role_description}` : ""}`).join("\n")}`,
-    );
-  if (items.length)
-    secs.push(`[소품]\n${items.map((a) => `- ${a.tag_name}: ${a.ai_description ?? "no description"}`).join("\n")}`);
-  if (bgs.length)
-    secs.push(`[배경]\n${bgs.map((a) => `- ${a.tag_name}: ${a.ai_description ?? "no description"}`).join("\n")}`);
-  return secs.length ? `\n\n[에셋 라이브러리]\n${secs.join("\n\n")}` : "";
-};
-
-// ── v2 brief 필드 컨텍스트 빌더 ──
-// BriefAnalysis v2 의 product_info / hero_visual / hook_strategy / pacing / constraints
-// 를 시스템 프롬프트에 주입해서 스토리보드 드래프트 단계부터 광고 연출 규칙이 지켜지도록 한다.
-const buildV2BriefContext = (a: Analysis): string => {
-  const blocks: string[] = [];
-
-  if (a.content_type) {
-    const conf = typeof a.classification_confidence === "number" ? ` (신뢰도 ${Math.round(a.classification_confidence * 100)}%)` : "";
-    blocks.push(`[콘텐츠 타입] ${a.content_type}${conf}${a.classification_reasoning ? ` — ${a.classification_reasoning}` : ""}`);
-  }
-
-  if (a.product_info) {
-    const p = a.product_info;
-    const urg = p.urgency?.type && p.urgency.type !== "none" ? ` / 긴박감(${p.urgency.type}): ${p.urgency.description ?? ""}` : "";
-    blocks.push(
-      [
-        `[상품/이벤트 정보]`,
-        `- what: ${p.what}`,
-        `- 핵심 혜택: ${p.key_benefit}${urg}`,
-        `- CTA 목적지: ${p.cta_destination}`,
-        `- CTA 문구: "${p.cta_action}"`,
-      ].join("\n"),
-    );
-  }
-
-  if (a.hero_visual) {
-    const h = a.hero_visual;
-    const must = Array.isArray(h.must_show) && h.must_show.length ? h.must_show.join(", ") : "(없음)";
-    blocks.push(
-      [
-        `[비주얼 히어로 — 씬 설계 시 필수 반영]`,
-        `- must_show (반드시 노출): ${must}`,
-        `- 첫 프레임 시각: ${h.first_frame}`,
-        `- 브랜드 노출 타이밍: ${h.brand_reveal_timing} / 제품 노출 타이밍: ${h.product_reveal_timing}`,
-        `- 로고 배치: ${h.logo_placement}`,
-      ].join("\n"),
-    );
-  }
-
-  if (a.hook_strategy) {
-    const hs = a.hook_strategy;
-    const alts = hs.alternatives?.length ? hs.alternatives.join(", ") : "(없음)";
-    blocks.push(
-      [
-        `[훅 전략]`,
-        `- primary: ${hs.primary} / 대안: ${alts}`,
-        hs.first_3s_description ? `- 첫 3초 의도: ${hs.first_3s_description}` : "",
-        `- pattern_interrupt: ${hs.pattern_interrupt ? "포함" : "미포함"}`,
-        "",
-        buildHookExecutionGuide(hs.primary),
-      ].filter(Boolean).join("\n"),
-    );
-  }
-
-  if (a.pacing) {
-    const pc = a.pacing;
-    blocks.push(
-      [
-        `[페이싱 규칙 — 씬 수/편집 리듬 준수]`,
-        `- 포맷 ${pc.format} · 길이 ${pc.duration}`,
-        `- 씬 수: ${pc.scene_count.recommended} (범위 ${pc.scene_count.min}~${pc.scene_count.max})`,
-        `- 편집 리듬: ${pc.edit_rhythm}`,
-        `- 무성 시청 가능: ${pc.silent_viewable ? "YES (자막 필수)" : "NO"}${pc.captions_required ? " / captions_required: true" : ""}`,
-      ].join("\n"),
-    );
-  }
-
-  if (a.audience_insight && (a.audience_insight.pain_point || a.audience_insight.motivation)) {
-    blocks.push(
-      [
-        `[타겟 인사이트]`,
-        a.audience_insight.pain_point ? `- 페인 포인트: ${a.audience_insight.pain_point}` : "",
-        a.audience_insight.motivation ? `- 동기: ${a.audience_insight.motivation}` : "",
-      ].filter(Boolean).join("\n"),
-    );
-  }
-
-  if (a.constraints) {
-    const c = a.constraints;
-    const avoid = c.avoid?.length ? c.avoid.map((v) => `- ${v}`).join("\n") : "";
-    const brand = c.brand_guidelines?.length ? c.brand_guidelines.map((v) => `- ${v}`).join("\n") : "";
-    const plat = c.platform_policies?.length ? c.platform_policies.map((v) => `- ${v}`).join("\n") : "";
-    const parts: string[] = [`[제약 조건 — 절대 위반 금지]`];
-    if (avoid) parts.push(`avoid (네거티브 프롬프트 소스):\n${avoid}`);
-    if (brand) parts.push(`브랜드 가이드라인:\n${brand}`);
-    if (plat) parts.push(`플랫폼 정책:\n${plat}`);
-    if (parts.length > 1) blocks.push(parts.join("\n"));
-  }
-
-  if (a.narrative && a.content_type === "brand_film") {
-    const n = a.narrative;
-    const beats = n.emotional_beats?.length
-      ? n.emotional_beats.map((b) => `  - [${b.timestamp}] ${b.emotion} (강도 ${b.intensity})`).join("\n")
-      : "";
-    blocks.push(
-      [
-        `[브랜드 필름 서사 구조]`,
-        `- controlling_idea: ${n.controlling_idea}`,
-        `- story_structure: ${n.story_structure}`,
-        `- protagonist: ${n.protagonist?.identity} / 욕망 ${n.protagonist?.desire} / 변화 ${n.protagonist?.transformation}`,
-        beats ? `- emotional_beats:\n${beats}` : "",
-      ].filter(Boolean).join("\n"),
-    );
-  }
-
-  return blocks.join("\n\n");
-};
-
-// ✅ [FIX] buildSystemPrompt — goal/target/usp/tone_manner 핵심 필드 주입 추가
-const buildSystemPrompt = (vf: string, assets?: Asset[], analysis?: Analysis | null, lang: "ko" | "en" = "ko") => {
-  const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
-  const charCtx = assets ? buildCharacterContext(assets) : "";
-  const parts: string[] = [];
-
-  // ✅ 핵심 브리프 필드 주입 (goal/target/usp/tone_manner)
-  if (analysis) {
-    const lines = [
-      briefFieldToString(analysis.goal) && `목표: ${briefFieldToString(analysis.goal)}`,
-      briefFieldToString(analysis.target) && `타겟: ${briefFieldToString(analysis.target)}`,
-      briefFieldToString(analysis.usp) && `USP: ${briefFieldToString(analysis.usp)}`,
-      briefFieldToString(analysis.tone_manner) && `톤앤매너: ${briefFieldToString(analysis.tone_manner)}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
-    if (lines) parts.push(`[브리프 핵심]\n${lines}`);
-  }
-
-  // v2 필드 주입 (content_type / product_info / hero_visual / hook_strategy / pacing / constraints / narrative)
-  if (analysis) {
-    const v2 = buildV2BriefContext(analysis);
-    if (v2) parts.push(v2);
-  }
-
-  if (analysis?.idea_note) parts.push(`[아이디어 메모]\n${analysis.idea_note}`);
-  if (analysis?.image_analysis) parts.push(`[레퍼런스 이미지 분석]\n${analysis.image_analysis}`);
-  if (analysis?.creative_gap?.recommendation) parts.push(`[디렉터 방향성]\n${analysis.creative_gap.recommendation}`);
-  const ideaCtx = parts.length ? "\n\n" + parts.join("\n\n") : "";
-  return `${langDirective}${SYSTEM_PROMPT_BASE}${charCtx}${ideaCtx}\n\n[영상 포맷]\n${FORMAT_CONTEXT[vf] ?? FORMAT_CONTEXT.vertical}`;
-};
-
-const buildBriefContextString = (a: Analysis): string => {
-  const lines = [
-    `목표: ${briefFieldToString(a.goal)}`,
-    `타겟: ${briefFieldToString(a.target)}`,
-    `USP: ${briefFieldToString(a.usp)}`,
-    `톤앤매너: ${briefFieldToString(a.tone_manner)}`,
-  ];
-  if (a.idea_note) lines.push(`\n아이디어 메모: ${a.idea_note}`);
-  if (a.creative_gap?.recommendation) lines.push(`디렉터 추천: ${a.creative_gap.recommendation}`);
-  if (a.image_analysis) lines.push(`레퍼런스 이미지: ${a.image_analysis}`);
-  const v2 = buildV2BriefContext(a);
-  if (v2) lines.push("", v2);
-  return lines.join("\n");
-};
-
-const WELCOME_NO_BRIEF = `Hi, I'm Agent.\nNo brief analysis found — you can describe your project directly.\nWhat kind of video are you planning?`;
-
-type StorylineOption = { id: string; title: string; synopsis: string; mood?: string };
-const isBriefAnalysisMsg = (content: string) =>
-  content.startsWith("[브리프 분석 결과]") || content.startsWith("[Brief Analysis]");
-
-// ── Sub-components used in chat ──
-
-const StorylinesCard = ({ options, onSelect }: { options: StorylineOption[]; onSelect: (text: string) => void }) => {
-  return (
-    <div className="my-2 space-y-2">
-      {options.map((opt, i) => {
-        const label = opt.id || String.fromCharCode(65 + i);
-        return (
-        <div
-          key={opt.id ?? i}
-          className="border overflow-hidden"
-          style={{ borderRadius: 0, borderColor: "rgba(255,255,255,0.07)", background: "hsl(var(--elevated))" }}
-        >
-          <div
-            className="flex items-center gap-2 px-3 py-2"
-            style={{ background: "rgba(249,66,58,0.06)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}
-          >
-            <span
-              className="text-[10px] font-bold w-5 h-5 flex items-center justify-center text-white shrink-0"
-              style={{ background: KR, borderRadius: 0 }}
-            >
-              {label}
-            </span>
-            <span className="text-[14px] font-bold uppercase tracking-wide text-foreground flex-1">{opt.title}</span>
-            {opt.mood && (
-              <span className="font-mono text-[11px] text-muted-foreground/50 shrink-0 uppercase">{opt.mood}</span>
-            )}
-          </div>
-          <div className="px-3 py-2.5">
-            <p className="text-[14px] text-muted-foreground leading-relaxed">{opt.synopsis}</p>
-            <button
-              onClick={() => onSelect(`${label}안 "${opt.title}" 선택합니다.`)}
-              className="mt-2.5 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider px-3 py-1.5 transition-opacity hover:opacity-80"
-              style={{
-                background: "rgba(249,66,58,0.1)",
-                color: KR,
-                border: `1px solid rgba(249,66,58,0.2)`,
-                borderRadius: 0,
-              }}
-            >
-              SELECT →
-            </button>
-          </div>
-        </div>
-        );
-      })}
-    </div>
-  );
-};
-
-const StrategyCard = ({ content }: { content: string }) => {
-  const lines = content
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  return (
-    <div
-      className="my-2 border overflow-hidden text-left"
-      style={{ borderRadius: 0, borderColor: "rgba(255,255,255,0.07)", background: "hsl(var(--elevated))" }}
-    >
-      <div
-        className="flex items-center gap-2 px-3 py-2"
-        style={{ background: "rgba(249,66,58,0.06)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}
-      >
-        <Lightbulb className="w-3.5 h-3.5 shrink-0" style={{ color: KR }} />
-        <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: KR }}>
-          STRATEGY
-        </span>
-      </div>
-      <div className="px-3 py-1">
-        {lines.map((line, i) => {
-          const ai = line.indexOf("→");
-          const st = i < lines.length - 1 ? { borderBottom: "1px solid rgba(255,255,255,0.04)" } : {};
-          if (ai !== -1)
-            return (
-              <div key={i} className="py-2 text-[13px] leading-relaxed" style={st}>
-                <span className="block label-meta text-muted-foreground mb-0.5">{line.slice(0, ai).trim()}</span>
-                <span className="text-foreground/80">{line.slice(ai + 1).trim()}</span>
-              </div>
-            );
-          return (
-            <div key={i} className="py-2 text-[13px] leading-relaxed text-foreground/60" style={st}>
-              {line}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
-
-const BRIEF_PREFIX = "[브리프 분석 결과]";
-const CONTENT_TYPE_META: Record<string, { ko: string; color: string }> = {
-  product_launch: { ko: "상품 런칭", color: "#f59e0b" },
-  event: { ko: "이벤트", color: "#8b5cf6" },
-  update: { ko: "업데이트", color: "#06b6d4" },
-  community: { ko: "커뮤니티", color: "#10b981" },
-  brand_film: { ko: "브랜드 필름", color: "#f9423a" },
-};
-const HOOK_LABEL_KO: Record<string, string> = {
-  gameplay_first: "게임플레이 우선",
-  fail_solve: "실패→해결",
-  power_fantasy: "파워 판타지",
-  unboxing_reveal: "언박싱 공개",
-  before_after: "전/후 비교",
-  mystery_tease: "미스터리 티저",
-  testimonial: "증언",
-  pattern_interrupt: "패턴 인터럽트",
-};
-const BriefAnalysisCard = ({ content }: { content: string }) => {
-  const raw = content
-    .replace(/^\[브리프 분석 결과\]\s*/i, "")
-    .replace(/^\[Brief Analysis\]\s*/i, "");
-
-  // label: value (공백 필수) — "9:16" 같이 공백 없는 콜론은 label로 해석되지 않음
-  const extract = (label: string): string | null => {
-    const esc = label.replace(/([.*+?^=!:${}()|[\]\\])/g, "\\$1");
-    const re = new RegExp(`^${esc}:\\s+(.+)$`, "m");
-    const m = raw.match(re);
-    return m ? m[1].trim() : null;
-  };
-
-  const goal = extract("목표");
-  const target = extract("타겟");
-  const usp = extract("USP");
-  const tone = extract("톤앤매너");
-  const ideaNote = extract("아이디어 메모");
-  const directorRec = extract("디렉터 추천");
-
-  const ctMatch = raw.match(/\[콘텐츠 타입\]\s*(\w+)(?:\s*\(신뢰도\s*(\d+)%\))?/);
-  const contentType = ctMatch?.[1];
-  const contentTypeConf = ctMatch?.[2];
-  const contentTypeMeta = contentType ? CONTENT_TYPE_META[contentType] : null;
-  const contentTypeLabel = contentTypeMeta?.ko ?? contentType ?? null;
-  const contentTypeColor = contentTypeMeta?.color ?? KR;
-
-  const formatMatch = raw.match(/-\s*포맷\s+(\S+)\s*·\s*길이\s+(\S+)/);
-  const format = formatMatch?.[1];
-  const duration = formatMatch?.[2];
-
-  const sceneMatch = raw.match(/-\s*씬 수:\s*(\d+)(?:\s*\(범위\s*(\d+)~(\d+)\))?/);
-  const scenesRec = sceneMatch?.[1];
-
-  const hookMatch = raw.match(/-\s*primary:\s*(\w+)/);
-  const hook = hookMatch?.[1];
-  const hookLabel = hook ? (HOOK_LABEL_KO[hook] ?? hook) : null;
-
-  // 끝에 붙어 있는 자유 서술 (예: "이 브리프를 바탕으로 ...") 을 추출
-  const blocks = raw.split(/\n\n+/);
-  const lastBlock = blocks[blocks.length - 1]?.trim() ?? "";
-  const isStructured =
-    lastBlock.startsWith("[") ||
-    lastBlock.startsWith("- ") ||
-    /^[A-Za-z가-힣 ]+:\s/.test(lastBlock);
-  const requestText = !isStructured && lastBlock.length > 0 ? lastBlock : null;
-
-  const coreFields = [
-    { key: "목표", value: goal, color: "#f9423a" },
-    { key: "타겟", value: target, color: "#6366f1" },
-    { key: "USP", value: usp, color: "#d97706" },
-    { key: "톤앤매너", value: tone, color: "#059669" },
-  ].filter((f) => f.value);
-
-  const metaPills: { label: string; value: string }[] = [];
-  if (format) metaPills.push({ label: "포맷", value: duration ? `${format} · ${duration}` : format });
-  if (scenesRec) metaPills.push({ label: "씬", value: `${scenesRec}개` });
-  if (hookLabel) metaPills.push({ label: "훅", value: hookLabel });
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <Sparkles size={13} style={{ color: KR }} />
-          <span style={{ fontSize: 11, fontWeight: 700, color: KR, letterSpacing: "0.01em" }}>Brief Analysis</span>
-        </div>
-        {contentTypeLabel && (
-          <span
-            style={{
-              fontSize: 10,
-              fontWeight: 700,
-              padding: "2px 8px",
-              background: `${contentTypeColor}22`,
-              color: contentTypeColor,
-              border: `1px solid ${contentTypeColor}55`,
-              letterSpacing: "0.03em",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {contentTypeLabel}
-            {contentTypeConf && <span style={{ marginLeft: 4 }}>· {contentTypeConf}%</span>}
-          </span>
-        )}
-      </div>
-
-      {/* Core 4-field grid */}
-      {coreFields.length > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-          {coreFields.map((f) => (
-            <div
-              key={f.key}
-              style={{
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(255,255,255,0.06)",
-                padding: "7px 10px",
-                display: "flex",
-                flexDirection: "column",
-                gap: 3,
-                minHeight: 56,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: f.color,
-                  letterSpacing: "0.05em",
-                  textTransform: "uppercase" as const,
-                }}
-              >
-                {f.key}
-              </div>
-              <div style={{ fontSize: 12.5, color: "hsl(var(--foreground))", lineHeight: 1.45, opacity: 0.9 }}>
-                {f.value}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Meta line: format · scenes · hook */}
-      {metaPills.length > 0 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "center",
-            gap: 10,
-            background: "rgba(255,255,255,0.02)",
-            border: "1px solid rgba(255,255,255,0.05)",
-            padding: "6px 10px",
-          }}
-        >
-          {metaPills.map((p, i) => (
-            <span key={p.label} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              {i > 0 && <span style={{ color: "rgba(255,255,255,0.12)" }}>·</span>}
-              <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", opacity: 0.7, letterSpacing: "0.04em", textTransform: "uppercase" as const }}>
-                {p.label}
-              </span>
-              <span style={{ fontSize: 11.5, color: "hsl(var(--foreground))", fontWeight: 600 }}>{p.value}</span>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Notes (idea + director rec combined) */}
-      {(ideaNote || directorRec) && (
-        <div
-          style={{
-            padding: "7px 10px",
-            background: "rgba(255,255,255,0.02)",
-            borderLeft: "2px solid rgba(249,66,58,0.4)",
-            display: "flex",
-            flexDirection: "column",
-            gap: 4,
-          }}
-        >
-          {ideaNote && (
-            <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", lineHeight: 1.5 }}>
-              <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", opacity: 0.55, marginRight: 6, textTransform: "uppercase" as const }}>
-                아이디어
-              </span>
-              {ideaNote}
-            </div>
-          )}
-          {directorRec && (
-            <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", lineHeight: 1.5 }}>
-              <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", opacity: 0.55, marginRight: 6, textTransform: "uppercase" as const }}>
-                디렉터
-              </span>
-              {directorRec}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Trailing request text (e.g. "이 브리프를 바탕으로 ...") */}
-      {requestText && (
-        <div
-          style={{
-            fontSize: 12.5,
-            color: "hsl(var(--muted-foreground))",
-            marginTop: 2,
-            fontStyle: "italic",
-            opacity: 0.65,
-            lineHeight: 1.5,
-          }}
-        >
-          {requestText}
-        </div>
-      )}
-    </div>
-  );
-};
-
-const MessageContent = ({
-  content,
-  assets,
-  onSend,
-  segments: preSegments,
-}: {
-  content: string;
-  assets: Asset[];
-  onSend?: (text: string) => void;
-  segments?: MessageSegment[];
-}) => {
-  if (isBriefAnalysisMsg(content)) return <BriefAnalysisCard content={content} />;
-  const segments = preSegments ?? parseMessageSegments(content);
-  const renderWithTags = (text: string): React.ReactNode =>
-    text.split(/(@[\w가-힣]+)/g).map((p, i) => {
-      if (/^@[\w가-힣]+$/.test(p)) {
-        const resolved = resolveAsset(p, assets);
-        if (resolved)
-          return <TagChip key={i} name={resolved.name} assetType={resolved.asset.asset_type || "character"} />;
-      }
-      return <span key={i}>{p}</span>;
-    });
-  return (
-    <div>
-      {segments.map((seg, i) => {
-        if (seg.type === "strategy") return <StrategyCard key={i} content={seg.content} />;
-        if (seg.type === "storylines")
-          return <StorylinesCard key={i} options={seg.options} onSelect={(t) => onSend?.(t)} />;
-        if (seg.type === "scene") return null;
-        return (
-          <ReactMarkdown
-            key={i}
-            components={{
-              h1: ({ children }) => (
-                <h1 className="text-[17px] font-bold text-foreground mt-3 mb-1.5 first:mt-0">{children}</h1>
-              ),
-              h2: ({ children }) => (
-                <h2 className="text-[16px] font-bold text-foreground mt-3 mb-1 first:mt-0">{children}</h2>
-              ),
-              h3: ({ children }) => (
-                <h3 className="text-[15px] font-semibold text-foreground mt-2.5 mb-1 first:mt-0">{children}</h3>
-              ),
-              code: ({ children }) => (
-                <code className="bg-background/50 px-1 py-0.5 rounded-none text-[13px] font-mono text-muted-foreground">
-                  {children}
-                </code>
-              ),
-              strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
-              p: ({ children }) => {
-                if (typeof children === "string")
-                  return (
-                    <p className="text-[14.5px] leading-[1.7] mb-1.5 last:mb-0 text-foreground/85">
-                      {renderWithTags(children)}
-                    </p>
-                  );
-                const processed = React.Children.map(children, (child) =>
-                  typeof child === "string" ? <>{renderWithTags(child)}</> : child,
-                );
-                return <p className="text-[14.5px] leading-[1.7] mb-1.5 last:mb-0 text-foreground/85">{processed}</p>;
-              },
-              ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
-              ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
-              li: ({ children }) => <li className="text-[14px] leading-[1.65] text-foreground/80">{children}</li>,
-              hr: () => <hr className="border-border/30 my-2.5" />,
-              blockquote: ({ children }) => (
-                <blockquote
-                  className="border-l-2 pl-3 my-2 text-[14px] text-muted-foreground italic"
-                  style={{ borderColor: KR }}
-                >
-                  {children}
-                </blockquote>
-              ),
-            }}
-          >
-            {seg.content}
-          </ReactMarkdown>
-        );
-      })}
-    </div>
-  );
-};
-
-// ── AgentChatInput ──
-
-const AgentChatInput = ({
-  assets,
-  projectId,
-  disabled,
-  hasImages,
-  onSend,
-  onAttach,
-}: {
-  assets: Asset[];
-  projectId: string;
-  disabled: boolean;
-  hasImages: boolean;
-  onSend: (text: string) => void;
-  onAttach: () => void;
-}) => {
-  const [text, setText] = useState("");
-  const [mentionState, setMentionState] = useState<{ query: string; startIdx: number } | null>(null);
-  const [selIdx, setSelIdx] = useState(-1);
-  const taRef = useRef<HTMLTextAreaElement>(null);
-  const focalMap = useMemo(() => loadFocalMap(projectId), [projectId]);
-  useEffect(() => {
-    setSelIdx(-1);
-  }, [mentionState?.query]);
-  const suggestions = mentionState
-    ? assets
-        .filter((a) => a.tag_name.replace(/^@/, "").toLowerCase().includes(mentionState.query.toLowerCase()))
-        .slice(0, 8)
-    : [];
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const v = e.target.value,
-      pos = e.target.selectionStart ?? v.length;
-    const m = v.slice(0, pos).match(/@([\w가-힣]*)$/);
-    setMentionState(m ? { query: m[1], startIdx: pos - m[0].length } : null);
-    setText(v);
-    e.target.style.height = "auto";
-    e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
-  };
-  const insertMention = (asset: Asset) => {
-    if (!mentionState || !taRef.current) return;
-    const ta = taRef.current;
-    const name = asset.tag_name.startsWith("@") ? asset.tag_name.slice(1) : asset.tag_name;
-    const before = text.slice(0, mentionState.startIdx);
-    const after = text.slice(ta.selectionStart ?? mentionState.startIdx);
-    const newVal = `${before}@${name} ${after}`;
-    setText(newVal);
-    setMentionState(null);
-    setSelIdx(-1);
-    const newPos = before.length + name.length + 2;
-    requestAnimationFrame(() => {
-      ta.focus();
-      ta.setSelectionRange(newPos, newPos);
-      ta.style.height = "auto";
-      ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
-    });
-  };
-  const submit = () => {
-    const t = text.trim();
-    if (!t || disabled) return;
-    onSend(t);
-    setText("");
-    if (taRef.current) taRef.current.style.height = "auto";
-  };
-  return (
-    <div style={{ position: "relative", display: "flex", alignItems: "flex-end", gap: 6 }}>
-      <textarea
-        ref={taRef}
-        value={text}
-        onChange={handleChange}
-        disabled={disabled}
-        rows={1}
-        placeholder="Type a message... (@tag characters)"
-        className="placeholder:text-muted-foreground/35"
-        onKeyDown={(e) => {
-          if (suggestions.length > 0) {
-            if (e.key === "ArrowDown") {
-              e.preventDefault();
-              setSelIdx((p) => (p + 1) % suggestions.length);
-              return;
-            }
-            if (e.key === "ArrowUp") {
-              e.preventDefault();
-              setSelIdx((p) => (p - 1 + suggestions.length) % suggestions.length);
-              return;
-            }
-            if (e.key === "Enter" && selIdx >= 0) {
-              e.preventDefault();
-              insertMention(suggestions[selIdx]);
-              return;
-            }
-          }
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-        style={{
-          flex: 1,
-          resize: "none",
-          outline: "none",
-          overflow: "hidden",
-          background: "hsl(var(--muted))",
-          color: "hsl(var(--foreground))",
-          border: "1.5px solid hsl(var(--border))",
-          borderRadius: 0,
-          padding: "7px 12px",
-          fontSize: 13,
-          lineHeight: 1.5,
-          fontFamily: "inherit",
-          transition: "border-color 0.15s",
-          minHeight: 36,
-          maxHeight: 120,
-          boxSizing: "border-box",
-        }}
-        onFocus={(e) => {
-          e.currentTarget.style.borderColor = KR;
-        }}
-        onBlur={(e) => {
-          e.currentTarget.style.borderColor = "hsl(var(--border))";
-        }}
-      />
-      <button
-        onClick={submit}
-        disabled={disabled || !text.trim()}
-        style={{
-          width: 36,
-          height: 36,
-          borderRadius: 0,
-          flexShrink: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: text.trim() && !disabled ? KR : "hsl(var(--muted))",
-          border: "1.5px solid transparent",
-          color: text.trim() && !disabled ? "#fff" : "hsl(var(--muted-foreground))",
-          cursor: text.trim() && !disabled ? "pointer" : "default",
-          transition: "all 0.15s",
-          boxSizing: "border-box",
-          padding: 0,
-        }}
-      >
-        {disabled ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-      </button>
-      <button
-        onClick={onAttach}
-        title="Attach images (max 4)"
-        style={{
-          width: 36,
-          height: 36,
-          borderRadius: 0,
-          flexShrink: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: hasImages ? "rgba(249,66,58,0.14)" : "hsl(var(--muted))",
-          border: `1.5px solid ${hasImages ? "rgba(249,66,58,0.28)" : "hsl(var(--border))"}`,
-          color: hasImages ? KR : "hsl(var(--muted-foreground))",
-          cursor: "pointer",
-          transition: "all 0.15s",
-          boxSizing: "border-box",
-          padding: 0,
-        }}
-        onMouseEnter={(e) => {
-          if (!hasImages) {
-            (e.currentTarget as HTMLElement).style.background = "hsl(var(--accent))";
-            (e.currentTarget as HTMLElement).style.color = "hsl(var(--foreground))";
-          }
-        }}
-        onMouseLeave={(e) => {
-          if (!hasImages) {
-            (e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))";
-            (e.currentTarget as HTMLElement).style.color = "hsl(var(--muted-foreground))";
-          }
-        }}
-      >
-        <ImagePlus className="w-4 h-4" />
-      </button>
-      {suggestions.length > 0 && (
-        <MentionDropdown
-          suggestions={suggestions}
-          selIdx={selIdx}
-          onSelect={insertMention}
-          onHover={setSelIdx}
-          focalMap={focalMap}
-          upward
-        />
-      )}
-    </div>
-  );
-};
+import {
+  buildAssetUsageReminder,
+  buildSystemPrompt,
+  buildBriefContextString,
+  WELCOME_NO_BRIEF,
+  isBriefAnalysisMsg,
+} from "./agent/prompts";
+import { MessageContent } from "./agent/MessageContent";
+import { AgentChatInput } from "./agent/AgentChatInput";
+import { EmptyState } from "@/components/ui/empty-state";
 
 // ══════════════════════════════════════════════════════════
 //   MAIN — AgentTab
@@ -1046,6 +117,10 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
 
   const [cardHeights, setCardHeights] = useState<Record<string, number>>({});
   const [showImages, setShowImages] = useState(true);
+  const handlePendingUpdate = useCallback((updated: ParsedScene) => {
+    setPendingScenes((prev) => prev.map((p) => (p.scene_number === updated.scene_number ? updated : p)));
+  }, []);
+
   const handleContentHeight = useCallback((id: string, h: number) => {
     setCardHeights((prev) => {
       if (prev[id] === h) return prev;
@@ -2099,7 +1174,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
                   {msg.role === "user" && msg.created_at && sessionImageMap.get(msg.created_at)?.length ? (
                     <div className="flex flex-wrap gap-1.5 mb-1.5 justify-end">
                       {sessionImageMap.get(msg.created_at)!.map((url, j) => (
-                        <img key={j} src={url} className="h-16 w-16 object-cover rounded-none border border-border" />
+                        <img key={j} src={url} className="h-16 w-16 object-cover rounded-none border border-border" loading="lazy" decoding="async" />
                       ))}
                     </div>
                   ) : null}
@@ -2147,8 +1222,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
               <img
                 src={img.preview}
                 className="rounded-none object-cover border border-border"
-                style={{ width: 52, height: 52 }}
-              />
+                style={{ width: 52, height: 52 }} loading="lazy" decoding="async" />
               <div className="absolute inset-0 rounded-none bg-black/0 group-hover:bg-black/30 transition-colors" />
               <button
                 onClick={() => setChatImages((prev) => prev.filter((_, j) => j !== i))}
@@ -2488,9 +1562,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
                       scene={s}
                       assets={projectAssets}
                       projectId={projectId}
-                      onUpdate={(updated) =>
-                        setPendingScenes((prev) => prev.map((p) => (p.scene_number === s.scene_number ? updated : p)))
-                      }
+                      onUpdate={handlePendingUpdate}
                     />
                   ))}
                 </div>
@@ -2506,11 +1578,12 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
               </div>
             )}
             {!scenes.length && !pendingScenes.length ? (
-              <div className="flex flex-col items-center justify-center h-full min-h-[300px]">
-                <Clapperboard className="w-10 h-10 text-border mb-3" />
-                <p className="text-sm text-muted-foreground">No scenes yet</p>
-                <p className="text-xs text-muted-foreground/60 mt-1">Chat with Agent to start building scenes</p>
-              </div>
+              <EmptyState
+                icon={<Clapperboard className="w-10 h-10" />}
+                title="No scenes yet"
+                description="Chat with Agent to start building scenes"
+                className="h-full"
+              />
             ) : scenes.length > 0 ? (
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                 <SortableContext items={scenes.map((s) => s.id)} strategy={verticalListSortingStrategy}>
@@ -2585,11 +1658,11 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
                       >
                         <SortableSceneCard
                           scene={scene}
-                          onDelete={(id) => setDeleteConfirmId(id)}
+                          onDelete={setDeleteConfirmId}
                           onUpdate={handleSceneUpdate}
                           onClearImage={handleClearSceneImage}
                           assets={projectAssets}
-                          onLightboxMood={(url) => setMoodLightboxUrl(url)}
+                          onLightboxMood={setMoodLightboxUrl}
                           videoFormat={videoFormat}
                           sharedHeight={sharedHeight}
                           onContentHeight={handleContentHeight}
@@ -2794,8 +1867,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
             src={moodLightboxUrl}
             alt="mood"
             style={{ maxWidth: "90vw", maxHeight: "90vh", objectFit: "contain", borderRadius: 0 }}
-            onClick={(e) => e.stopPropagation()}
-          />
+            onClick={(e) => e.stopPropagation()} loading="lazy" decoding="async" />
         </div>
       )}
     </>

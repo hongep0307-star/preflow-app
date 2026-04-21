@@ -135,8 +135,7 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
                   objectPosition: crop ? `${crop.x}% ${crop.y}%` : "center",
                   transform: crop && crop.scale > 1 ? `scale(${crop.scale})` : undefined,
                   transformOrigin: crop ? `${crop.x}% ${crop.y}%` : undefined,
-                }}
-              />
+                }} decoding="async" />
               <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center">
                 <Crop className="w-4 h-4 text-white/80" />
               </div>

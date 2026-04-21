@@ -188,4 +188,16 @@ function createTables() {
       value TEXT
     )
   `);
+
+  // Indexes — every read path filters by project_id; chat history orders by
+  // created_at; scenes are sorted by scene_number per project. Keeping the
+  // indexes here is idempotent (CREATE INDEX IF NOT EXISTS).
+  d.exec(`
+    CREATE INDEX IF NOT EXISTS idx_briefs_project_id        ON briefs(project_id);
+    CREATE INDEX IF NOT EXISTS idx_scenes_project_number    ON scenes(project_id, scene_number);
+    CREATE INDEX IF NOT EXISTS idx_assets_project_id        ON assets(project_id);
+    CREATE INDEX IF NOT EXISTS idx_scene_versions_project   ON scene_versions(project_id);
+    CREATE INDEX IF NOT EXISTS idx_chat_logs_project_time   ON chat_logs(project_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_projects_folder_id       ON projects(folder_id);
+  `);
 }

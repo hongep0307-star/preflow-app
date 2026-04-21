@@ -30,7 +30,7 @@ export const StyleTransferConfirmModal = ({
           {/* Preset style info */}
           <div className="flex w-full items-center gap-3 p-3 rounded-none border border-border bg-background">
             {styleThumb ? (
-              <img src={styleThumb} className="w-16 h-10 object-cover shrink-0" style={{ borderRadius: 0 }} />
+              <img src={styleThumb} className="w-16 h-10 object-cover shrink-0" style={{ borderRadius: 0 }} loading="lazy" decoding="async" />
             ) : (
               <div className="w-16 h-10 bg-muted shrink-0 flex items-center justify-center" style={{ borderRadius: 0 }}>
                 <Palette className="w-4 h-4 text-muted-foreground" />

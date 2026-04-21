@@ -19,7 +19,7 @@ import {
 } from "./agentTypes";
 
 /* ━━━━━ TagChip ━━━━━ */
-export const TagChip = ({ name, assetType }: { name: string; assetType: string }) => {
+export const TagChip = React.memo(({ name, assetType }: { name: string; assetType: string }) => {
   const cfg = ACFG[assetType] || ACFG.character;
   const ico = ASSET_ICON[assetType] || ASSET_ICON.character;
   return (
@@ -61,10 +61,11 @@ export const TagChip = ({ name, assetType }: { name: string; assetType: string }
       {name}
     </span>
   );
-};
+});
+TagChip.displayName = "TagChip";
 
 /* ━━━━━ MentionDropdown ━━━━━ */
-export const MentionDropdown = ({
+export const MentionDropdown = React.memo(function MentionDropdown({
   suggestions,
   selIdx,
   onSelect,
@@ -78,7 +79,7 @@ export const MentionDropdown = ({
   onHover: (i: number) => void;
   focalMap?: Record<string, FocalPoint>;
   upward?: boolean;
-}) => {
+}) {
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   useEffect(() => {
@@ -198,7 +199,7 @@ export const MentionDropdown = ({
       })}
     </div>
   );
-};
+});
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    AgentInlineField
@@ -874,7 +875,7 @@ export const AgentMetaRows = ({
 };
 
 /* ━━━━━ EditablePendingSceneCard ━━━━━ */
-export const EditablePendingSceneCard = ({
+export const EditablePendingSceneCard = React.memo(function EditablePendingSceneCard({
   scene,
   assets,
   projectId = "",
@@ -884,7 +885,7 @@ export const EditablePendingSceneCard = ({
   assets: Asset[];
   projectId?: string;
   onUpdate: (u: ParsedScene) => void;
-}) => {
+}) {
   const [local, setLocal] = useState<ParsedScene>({ ...scene });
   useEffect(() => setLocal({ ...scene }), [scene]);
   const assetMap = buildAssetMap(assets);
@@ -954,10 +955,10 @@ export const EditablePendingSceneCard = ({
       </div>
     </div>
   );
-};
+});
 
 /* ━━━━━ SortableSceneCard ━━━━━ */
-export const SortableSceneCard = ({
+export const SortableSceneCard = React.memo(function SortableSceneCard({
   scene,
   onDelete,
   onUpdate,
@@ -988,7 +989,7 @@ export const SortableSceneCard = ({
   ) => void;
   /** 패널 폭 대비 이미지 컬럼 최대 폭(px). 미지정 시 제한 없음. */
   maxImgWidth?: number;
-}) => {
+}) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: scene.id });
   const [moodHovered, setMoodHovered] = useState(false);
   const [dropOver, setDropOver] = useState(false);
@@ -1104,8 +1105,7 @@ export const SortableSceneCard = ({
                 height: "100%",
                 objectFit: "cover",
                 display: "block",
-              }}
-            />
+              }} decoding="async" />
           ) : (
             <div
               style={{
@@ -1340,4 +1340,4 @@ export const SortableSceneCard = ({
       </div>
     </div>
   );
-};
+});

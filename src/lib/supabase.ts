@@ -3,11 +3,10 @@
  * running in the Electron main process.
  */
 
-const LOCAL_PORT = 19876;
+import { LOCAL_SERVER_BASE_URL } from "@shared/constants";
 
 async function localPost(endpoint: string, body: any = {}) {
-  const port = LOCAL_PORT;
-  const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
+  const res = await fetch(`${LOCAL_SERVER_BASE_URL}${endpoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -21,21 +20,30 @@ async function localPost(endpoint: string, body: any = {}) {
 
 type FilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "like" | "in";
 
-interface QueryBuilder {
-  select: (columns?: string) => QueryBuilder;
-  insert: (data: any | any[]) => QueryBuilder;
-  update: (data: any) => QueryBuilder;
-  delete: () => QueryBuilder;
-  upsert: (data: any | any[], opts?: { onConflict?: string }) => QueryBuilder;
-  eq: (column: string, value: any) => QueryBuilder;
-  neq: (column: string, value: any) => QueryBuilder;
-  in: (column: string, values: any[]) => QueryBuilder;
-  or: (filter: string) => QueryBuilder;
-  order: (column: string, opts?: { ascending?: boolean }) => QueryBuilder;
-  limit: (count: number) => QueryBuilder;
-  single: () => Promise<{ data: any; error: any }>;
-  maybeSingle: () => Promise<{ data: any; error: any }>;
-  then: (resolve: (value: { data: any; error: any }) => void) => Promise<void>;
+export type SupabaseResult<T = any> = { data: T; error: { message: string } | null };
+
+interface QueryBuilder<T = any> extends PromiseLike<SupabaseResult<T>> {
+  select: (columns?: string) => QueryBuilder<T>;
+  insert: (data: any | any[]) => QueryBuilder<T>;
+  update: (data: any) => QueryBuilder<T>;
+  delete: () => QueryBuilder<T>;
+  upsert: (data: any | any[], opts?: { onConflict?: string }) => QueryBuilder<T>;
+  eq: (column: string, value: any) => QueryBuilder<T>;
+  neq: (column: string, value: any) => QueryBuilder<T>;
+  in: (column: string, values: any[]) => QueryBuilder<T>;
+  or: (filter: string) => QueryBuilder<T>;
+  order: (column: string, opts?: { ascending?: boolean }) => QueryBuilder<T>;
+  limit: (count: number) => QueryBuilder<T>;
+  single: () => Promise<SupabaseResult<T>>;
+  maybeSingle: () => Promise<SupabaseResult<T>>;
+  // Promise/A+ thenable: must accept both onFulfilled/onRejected and return a Promise
+  // of the mapped value. 이전 시그니처(onResolve 1개만)는 await 시 reject 누락 위험.
+  then: <TResult1 = SupabaseResult<T>, TResult2 = never>(
+    onFulfilled?:
+      | ((value: SupabaseResult<T>) => TResult1 | PromiseLike<TResult1>)
+      | null,
+    onRejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null,
+  ) => Promise<TResult1 | TResult2>;
 }
 
 function createQueryBuilder(table: string): QueryBuilder {
@@ -86,7 +94,7 @@ function createQueryBuilder(table: string): QueryBuilder {
         return result;
       });
     },
-    then(resolve) { return execute().then(resolve); },
+    then(onFulfilled, onRejected) { return execute().then(onFulfilled as any, onRejected as any); },
   };
 
   async function execute(): Promise<{ data: any; error: any }> {
@@ -196,7 +204,7 @@ function createStorageBucket(bucket: string) {
       return localPost("/storage/upload", { bucket, filePath, data: b64, contentType: options?.contentType });
     },
     getPublicUrl(filePath: string) {
-      return { data: { publicUrl: `http://127.0.0.1:${LOCAL_PORT}/storage/file/${bucket}/${filePath}` } };
+      return { data: { publicUrl: `${LOCAL_SERVER_BASE_URL}/storage/file/${bucket}/${filePath}` } };
     },
     async remove(filePaths: string[]) {
       return localPost("/storage/remove", { bucket, filePaths });
@@ -211,7 +219,7 @@ function createStorageBucket(bucket: string) {
 const functionsAdapter = {
   async invoke(functionName: string, options: { body: any }) {
     try {
-      const res = await fetch(`http://127.0.0.1:${LOCAL_PORT}/api/${functionName}`, {
+      const res = await fetch(`${LOCAL_SERVER_BASE_URL}/api/${functionName}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(options.body),

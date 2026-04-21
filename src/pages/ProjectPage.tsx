@@ -4,6 +4,7 @@ import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
 import { Clapperboard, Calendar, X, Check, Loader2, FileDown } from "lucide-react";
 import { ProjectSidebar, TabId } from "@/components/ProjectSidebar";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { VideoFormat } from "@/lib/conti";
 
@@ -93,6 +94,33 @@ const ProjectPage = () => {
     return () => document.removeEventListener("mousedown", handler);
   }, [editingField]);
 
+  // ── Keyboard shortcuts ──────────────────────────────────────────
+  // Cmd/Ctrl+1..4 to jump between the four project tabs. Order matches the
+  // sidebar: 1 Brief · 2 Assets · 3 Agent · 4 Storyboard. We skip when an
+  // input/textarea is focused so typed numbers still go where the user expects.
+  useEffect(() => {
+    const tabOrder: TabId[] = ["brief", "assets", "agent", "storyboard"];
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      const idx = ["1", "2", "3", "4"].indexOf(e.key);
+      if (idx === -1) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        target?.isContentEditable ||
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT"
+      ) {
+        return;
+      }
+      e.preventDefault();
+      setActiveTab(tabOrder[idx]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const updateProjectField = useCallback(
     async (patch: Partial<{ video_format: VideoFormat; client: string | null; deadline: string | null }>) => {
       if (!id) return;
@@ -159,20 +187,22 @@ const ProjectPage = () => {
   const renderContent = () => {
     if (!id) return null;
     return (
-      <Suspense fallback={<TabLoadingFallback />}>
-        {activeTab === "brief" && (
-          <BriefTab
-            projectId={id}
-            onSwitchToAgent={(lang) => { setBriefLang(lang); setActiveTab("agent"); }}
-            onSwitchToAssets={() => setActiveTab("assets")}
-          />
-        )}
-        {activeTab === "agent" && (
-          <AgentTab projectId={id} videoFormat={videoFormat} lang={briefLang} onSwitchToContiTab={handleSwitchToContiTab} />
-        )}
-        {activeTab === "assets" && <AssetsTab projectId={id} onSwitchToAgent={() => setActiveTab("agent")} />}
-        {activeTab === "storyboard" && <ContiTab projectId={id} videoFormat={videoFormat} />}
-      </Suspense>
+      <ErrorBoundary label={`${activeTab} tab`} resetKey={`${id}:${activeTab}`}>
+        <Suspense fallback={<TabLoadingFallback />}>
+          {activeTab === "brief" && (
+            <BriefTab
+              projectId={id}
+              onSwitchToAgent={(lang) => { setBriefLang(lang); setActiveTab("agent"); }}
+              onSwitchToAssets={() => setActiveTab("assets")}
+            />
+          )}
+          {activeTab === "agent" && (
+            <AgentTab projectId={id} videoFormat={videoFormat} lang={briefLang} onSwitchToContiTab={handleSwitchToContiTab} />
+          )}
+          {activeTab === "assets" && <AssetsTab projectId={id} onSwitchToAgent={() => setActiveTab("agent")} />}
+          {activeTab === "storyboard" && <ContiTab projectId={id} videoFormat={videoFormat} />}
+        </Suspense>
+      </ErrorBoundary>
     );
   };
 

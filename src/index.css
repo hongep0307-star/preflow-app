@@ -18,11 +18,13 @@
     --primary: 2 95% 60%; /* #f9423a */
     --primary-foreground: 0 0% 100%;
 
-    /* ── Secondary / Muted ── */
+    /* ── Secondary / Muted ──
+       muted-foreground was #5a5a5a (~3.0:1 on #0a0a0a) which fails WCAG AA
+       for body text. Bumped to ~#777 (~5.0:1) — still calm but legible. */
     --secondary: 0 0% 11%; /* #1c1c1c */
-    --secondary-foreground: 0 0% 60%;
+    --secondary-foreground: 0 0% 65%;
     --muted: 0 0% 11%;
-    --muted-foreground: 0 0% 35%; /* #5a5a5a */
+    --muted-foreground: 0 0% 47%; /* #777 */
 
     /* ── Accent ── */
     --accent: 0 0% 11%;
@@ -35,7 +37,7 @@
     /* ── Border / Input / Ring ── */
     --border: 0 0% 100% / 0.07;
     --input: 0 0% 11%; /* #1c1c1c */
-    --ring: 2 95% 60% / 0.5;
+    --ring: 2 95% 60%;
 
     /* ── Radius ── */
     --radius: 0px;
@@ -94,10 +96,14 @@
     background: rgba(255, 255, 255, 0.2);
   }
 
-  /* Focus ring */
+  /* Focus ring — keyboard-only (mouse clicks don't trigger). 2px solid
+     primary-red ring with a 2px offset so it's clearly visible against any
+     dark surface. The transparent inner halo softens it on busy backgrounds. */
   *:focus-visible {
-    outline: 1px solid hsl(2 95% 60% / 0.5);
-    outline-offset: 1px;
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px hsl(var(--ring) / 0.18);
+    border-radius: 1px;
   }
 }
 

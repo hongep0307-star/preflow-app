@@ -1,4 +1,3 @@
-import { ipcMain } from "electron";
 import { getDb } from "./db";
 
 export interface AppSettings {
@@ -25,12 +24,4 @@ export function setSettings(settings: Partial<AppSettings>) {
     if (value === undefined) continue;
     stmt.run(key, value);
   }
-}
-
-export function registerSettingsHandlers() {
-  ipcMain.handle("settings:get", () => getSettings());
-  ipcMain.handle("settings:set", (_e, settings: Partial<AppSettings>) => {
-    setSettings(settings);
-    return getSettings();
-  });
 }

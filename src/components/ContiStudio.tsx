@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { AnnotationEditor } from "@/components/conti/AnnotationEditor";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import MentionInput from "@/components/MentionInput";
 import { renderMessageWithMentions as renderMentions } from "@/lib/renderMentions";
 
@@ -1188,8 +1189,7 @@ Edit request (applies ONLY inside the magenta region):
               src={displayUrl}
               className="rounded-none"
               style={{ width: canvasSize.w || undefined, height: canvasSize.h || undefined, objectFit: "contain" }}
-              alt={`Scene ${currentScene.scene_number}`}
-            />
+              alt={`Scene ${currentScene.scene_number}`} loading="lazy" decoding="async" />
           ) : (
             <div className="text-muted-foreground text-sm">
               {(currentScene as any).is_transition ? "Transition" : "No conti image"}
@@ -1358,7 +1358,7 @@ Edit request (applies ONLY inside the magenta region):
                         key={i}
                         className="relative group w-8 h-8 rounded overflow-hidden border border-white/[0.06]"
                       >
-                        <img src={img.preview} className="w-full h-full object-cover" />
+                        <img src={img.preview} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                         <button
                           onClick={() => removeCustomRef(i)}
                           className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
@@ -1397,7 +1397,7 @@ Edit request (applies ONLY inside the magenta region):
                           className="relative rounded-none overflow-hidden border-2 transition-all w-full"
                           style={{ borderColor: useMoodRef ? KR : "transparent" }}
                         >
-                          <img src={moodReferenceUrl} className="block w-full aspect-video object-cover rounded-none" />
+                          <img src={moodReferenceUrl} className="block w-full aspect-video object-cover rounded-none" loading="lazy" decoding="async" />
                           {useMoodRef && (
                             <div
                               className="absolute top-1 right-1 w-4 h-4 flex items-center justify-center"
@@ -1432,7 +1432,7 @@ Edit request (applies ONLY inside the magenta region):
                             key={i}
                             className="relative group w-16 h-16 rounded overflow-hidden border border-white/[0.06]"
                           >
-                            <img src={url} className="w-full h-full object-cover" />
+                            <img src={url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                             <button
                               onClick={() => setCompareSelectedRefs((prev) => prev.filter((_, idx) => idx !== i))}
                               className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
@@ -1453,10 +1453,11 @@ Edit request (applies ONLY inside the magenta region):
             {activeTab === "history" && (
               <div className="p-4">
                 {currentImageHistory.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-40 gap-2">
-                    <History className="w-8 h-8 text-border" />
-                    <p className="text-[12px] text-muted-foreground">No history yet</p>
-                  </div>
+                  <EmptyState
+                    icon={<History className="w-8 h-8" />}
+                    title="No history yet"
+                    compact
+                  />
                 ) : (
                   <div className="space-y-3">
                     {currentImageHistory.map((url, idx) => (
@@ -1491,7 +1492,7 @@ Edit request (applies ONLY inside the magenta region):
                           </div>
                         </div>
                         <div className={`relative ${ASPECT_CLASS[videoFormat]} bg-background`}>
-                          <img src={url} className="w-full h-full object-cover" loading="lazy" />
+                          <img src={url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                           <button
                             disabled={!onDeleteHistory || deletingHistoryUrl !== null}
                             onClick={async () => {
@@ -1557,8 +1558,7 @@ Edit request (applies ONLY inside the magenta region):
                           <img
                             src={comparePreviewUrl}
                             className="max-h-[240px] w-auto object-contain rounded"
-                            alt="preview"
-                          />
+                            alt="preview" loading="lazy" decoding="async" />
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => onReplaceWithImage(comparePreviewUrl)}
@@ -1623,8 +1623,7 @@ Edit request (applies ONLY inside the magenta region):
                                         <img
                                           src={vScene.conti_image_url!}
                                           className="w-full h-full object-cover"
-                                          loading="lazy"
-                                        />
+                                          loading="lazy" decoding="async" />
                                         <div
                                           className="absolute top-0.5 left-0.5 text-[8px] font-bold px-1 py-0.5 rounded text-white"
                                           style={{ background: "rgba(0,0,0,0.6)" }}
@@ -1660,7 +1659,7 @@ Edit request (applies ONLY inside the magenta region):
                                     border: isRef ? `2px solid ${KR}` : "2px solid rgba(255,255,255,0.06)",
                                   }}
                                 >
-                                  <img src={url} className="w-full h-full object-cover" loading="lazy" />
+                                  <img src={url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                                   {isBookmarked && (
                                     <div
                                       className="absolute top-0.5 right-0.5 flex items-center justify-center rounded-full"

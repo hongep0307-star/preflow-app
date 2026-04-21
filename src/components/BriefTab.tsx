@@ -24,6 +24,7 @@ import {
   Plus,
   FileText,
   AlertCircle,
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
   RefreshCw,
@@ -33,6 +34,11 @@ import {
   GripVertical,
   Package,
   MessageSquare,
+  Target,
+  Camera,
+  Lightbulb,
+  Palette,
+  Scissors,
   type LucideIcon,
 } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -575,7 +581,7 @@ const CreativeGapSection = ({
       <div className="px-3 py-2.5 space-y-2">
         {gap.synergy.map((s, i) => (
           <div key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-emerald-400">
-            <span className="shrink-0 mt-0.5">✅</span>
+            <CheckCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             {onUpdate ? (
               <EditableText
                 value={s}
@@ -589,7 +595,7 @@ const CreativeGapSection = ({
         ))}
         {gap.gap.map((g, i) => (
           <div key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-amber-400">
-            <span className="shrink-0 mt-0.5">⚠️</span>
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             {onUpdate ? (
               <EditableText
                 value={g}
@@ -1195,8 +1201,8 @@ const CoreStrategyUI = ({
                   className="rounded-none px-3 py-2.5"
                   style={{ background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}
                 >
-                  <span className="text-[11px] font-medium" style={{ color: "#888" }}>
-                    💬 {t("core_message", lang)}
+                  <span className="text-[11px] font-medium inline-flex items-center gap-1.5" style={{ color: "#888" }}>
+                    <MessageSquare className="w-3 h-3" /> {t("core_message", lang)}
                   </span>
                   <div className="mt-1">
                     {E(["goal", "core_message"], analysis.goal.core_message, {
@@ -1210,8 +1216,8 @@ const CoreStrategyUI = ({
                   className="rounded-none px-3 py-2.5"
                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
                 >
-                  <span className="text-[11px] font-medium" style={{ color: "#888" }}>
-                    🎯 {t("success_criteria", lang)}
+                  <span className="text-[11px] font-medium inline-flex items-center gap-1.5" style={{ color: "#888" }}>
+                    <Target className="w-3 h-3" /> {t("success_criteria", lang)}
                   </span>
                   <div className="mt-1">
                     {E(["goal", "success_criteria"], analysis.goal.success_criteria, {
@@ -1375,15 +1381,15 @@ const CoreStrategyUI = ({
           <div className="grid grid-cols-2 gap-3 mb-6">
             {(
               [
-                { icon: "📷", label: lang === "ko" ? "카메라" : "Camera", key: "camera" as const },
-                { icon: "💡", label: lang === "ko" ? "조명" : "Lighting", key: "lighting" as const },
-                { icon: "🎨", label: lang === "ko" ? "색감" : "Color", key: "color_grade" as const },
-                { icon: "✂️", label: lang === "ko" ? "편집" : "Editing", key: "editing" as const },
+                { Icon: Camera, label: lang === "ko" ? "카메라" : "Camera", key: "camera" as const },
+                { Icon: Lightbulb, label: lang === "ko" ? "조명" : "Lighting", key: "lighting" as const },
+                { Icon: Palette, label: lang === "ko" ? "색감" : "Color", key: "color_grade" as const },
+                { Icon: Scissors, label: lang === "ko" ? "편집" : "Editing", key: "editing" as const },
               ] as const
-            ).map(({ icon, label: cellLabel, key }) => (
+            ).map(({ Icon, label: cellLabel, key }) => (
               <div key={key} className="px-3 py-3" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
                 <div className="flex items-center gap-1.5 mb-1.5">
-                  <span className="text-[12px]">{icon}</span>
+                  <Icon className="w-3 h-3 text-foreground/60" />
                   <span className="text-[10px] font-bold uppercase tracking-wider text-foreground/60">{cellLabel}</span>
                 </div>
                 {E(
@@ -1628,8 +1634,8 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
             className="rounded-none px-3 py-1.5"
             style={{ background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.15)" }}
           >
-            <span className="text-[11px] font-medium" style={{ color: "#888" }}>
-              💬 {t("core_message", l)}
+            <span className="text-[11px] font-medium inline-flex items-center gap-1.5" style={{ color: "#888" }}>
+              <MessageSquare className="w-3 h-3" /> {t("core_message", l)}
             </span>
             <div className="mt-1">
               {onU ? (
@@ -1649,8 +1655,8 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
             className="rounded-none px-3 py-1.5"
             style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
           >
-            <span className="text-[11px] font-medium" style={{ color: "#888" }}>
-              🎯 {t("success_criteria", l)}
+            <span className="text-[11px] font-medium inline-flex items-center gap-1.5" style={{ color: "#888" }}>
+              <Target className="w-3 h-3" /> {t("success_criteria", l)}
             </span>
             <div className="mt-1">
               {onU ? (
@@ -1772,7 +1778,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
         <div className="space-y-3">
           {a.creative_gap.synergy.map((s, i) => (
             <div key={i} className="flex items-start gap-2.5 text-[13px] leading-relaxed text-emerald-400">
-              <span className="shrink-0 mt-0.5">✅</span>
+              <CheckCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
               {onU ? (
                 <EditableText
                   value={s}
@@ -1786,7 +1792,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
           ))}
           {a.creative_gap.gap.map((g, i) => (
             <div key={i} className="flex items-start gap-2.5 text-[13px] leading-relaxed text-amber-400">
-              <span className="shrink-0 mt-0.5">⚠️</span>
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
               {onU ? (
                 <EditableText
                   value={g}
@@ -1840,15 +1846,15 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
         <div className="grid grid-cols-2 gap-4">
           {(
             [
-              { icon: "📷", label: l === "ko" ? "카메라" : "Camera", key: "camera" as const },
-              { icon: "💡", label: l === "ko" ? "조명" : "Lighting", key: "lighting" as const },
-              { icon: "🎨", label: l === "ko" ? "색감" : "Color", key: "color_grade" as const },
-              { icon: "✂️", label: l === "ko" ? "편집" : "Editing", key: "editing" as const },
+              { Icon: Camera, label: l === "ko" ? "카메라" : "Camera", key: "camera" as const },
+              { Icon: Lightbulb, label: l === "ko" ? "조명" : "Lighting", key: "lighting" as const },
+              { Icon: Palette, label: l === "ko" ? "색감" : "Color", key: "color_grade" as const },
+              { Icon: Scissors, label: l === "ko" ? "편집" : "Editing", key: "editing" as const },
             ] as const
-          ).map(({ icon, label: cellLabel, key }) => (
+          ).map(({ Icon, label: cellLabel, key }) => (
             <div key={key} className="px-4 py-4" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
               <div className="flex items-center gap-2 mb-2">
-                <span className="text-[14px]">{icon}</span>
+                <Icon className="w-3.5 h-3.5 text-foreground/60" />
                 <span className="text-[11px] font-bold uppercase tracking-wider text-foreground/60">{cellLabel}</span>
               </div>
               {onU ? (
@@ -3202,8 +3208,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                   alt=""
                   onClick={() => setLightboxSrc(img.preview)}
                   className="h-[56px] w-[56px] object-cover border border-border cursor-zoom-in"
-                  style={{ borderRadius: 0 }}
-                />
+                  style={{ borderRadius: 0 }} loading="lazy" decoding="async" />
                 <button
                   onClick={() => removeBriefImage(i)}
                   className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
@@ -3328,8 +3333,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                   alt=""
                   onClick={() => setLightboxSrc(img.preview)}
                   className="h-[54px] w-[54px] object-cover border border-border cursor-zoom-in"
-                  style={{ borderRadius: 0 }}
-                />
+                  style={{ borderRadius: 0 }} loading="lazy" decoding="async" />
                 <button
                   onClick={() => removeRefImage(i)}
                   className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
@@ -3694,8 +3698,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             alt="Original image"
             onClick={(e) => e.stopPropagation()}
             className="max-w-[90vw] max-h-[90vh] object-contain shadow-2xl cursor-default"
-            style={{ borderRadius: 0 }}
-          />
+            style={{ borderRadius: 0 }} loading="lazy" decoding="async" />
         </div>
       )}
     </div>

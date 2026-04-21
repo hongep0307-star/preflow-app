@@ -77,7 +77,7 @@ const AssetDropdownItem = ({
       }`}
     >
       {asset.photo_url ? (
-        <img src={asset.photo_url} className="w-8 h-8 rounded-full object-cover border border-border shrink-0" alt="" />
+        <img src={asset.photo_url} className="w-8 h-8 rounded-full object-cover border border-border shrink-0" alt="" loading="lazy" decoding="async" />
       ) : (
         <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0" style={{ background: ASSET_COLORS[type]?.bg ?? KR_BG }}>
           <span className="text-sm font-semibold" style={{ color: ASSET_COLORS[type]?.color ?? KR }}>

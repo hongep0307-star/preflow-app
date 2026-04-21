@@ -186,8 +186,7 @@ const MoodCard = ({
         loading="lazy"
         onLoad={(e) => {
           (e.currentTarget as HTMLImageElement).style.opacity = "1";
-        }}
-      />
+        }} decoding="async" />
       <div
         style={{
           position: "absolute",
@@ -1437,8 +1436,7 @@ export const MoodIdeationPanel = ({
                 src={lightboxUrl}
                 alt="mood lightbox"
                 style={{ maxWidth: "85vw", maxHeight: "90vh", objectFit: "contain", borderRadius: 0 }}
-                onClick={(e) => e.stopPropagation()}
-              />
+                onClick={(e) => e.stopPropagation()} loading="lazy" decoding="async" />
               {currentIdx >= 0 && (
                 <span
                   className="absolute bottom-4 left-1/2 -translate-x-1/2"

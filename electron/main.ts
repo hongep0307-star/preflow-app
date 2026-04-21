@@ -1,10 +1,7 @@
-import { app, BrowserWindow, protocol, ipcMain } from "electron";
+import { app, BrowserWindow, protocol } from "electron";
 import path from "path";
 import fs from "fs";
 import { initDatabase, closeDb } from "./db";
-import { registerApiHandlers } from "./api-handlers";
-import { registerStorageHandlers, getStorageBasePath } from "./storage";
-import { registerDbHandlers } from "./db-handlers";
 import { startLocalServer } from "./local-server";
 
 // Chromium의 native UI(달력 피커, context menu 등) 언어를 영문으로 강제.
@@ -74,10 +71,6 @@ app.whenReady().then(async () => {
   });
 
   await initDatabase();
-  registerDbHandlers();
-  registerStorageHandlers();
-  registerApiHandlers();
-
   await startLocalServer();
   createWindow();
 

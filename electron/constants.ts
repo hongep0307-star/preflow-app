@@ -1,1 +1,1 @@
-export const LOCAL_SERVER_PORT = 19876;
+export { LOCAL_SERVER_PORT, LOCAL_SERVER_BASE_URL } from "../shared/constants";

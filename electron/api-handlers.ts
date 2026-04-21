@@ -1,8 +1,7 @@
-import { ipcMain } from "electron";
 import { getSettings } from "./settings";
-import { registerSettingsHandlers } from "./settings";
-import { getStorageBasePath } from "./storage";
-import { LOCAL_SERVER_PORT } from "./constants";
+import { getStorageBasePath } from "./paths";
+import { LOCAL_SERVER_BASE_URL } from "./constants";
+import { fetchWithRetry } from "./http-utils";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -10,18 +9,22 @@ import crypto from "crypto";
 function storageFileUrl(fullPath: string): string {
   const base = getStorageBasePath();
   const relative = path.relative(base, fullPath).replace(/\\/g, "/");
-  return `http://127.0.0.1:${LOCAL_SERVER_PORT}/storage/file/${relative}`;
+  return `${LOCAL_SERVER_BASE_URL}/storage/file/${relative}`;
 }
 
 export async function handleClaudeProxy(body: any) {
   const settings = getSettings();
   const apiKey = settings.anthropic_api_key;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY가 설정되지 않았습니다.");
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify(body),
-  });
+  const response = await fetchWithRetry(
+    "https://api.anthropic.com/v1/messages",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify(body),
+    },
+    { label: "claude", timeoutMs: 120_000, retries: 2 },
+  );
   return await response.json();
 }
 
@@ -325,16 +328,6 @@ export async function handleOpenaiImage(body: any) {
   return { publicUrl: storageFileUrl(filePath), usedModel: suffix };
 }
 
-// Register all IPC handlers (kept for production builds)
-export function registerApiHandlers() {
-  registerSettingsHandlers();
-  ipcMain.handle("api:claude-proxy", (_e, body) => handleClaudeProxy(body));
-  ipcMain.handle("api:enhance-inpaint-prompt", (_e, body) => handleEnhanceInpaintPrompt(body));
-  ipcMain.handle("api:translate-analysis", (_e, body) => handleTranslateAnalysis(body));
-  ipcMain.handle("api:analyze-reference-images", (_e, body) => handleAnalyzeReferenceImages(body));
-  ipcMain.handle("api:openai-image", (_e, body) => handleOpenaiImage(body));
-}
-
 // ── Vertex AI: Text Gemini (shared credentials with NB2) ──
 function ensureGoogleCredentials(settings: any) {
   if (!settings.google_service_account_key || !settings.google_cloud_project_id) {
@@ -347,11 +340,15 @@ async function callVertexGemini(settings: any, model: string, requestBody: any):
   const gcpProjectId = settings.google_cloud_project_id;
   const accessToken = await getVertexAccessToken(saKeyJson);
   const endpoint = `https://aiplatform.googleapis.com/v1/projects/${gcpProjectId}/locations/global/publishers/google/models/${model}:generateContent`;
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
+  const res = await fetchWithRetry(
+    endpoint,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    },
+    { label: `vertex-gemini:${model}`, timeoutMs: 90_000, retries: 2 },
+  );
   if (!res.ok) {
     const errText = await res.text();
     console.error(`[Vertex Gemini ${model}] HTTP ${res.status}:`, errText);
@@ -374,12 +371,17 @@ async function callVertexNB2(settings: any, prompt: string, imageUrls?: string[]
       try { const buf = await downloadImage(url); parts.push({ inlineData: { mimeType: "image/png", data: buf.toString("base64") } }); } catch {}
     }
   }
-  const res = await fetch(endpoint, {
-    method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: aspectRatio ?? "9:16", imageSize: "1K" } } }),
-  });
+  const res = await fetchWithRetry(
+    endpoint,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: aspectRatio ?? "9:16", imageSize: "1K" } } }),
+    },
+    { label: "vertex-nb2", timeoutMs: 180_000, retries: 1 },
+  );
   if (!res.ok) throw new Error(`Vertex AI HTTP ${res.status}: ${await res.text()}`);
-  const result = await res.json();
+  const result = (await res.json()) as any;
   if (!result.candidates?.length) throw new Error("Vertex AI: no candidates");
   for (const part of result.candidates[0].content?.parts || []) {
     if (part.inlineData?.data) return Buffer.from(part.inlineData.data, "base64");
@@ -396,26 +398,38 @@ async function getVertexAccessToken(saKeyJson: string): Promise<string> {
   const sign = crypto.createSign("RSA-SHA256"); sign.update(signingInput);
   const signature = sign.sign(sa.private_key, "base64url");
   const jwt = `${signingInput}.${signature}`;
-  const tokenRes = await fetch("https://oauth2.googleapis.com/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}` });
+  const tokenRes = await fetchWithRetry(
+    "https://oauth2.googleapis.com/token",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+    },
+    { label: "google-oauth", timeoutMs: 15_000, retries: 2 },
+  );
   if (!tokenRes.ok) throw new Error(`Token exchange failed: ${await tokenRes.text()}`);
-  return (await tokenRes.json()).access_token;
+  return ((await tokenRes.json()) as { access_token: string }).access_token;
 }
 
 async function callGptGenerations(apiKey: string, prompt: string, size: string): Promise<Buffer> {
   console.log("[callGptGenerations] Starting:", { size, promptLen: prompt.length });
   const body = { model: "gpt-image-1.5", prompt, n: 1, size, quality: "high", output_format: "png" };
-  const res = await fetch("https://api.openai.com/v1/images/generations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(body),
-  });
+  const res = await fetchWithRetry(
+    "https://api.openai.com/v1/images/generations",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+    },
+    { label: "openai-generations", timeoutMs: 180_000, retries: 1 },
+  );
   if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
+    const errBody = (await res.json().catch(() => ({}))) as any;
     const msg = errBody.error?.message ?? `GPT generation failed (HTTP ${res.status})`;
     console.error("[callGptGenerations] API error:", res.status, msg);
     throw new Error(msg);
   }
-  const data = await res.json();
+  const data = (await res.json()) as any;
   const b64 = data.data?.[0]?.b64_json;
   if (!b64) {
     console.error("[callGptGenerations] No b64_json in response. Keys:", JSON.stringify(Object.keys(data?.data?.[0] ?? {})));
@@ -431,9 +445,16 @@ async function callGptInpaint(apiKey: string, imageB64: string, maskB64: string 
   formData.append("image[]", new Blob([Buffer.from(imageB64, "base64")], { type: "image/png" }), "image.png");
   for (let i = 0; i < Math.min(refUrls.length, 3); i++) { try { const refBuf = await downloadImage(refUrls[i]); formData.append("image[]", new Blob([refBuf], { type: "image/png" }), `ref-${i}.png`); } catch {} }
   if (maskB64) formData.append("mask", new Blob([Buffer.from(maskB64, "base64")], { type: "image/png" }), "mask.png");
-  const res = await fetch("https://api.openai.com/v1/images/edits", { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: formData });
-  if (!res.ok) { const err = await res.json(); throw new Error(err.error?.message ?? "GPT inpaint failed"); }
-  const data = await res.json();
+  const res = await fetchWithRetry(
+    "https://api.openai.com/v1/images/edits",
+    { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: formData },
+    { label: "openai-edits", timeoutMs: 180_000, retries: 1 },
+  );
+  if (!res.ok) {
+    const err = (await res.json()) as any;
+    throw new Error(err.error?.message ?? "GPT inpaint failed");
+  }
+  const data = (await res.json()) as any;
   return Buffer.from(data.data[0].b64_json, "base64");
 }
 
@@ -442,7 +463,7 @@ async function downloadImage(url: string): Promise<Buffer> {
     const stripped = url.replace(/^local-file:\/\//i, "").split(/[?#]/)[0];
     return fs.readFileSync(decodeURIComponent(stripped)) as unknown as Buffer;
   }
-  const localPrefix = `http://127.0.0.1:${LOCAL_SERVER_PORT}/storage/file/`;
+  const localPrefix = `${LOCAL_SERVER_BASE_URL}/storage/file/`;
   if (url.startsWith(localPrefix)) {
     const relative = decodeURIComponent(url.slice(localPrefix.length));
     const fullPath = path.join(getStorageBasePath(), relative);

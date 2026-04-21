@@ -5,16 +5,15 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-
-const LOCAL_PORT = 19876;
+import { LOCAL_SERVER_BASE_URL } from "@shared/constants";
 
 const settingsApi = {
   get: async () => {
-    const res = await fetch(`http://127.0.0.1:${LOCAL_PORT}/settings/get`, { method: "POST" });
+    const res = await fetch(`${LOCAL_SERVER_BASE_URL}/settings/get`, { method: "POST" });
     return res.json();
   },
   set: async (s: any) => {
-    const res = await fetch(`http://127.0.0.1:${LOCAL_PORT}/settings/set`, {
+    const res = await fetch(`${LOCAL_SERVER_BASE_URL}/settings/set`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(s),

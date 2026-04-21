@@ -18,6 +18,7 @@ import { Navbar } from "@/components/Navbar";
 import { ProjectCard } from "@/components/ProjectCard";
 import { ProjectModal } from "@/components/ProjectModal";
 import { SkeletonCard } from "@/components/SkeletonCard";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -623,18 +624,18 @@ const DashboardPage = () => {
                 </div>
               ) : visibleProjects.length === 0 ? (
                 <div
-                  className="flex flex-col items-center justify-center py-24 border border-dashed border-white/[0.08]"
+                  className="border border-dashed border-white/[0.08]"
                   style={{ borderRadius: 0 }}
                 >
-                  <Film className="w-8 h-8 text-white/15 mb-3" />
-                  <p className="text-[13px] text-white/28 font-medium tracking-wide">
-                    {searchQuery || statusFilter !== "all" ? "No results" : "No projects yet"}
-                  </p>
-                  <p className="text-[11px] text-white/16 mt-1.5">
-                    {searchQuery || statusFilter !== "all"
-                      ? "Try a different search or filter"
-                      : "Create a project to get started"}
-                  </p>
+                  <EmptyState
+                    icon={<Film className="w-8 h-8" />}
+                    title={searchQuery || statusFilter !== "all" ? "No results" : "No projects yet"}
+                    description={
+                      searchQuery || statusFilter !== "all"
+                        ? "Try a different search or filter"
+                        : "Create a project to get started"
+                    }
+                  />
                 </div>
               ) : selectedFolderId ? (
                 /* 특정 폴더 선택 뷰 */

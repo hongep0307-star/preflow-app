@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
 import { Save, History, X, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/ui/empty-state';
 import { Input } from '@/components/ui/input';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -231,7 +232,7 @@ export const VersionHistoryDrawer = ({
                     className="shrink-0 w-[52px] h-[36px] rounded border border-border overflow-hidden bg-background"
                   >
                     {scene.conti_image_url ? (
-                      <img src={scene.conti_image_url} className="w-full h-full object-cover" />
+                      <img src={scene.conti_image_url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-[9px] text-muted-foreground/30">
                         S{scene.scene_number}
@@ -249,10 +250,12 @@ export const VersionHistoryDrawer = ({
           ))}
 
           {versions.length === 0 && (
-            <div className="text-center py-10">
-              <p className="text-sm text-muted-foreground/40">저장된 버전이 없습니다.</p>
-              <p className="text-xs text-muted-foreground/30 mt-1">"버전 저장" 버튼으로 현재 상태를 저장하세요.</p>
-            </div>
+            <EmptyState
+              icon={<History className="w-8 h-8" />}
+              title="저장된 버전이 없습니다."
+              description="‘버전 저장’ 버튼으로 현재 상태를 저장하세요."
+              compact
+            />
           )}
         </div>
       </div>

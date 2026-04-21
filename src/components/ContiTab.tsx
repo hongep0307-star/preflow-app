@@ -1,11 +1,25 @@
-import { useEffect, useState, useCallback, useRef, useSyncExternalStore, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  useSyncExternalStore,
+  lazy,
+  Suspense,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { supabase } from "@/lib/supabase";
 import { generateConti, styleTransfer, IMAGE_SIZE_MAP } from "@/lib/conti";
 import type { VideoFormat, BriefAnalysis, GeneratingStage } from "@/lib/conti";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { ContiStudio } from "@/components/ContiStudio";
-import jsPDF from "jspdf";
+
+// ContiStudio is heavy (inpainting canvas, AI calls). Load on demand to keep
+// initial Storyboard tab payload small.
+const ContiStudio = lazy(() =>
+  import("@/components/ContiStudio").then((m) => ({ default: m.ContiStudio })),
+);
 import {
   Sparkles,
   Film,
@@ -255,7 +269,7 @@ const VersionCompareModal = ({
                   style={{ borderColor: isActive ? KR : "hsl(var(--border))" }}
                 >
                   {scene?.conti_image_url ? (
-                    <img src={scene.conti_image_url} className="w-full h-full object-cover" loading="lazy" />
+                    <img src={scene.conti_image_url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                   ) : (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
                       <Film className="w-6 h-6 text-border" />
@@ -381,7 +395,7 @@ const HistorySheet = ({
                   </div>
                 </div>
                 <div className={`relative ${aspectClass} bg-background`}>
-                  <img src={url} className="w-full h-full object-cover" loading="lazy" />
+                  <img src={url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                 </div>
               </div>
             ))}
@@ -672,7 +686,7 @@ const ExportModal = ({
                       .slice(0, 3)
                       .map((s: any, i: number) =>
                         s.conti_image_url ? (
-                          <img key={i} src={s.conti_image_url} className="w-7 h-5 object-cover rounded" />
+                          <img key={i} src={s.conti_image_url} className="w-7 h-5 object-cover rounded" loading="lazy" decoding="async" />
                         ) : (
                           <div key={i} className="w-7 h-5 rounded bg-muted" />
                         ),
@@ -994,7 +1008,7 @@ const StylePickerModal = ({
                       style={{ background: "rgba(255,255,255,0.03)" }}
                     >
                       {preset.thumbnail_url ? (
-                        <img src={preset.thumbnail_url} className="w-full h-full object-cover" loading="lazy" />
+                        <img src={preset.thumbnail_url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                       ) : (
                         <div className="absolute inset-0 flex items-center justify-center">
                           <Palette className="w-5 h-5" style={{ color: "rgba(255,255,255,0.15)" }} />
@@ -2600,7 +2614,10 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   ) => {
     setIsExporting(true);
     try {
-      const html2canvas = (await import("html2canvas")).default;
+      const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
+        import("html2canvas"),
+        import("jspdf"),
+      ]);
       const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
       const pageW = pdf.internal.pageSize.getWidth();
       const pageH = pdf.internal.pageSize.getHeight();
@@ -3782,6 +3799,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       )}
 
       {studioScene && (
+        <Suspense fallback={null}>
         <ContiStudio
           scene={studioScene}
           allScenes={activeScenes}
@@ -3845,6 +3863,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           }}
           isRegenerating={generatingSceneIds.has(studioScene.id)}
         />
+        </Suspense>
       )}
 
       {compareSceneNumber !== null && (

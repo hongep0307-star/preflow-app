@@ -3,6 +3,7 @@ import { HashRouter, Route, Routes } from 'react-router-dom';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import AuroraBackground from '@/components/AuroraBackground';
 import Index from './pages/Index';
 import SettingsPage from './pages/SettingsPage';
@@ -19,15 +20,17 @@ const App = () => (
       <AuroraBackground />
       <HashRouter>
         <div style={{ position: "relative", zIndex: 1 }}>
-          <Routes>
-            <Route path="/" element={<Index />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route element={<ProtectedRoute />}>
-              <Route path="/dashboard" element={<DashboardPage />} />
-              <Route path="/project/:id" element={<ProjectPage />} />
-            </Route>
-            <Route path="*" element={<NotFound />} />
-          </Routes>
+          <ErrorBoundary label="App">
+            <Routes>
+              <Route path="/" element={<Index />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route element={<ProtectedRoute />}>
+                <Route path="/dashboard" element={<DashboardPage />} />
+                <Route path="/project/:id" element={<ProjectPage />} />
+              </Route>
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </ErrorBoundary>
         </div>
       </HashRouter>
     </TooltipProvider>
