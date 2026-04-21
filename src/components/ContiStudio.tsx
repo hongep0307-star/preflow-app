@@ -190,6 +190,10 @@ export const ContiStudio = ({
   const inpaintUndoRef = useRef<InpaintSnap[]>([]);
   const [inpaintUndoCount, setInpaintUndoCount] = useState(0);
 
+  /* ── 직전 페인트 좌표 (이미지 좌표계) — 빠른 드래그 보간용 ── */
+  const lastPaintPtRef = useRef<{ x: number; y: number } | null>(null);
+  const hasMaskRef = useRef(false);
+
   /* ── 인페인팅 상태 ── */
   const [inpaintPrompt, setInpaintPrompt] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
@@ -290,6 +294,8 @@ export const ContiStudio = ({
     inpaintUndoRef.current = [];
     setInpaintUndoCount(0);
     setHasMask(false);
+    hasMaskRef.current = false;
+    lastPaintPtRef.current = null;
 
     const timer = setTimeout(async () => {
       try {
@@ -363,9 +369,58 @@ export const ContiStudio = ({
     }
     const d = snap.mask.data;
     const hasAny = d.some((v, i) => i % 4 === 0 && v > 0);
+    hasMaskRef.current = hasAny;
     setHasMask(hasAny);
+    lastPaintPtRef.current = null;
   };
 
+  /** 한 점에 dot 찍기 (mousedown 시점 — 직전 좌표 없을 때) */
+  const drawDot = (
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    r: number,
+    composite: GlobalCompositeOperation,
+    fill: string,
+  ) => {
+    ctx.save();
+    ctx.globalCompositeOperation = composite;
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  };
+
+  /** 직전 좌표 → 현재 좌표를 굵은 라인으로 연결 (보간) */
+  const drawSegment = (
+    ctx: CanvasRenderingContext2D,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    r: number,
+    composite: GlobalCompositeOperation,
+    stroke: string,
+  ) => {
+    ctx.save();
+    ctx.globalCompositeOperation = composite;
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = r * 2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(fromX, fromY);
+    ctx.lineTo(toX, toY);
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  /**
+   * 한 포인터 샘플을 마스크에 반영.
+   * 직전 좌표가 있으면 보간 라인을, 없으면 단발 dot 을 찍는다.
+   * 빠른 드래그(마우스 이동 이벤트 간격이 큰 경우)에도 점선처럼 끊기지 않도록 보장.
+   */
   const paintAt = useCallback((cx: number, cy: number, divW: number, divH: number) => {
     const mc = maskCanvasRef.current;
     const oc = overlayCanvasRef.current;
@@ -377,46 +432,27 @@ export const ContiStudio = ({
     const y = cy * sy;
     const r = brushSizeRef.current * ((sx + sy) / 2);
 
-    if (toolModeRef.current === "eraser") {
-      const mctx = mc.getContext("2d")!;
-      mctx.save();
-      mctx.globalCompositeOperation = "destination-out";
-      mctx.beginPath();
-      mctx.arc(x, y, r, 0, Math.PI * 2);
-      mctx.fillStyle = "rgba(0,0,0,1)";
-      mctx.fill();
-      mctx.restore();
-      if (oc) {
-        const octx = oc.getContext("2d")!;
-        octx.save();
-        octx.globalCompositeOperation = "destination-out";
-        octx.beginPath();
-        octx.arc(x, y, r, 0, Math.PI * 2);
-        octx.fillStyle = "rgba(0,0,0,1)";
-        octx.fill();
-        octx.restore();
-      }
-    } else {
-      const mctx = mc.getContext("2d")!;
-      mctx.save();
-      mctx.globalCompositeOperation = "source-over";
-      mctx.fillStyle = "rgba(255,255,255,1)";
-      mctx.beginPath();
-      mctx.arc(x, y, r, 0, Math.PI * 2);
-      mctx.fill();
-      mctx.restore();
-      if (oc) {
-        const octx = oc.getContext("2d")!;
-        octx.save();
-        octx.globalCompositeOperation = "source-over";
-        octx.fillStyle = "rgba(249,66,58,0.85)";
-        octx.beginPath();
-        octx.arc(x, y, r, 0, Math.PI * 2);
-        octx.fill();
-        octx.restore();
-      }
+    const isErase = toolModeRef.current === "eraser";
+    const composite: GlobalCompositeOperation = isErase ? "destination-out" : "source-over";
+    const maskColor = "rgba(255,255,255,1)";
+    const overlayColor = isErase ? "rgba(0,0,0,1)" : "rgba(249,66,58,0.85)";
+
+    const mctx = mc.getContext("2d")!;
+    const octx = oc?.getContext("2d") ?? null;
+    const prev = lastPaintPtRef.current;
+
+    if (prev) {
+      drawSegment(mctx, prev.x, prev.y, x, y, r, composite, maskColor);
+      if (octx) drawSegment(octx, prev.x, prev.y, x, y, r, composite, overlayColor);
     }
-    setHasMask(true);
+    drawDot(mctx, x, y, r, composite, maskColor);
+    if (octx) drawDot(octx, x, y, r, composite, overlayColor);
+
+    lastPaintPtRef.current = { x, y };
+    if (!isErase && !hasMaskRef.current) {
+      hasMaskRef.current = true;
+      setHasMask(true);
+    }
   }, []);
 
   const drawCursorAt = useCallback((clientX: number, clientY: number) => {
@@ -451,80 +487,70 @@ export const ContiStudio = ({
     cc.getContext("2d")?.clearRect(0, 0, cc.width, cc.height);
   }, []);
 
-  const handleDrawMouseDown = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
+  /**
+   * Pointer Events 통합 핸들러 — 마우스/펜/터치 모두 처리.
+   * `getCoalescedEvents()` 로 OS 가 한 프레임에 모은 모든 입력 샘플을 받아 보간에 사용,
+   * 빠른 모션에서도 마스크가 끊기지 않도록 보장.
+   */
+  const handleDrawPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
       if (isGenerating) return;
+      if (e.button !== undefined && e.button !== 0) return;
       e.preventDefault();
-
       const div = e.currentTarget;
-      const rect = div.getBoundingClientRect();
+      try {
+        div.setPointerCapture(e.pointerId);
+      } catch {}
 
       saveInpaintSnapshot();
       isDrawingRef.current = true;
+      lastPaintPtRef.current = null;
 
+      const rect = div.getBoundingClientRect();
+      drawCursorAt(e.clientX, e.clientY);
       paintAt(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
-
-      const onDocMove = (me: MouseEvent) => {
-        if (!isDrawingRef.current) return;
-        const r = div.getBoundingClientRect();
-        drawCursorAt(me.clientX, me.clientY);
-        paintAt(me.clientX - r.left, me.clientY - r.top, r.width, r.height);
-      };
-      const onDocUp = () => {
-        isDrawingRef.current = false;
-        document.removeEventListener("mousemove", onDocMove);
-        document.removeEventListener("mouseup", onDocUp);
-      };
-
-      document.addEventListener("mousemove", onDocMove);
-      document.addEventListener("mouseup", onDocUp);
     },
     [isGenerating, paintAt, drawCursorAt, saveInpaintSnapshot],
   );
 
-  const handleDrawMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!isDrawingRef.current) drawCursorAt(e.clientX, e.clientY);
+  const handleDrawPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const div = e.currentTarget;
+      if (!isDrawingRef.current) {
+        drawCursorAt(e.clientX, e.clientY);
+        return;
+      }
+      const rect = div.getBoundingClientRect();
+      // OS 가 한 프레임에 모은 모든 중간 샘플들 — 빠른 드래그에서 점이 끊기지 않게 함
+      const samples =
+        typeof e.nativeEvent.getCoalescedEvents === "function" ? e.nativeEvent.getCoalescedEvents() : [];
+      if (samples.length > 0) {
+        for (const s of samples) {
+          paintAt(s.clientX - rect.left, s.clientY - rect.top, rect.width, rect.height);
+        }
+      } else {
+        paintAt(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+      }
+      drawCursorAt(e.clientX, e.clientY);
     },
-    [drawCursorAt],
+    [paintAt, drawCursorAt],
   );
 
-  const handleDrawMouseLeave = useCallback(() => {
+  const handleDrawPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const div = e.currentTarget;
+      try {
+        div.releasePointerCapture(e.pointerId);
+      } catch {}
+      isDrawingRef.current = false;
+      lastPaintPtRef.current = null;
+    },
+    [],
+  );
+
+  const handleDrawPointerLeave = useCallback(() => {
     if (!isDrawingRef.current) clearCursor();
   }, [clearCursor]);
-
-  const handleDrawTouchStart = useCallback(
-    (e: React.TouchEvent<HTMLDivElement>) => {
-      if (isGenerating) return;
-      e.preventDefault();
-      const touch = e.touches[0];
-      if (!touch) return;
-
-      const div = e.currentTarget;
-      const rect = div.getBoundingClientRect();
-
-      saveInpaintSnapshot();
-      isDrawingRef.current = true;
-      paintAt(touch.clientX - rect.left, touch.clientY - rect.top, rect.width, rect.height);
-
-      const onTouchMove = (te: TouchEvent) => {
-        if (!isDrawingRef.current) return;
-        const t = te.touches[0];
-        if (!t) return;
-        const r = div.getBoundingClientRect();
-        paintAt(t.clientX - r.left, t.clientY - r.top, r.width, r.height);
-      };
-      const onTouchEnd = () => {
-        isDrawingRef.current = false;
-        document.removeEventListener("touchmove", onTouchMove);
-        document.removeEventListener("touchend", onTouchEnd);
-      };
-
-      document.addEventListener("touchmove", onTouchMove, { passive: false });
-      document.addEventListener("touchend", onTouchEnd);
-    },
-    [isGenerating, paintAt, saveInpaintSnapshot],
-  );
 
   /* ━━━ Reset ━━━ */
   const handleResetMask = () => {
@@ -533,11 +559,60 @@ export const ContiStudio = ({
     const oc = overlayCanvasRef.current;
     if (oc) oc.getContext("2d")!.clearRect(0, 0, oc.width, oc.height);
     setHasMask(false);
+    hasMaskRef.current = false;
+    lastPaintPtRef.current = null;
     inpaintUndoRef.current = [];
     setInpaintUndoCount(0);
   };
 
-  /* ━━━ 마스크 추출 ━━━ */
+  /* ━━━ 마스크 유틸 (페더링 / 합성) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   * 페더링: 경계의 alpha 가 부드럽게 떨어지는 soft mask 를 만들어 합성 솔기를 제거.
+   * 합성  : 원본 + 모델출력 + soft mask → 마스크 밖 픽셀이 100% 원본으로 보장됨.
+   *         (NB2 같은 generative 모델이 unmasked 영역까지 다시 렌더해도 영향 없음)
+   * ── feather 픽셀은 이미지 짧은 변의 ~0.5% 로 자동 스케일.
+   */
+  const FEATHER_FRACTION = 0.005;
+
+  const featherPxFor = (w: number, h: number) =>
+    Math.max(2, Math.round(Math.min(w, h) * FEATHER_FRACTION));
+
+  /** mask canvas → 동일 해상도의 white-on-transparent 캔버스 (필요 시 페더링) */
+  const buildSoftMaskCanvas = (
+    mc: HTMLCanvasElement,
+    targetW: number,
+    targetH: number,
+    featherPx: number,
+  ): HTMLCanvasElement => {
+    // 1) 마스크 데이터를 흰색 alpha 마스크로 변환 (R 채널 기준)
+    const src = mc.getContext("2d")!.getImageData(0, 0, mc.width, mc.height);
+    const tmp = document.createElement("canvas");
+    tmp.width = mc.width;
+    tmp.height = mc.height;
+    const tctx = tmp.getContext("2d")!;
+    const tid = tctx.createImageData(mc.width, mc.height);
+    for (let i = 0; i < src.data.length; i += 4) {
+      const a = src.data[i] > 0 ? 255 : 0;
+      tid.data[i] = 255;
+      tid.data[i + 1] = 255;
+      tid.data[i + 2] = 255;
+      tid.data[i + 3] = a;
+    }
+    tctx.putImageData(tid, 0, 0);
+
+    // 2) 타겟 해상도로 리스케일 + 가우시안 블러로 soft edge 생성
+    const out = document.createElement("canvas");
+    out.width = targetW;
+    out.height = targetH;
+    const octx = out.getContext("2d")!;
+    if (featherPx > 0) {
+      octx.filter = `blur(${featherPx}px)`;
+    }
+    octx.drawImage(tmp, 0, 0, targetW, targetH);
+    octx.filter = "none";
+    return out;
+  };
+
+  /** 마스크 추출 (모델 전달용 PNG, base64) — GPT edits 폴백 경로용 hard mask */
   const extractMaskBase64 = (): string | null => {
     const mc = maskCanvasRef.current;
     const ic = imageCanvasRef.current;
@@ -567,6 +642,63 @@ export const ContiStudio = ({
     return out.toDataURL("image/png").split(",")[1];
   };
 
+  /**
+   * 클라이언트 합성: 원본 + 모델출력 + soft mask
+   *   - 마스크 안: 모델출력 (페더된 가장자리로 자연스럽게 블렌드)
+   *   - 마스크 밖: 원본 픽셀 그대로 (수학적으로 보존)
+   * 반환: composite 결과의 PNG Blob
+   */
+  const compositeInpaintResult = async (generatedUrl: string): Promise<Blob | null> => {
+    const ic = imageCanvasRef.current;
+    const mc = maskCanvasRef.current;
+    if (!ic || !mc) return null;
+    const W = ic.width;
+    const H = ic.height;
+    if (!W || !H) return null;
+
+    // 1) 모델 출력 로드
+    const genImg: HTMLImageElement = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.crossOrigin = "anonymous";
+      im.onload = () => resolve(im);
+      im.onerror = (e) => reject(e);
+      im.src = generatedUrl;
+    });
+
+    // 2) 모델 출력을 원본 해상도로 리스케일 (NB2 결과는 보통 다른 해상도)
+    const genCanvas = document.createElement("canvas");
+    genCanvas.width = W;
+    genCanvas.height = H;
+    const gctx = genCanvas.getContext("2d")!;
+    gctx.imageSmoothingQuality = "high";
+    gctx.drawImage(genImg, 0, 0, W, H);
+
+    // 3) soft mask 생성
+    const featherPx = featherPxFor(W, H);
+    const softMask = buildSoftMaskCanvas(mc, W, H, featherPx);
+
+    // 4) (gen ∩ softMask) → 마스크 영역만 남긴 모델출력
+    const maskedGen = document.createElement("canvas");
+    maskedGen.width = W;
+    maskedGen.height = H;
+    const mgctx = maskedGen.getContext("2d")!;
+    mgctx.drawImage(genCanvas, 0, 0);
+    mgctx.globalCompositeOperation = "destination-in";
+    mgctx.drawImage(softMask, 0, 0);
+
+    // 5) 원본 위에 maskedGen 을 source-over → 최종 합성
+    const out = document.createElement("canvas");
+    out.width = W;
+    out.height = H;
+    const octx = out.getContext("2d")!;
+    octx.drawImage(ic, 0, 0);
+    octx.drawImage(maskedGen, 0, 0);
+
+    return await new Promise<Blob | null>((resolve) =>
+      out.toBlob((b) => resolve(b), "image/png"),
+    );
+  };
+
   /* ━━━━━ 마스크 오버레이 — NB2(Gemini 3.1) 용 시각 힌트 이미지 ━━━━━
    * NB2 는 mask 파라미터가 없으므로, 원본 위에 브러시 영역을 형광 마젠타(#FF00FF)로
    * 칠한 합성 PNG 를 레퍼런스로 같이 보내 "수정 영역"을 시각적으로 지정한다.
@@ -585,21 +717,32 @@ export const ContiStudio = ({
     }
     if (!anyPainted) return null;
 
+    const W = ic.width;
+    const H = ic.height;
+
+    // ── 마스크를 살짝 dilate(팽창) — 클라이언트 합성의 soft mask 가장자리를
+    //    모델이 완전히 채울 수 있도록 NB2 가 인식하는 편집 영역을 약간 더 넓힘.
+    //    (blur 후 alpha > 0 임계화 → 거리 변환 없이 간단한 디스크 dilation 효과)
+    const featherPx = featherPxFor(W, H);
+    const dilatePx = Math.max(2, Math.round(featherPx * 1.5));
+    const dilated = document.createElement("canvas");
+    dilated.width = W;
+    dilated.height = H;
+    const dctx = dilated.getContext("2d")!;
+    dctx.filter = `blur(${dilatePx}px)`;
+    dctx.drawImage(mc, 0, 0, W, H);
+    dctx.filter = "none";
+    const dImg = dctx.getImageData(0, 0, W, H);
+
     const out = document.createElement("canvas");
-    out.width = ic.width;
-    out.height = ic.height;
+    out.width = W;
+    out.height = H;
     const ctx = out.getContext("2d")!;
     ctx.drawImage(ic, 0, 0);
-    const maskScaled = document.createElement("canvas");
-    maskScaled.width = ic.width;
-    maskScaled.height = ic.height;
-    const msCtx = maskScaled.getContext("2d")!;
-    msCtx.imageSmoothingEnabled = false;
-    msCtx.drawImage(mc, 0, 0, ic.width, ic.height);
-    const msImg = msCtx.getImageData(0, 0, ic.width, ic.height);
-    const imageData = ctx.getImageData(0, 0, out.width, out.height);
-    for (let i = 0; i < msImg.data.length; i += 4) {
-      if (msImg.data[i] > 128) {
+    const imageData = ctx.getImageData(0, 0, W, H);
+    for (let i = 0; i < dImg.data.length; i += 4) {
+      // blur 결과가 임의의 alpha 라도 > 0 이면 dilated 영역에 포함
+      if (dImg.data[i + 3] > 8) {
         imageData.data[i] = 255;
         imageData.data[i + 1] = 0;
         imageData.data[i + 2] = 255;
@@ -910,8 +1053,33 @@ Edit request (applies ONLY inside the magenta region):
         if (error) throw new Error(error.message);
         if (data?.error) throw new Error(data.error?.message ?? "Inpainting failed");
         console.log("[Inpaint] used model:", data.usedModel ?? "unknown", "| imageSize:", imageSize);
-        const publicUrl = data.publicUrl;
-        if (!publicUrl) throw new Error("No image URL returned");
+        const generatedUrl = data.publicUrl;
+        if (!generatedUrl) throw new Error("No image URL returned");
+
+        // ── 클라이언트 합성: 마스크 밖은 원본 픽셀로 강제 보존 ─────────
+        // NB2/Gemini 같은 generative 모델은 unmasked 영역도 다시 렌더하는 경향이 있어,
+        // 클라이언트에서 (원본) + (모델출력 ∩ soft mask) 로 합성해 보존 보장 + 자연스러운 경계.
+        let publicUrl = generatedUrl;
+        if (!maskEmptyVal) {
+          try {
+            const blob = await compositeInpaintResult(generatedUrl);
+            if (blob) {
+              const compositePath = `${sceneProjectId}/scene-${sceneNumber}-inpaint-composite-${Date.now()}.png`;
+              const { error: upErr } = await supabase.storage
+                .from("contis")
+                .upload(compositePath, blob, { upsert: true, contentType: "image/png" });
+              if (!upErr) {
+                publicUrl = supabase.storage.from("contis").getPublicUrl(compositePath).data.publicUrl;
+                console.log("[Inpaint] client-composited (preserved unmasked pixels):", publicUrl);
+              } else {
+                console.warn("[Inpaint] composite upload failed, using raw model output:", upErr.message);
+              }
+            }
+          } catch (e) {
+            console.warn("[Inpaint] client compositing failed, using raw model output:", (e as Error).message);
+          }
+        }
+
         await supabase.from("scenes").update({ conti_image_url: publicUrl }).eq("id", sceneId);
         onSaveInpaint(publicUrl);
         toast({ title: "Inpainting complete ✨" });
@@ -1106,7 +1274,7 @@ Edit request (applies ONLY inside the magenta region):
                     pointerEvents: "none",
                   }}
                 />
-                {/* 레이어 5: 이벤트 캡처 div */}
+                {/* 레이어 5: 이벤트 캡처 div — Pointer Events 통합(마우스/펜/터치) */}
                 <div
                   ref={eventDivRef}
                   style={{
@@ -1116,10 +1284,11 @@ Edit request (applies ONLY inside the magenta region):
                     touchAction: "none",
                     pointerEvents: isGenerating ? "none" : "auto",
                   }}
-                  onMouseDown={handleDrawMouseDown}
-                  onMouseMove={handleDrawMouseMove}
-                  onMouseLeave={handleDrawMouseLeave}
-                  onTouchStart={handleDrawTouchStart}
+                  onPointerDown={handleDrawPointerDown}
+                  onPointerMove={handleDrawPointerMove}
+                  onPointerUp={handleDrawPointerUp}
+                  onPointerCancel={handleDrawPointerUp}
+                  onPointerLeave={handleDrawPointerLeave}
                 />
               </div>
 
