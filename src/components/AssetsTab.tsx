@@ -632,7 +632,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
           );
         })()}
 
-      {/* ?? ?? ?? ??? ?? (1??, ?·??? + ?? ??) ?? */}
+      {/* Asset preview modal */}
       {previewAsset && (
         <AssetDetailModal
           asset={previewAsset}
@@ -918,7 +918,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 <div>
                   <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
                     <Package className="w-3 h-3" /> Item Detail{" "}
-                    <span className="text-muted-foreground/40">(optional · auto-analyzable)</span>
+                    <span className="text-muted-foreground/40">(optional Â· auto-analyzable)</span>
                   </label>
                   <Textarea
                     value={itemDescription}
@@ -932,7 +932,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 <div>
                   <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
                     <MapPin className="w-3 h-3" /> Location Description{" "}
-                    <span className="text-muted-foreground/40">(optional · auto-analyzable)</span>
+                    <span className="text-muted-foreground/40">(optional Â· auto-analyzable)</span>
                   </label>
                   <Textarea
                     value={spaceDescription}
