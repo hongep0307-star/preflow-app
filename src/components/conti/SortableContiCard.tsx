@@ -16,7 +16,74 @@ import {
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { KR, type Scene, type Asset } from "./contiTypes";
-import { InlineField, MetaRows, DescriptionField, SidePanel } from "./contiInternals";
+import { InlineField, MetaRows, DescriptionField, SidePanel, resolveAsset } from "./contiInternals";
+
+// Walks free-form scene text (description / location / etc) and returns the
+// set of canonical asset tag names referenced via `@mention`. Uses
+// resolveAsset so that case-insensitive matches and Korean-particle
+// suffixes (e.g. `@YD가`) collapse onto the registered tag, while
+// look-alike prefixes like `@BG` vs `@BG_medium` stay distinct (the
+// resolver rejects ASCII tails). Returns names without the leading `@`.
+const collectTagsFromText = (text: string | null | undefined, assets: Asset[]): string[] => {
+  if (!text) return [];
+  const matches = text.match(/@[\w가-힣]+/g) ?? [];
+  const names: string[] = [];
+  for (const m of matches) {
+    const r = resolveAsset(m, assets);
+    if (r && !names.includes(r.name)) names.push(r.name);
+  }
+  return names;
+};
+
+// Builds the full tagged_assets set for a scene from BOTH its description
+// AND location field. This is the single source of truth handed to the
+// Conti generator's fetchTaggedAssets — it routes background variations
+// like `BG_medium` to the right photo_variation, so the location tag
+// MUST land here.
+//
+// We deliberately DROP carry-over for `background` assets that are no
+// longer mentioned in either text field. Background framing is set by
+// the *currently mentioned* tag (Location: `@BG_medium` should mean
+// medium, not the legacy wide `@BG` that's still hanging around in
+// tagged_assets from when the user first wrote `@BG` in description).
+// Without this, both backgrounds get fetched and `buildAssetImageUrls`
+// just picks bgAssets[0] (often the wide one), which is exactly the
+// "BG_medium 호출했는데 BG가 불러와짐" symptom.
+//
+// Character / item tags keep carry-over to preserve chip-only
+// additions the user might have made via UI without retyping the @.
+const computeTaggedAssets = (
+  description: string | null | undefined,
+  location: string | null | undefined,
+  assets: Asset[],
+  existingTags: string[] = [],
+): string[] => {
+  const fromDesc = collectTagsFromText(description, assets);
+  const fromLoc = collectTagsFromText(location, assets);
+  const explicit = new Set([...fromDesc, ...fromLoc]);
+  const findAsset = (name: string) =>
+    assets.find((a) => a.tag_name === name || a.tag_name === `@${name}`);
+  const carryover = existingTags
+    .map((t) => (t.startsWith("@") ? t.slice(1) : t))
+    .filter((name) => {
+      const a = findAsset(name);
+      if (!a) return false;
+      // Drop background carry-over unless the user still mentions it
+      // explicitly somewhere in description / location.
+      if (a.asset_type === "background" && !explicit.has(name)) return false;
+      return true;
+    });
+  // Location tags must come FIRST so fetchTaggedAssets preserves the
+  // scene's primary background as bgAssets[0] downstream. If the user
+  // typed `@BG_close` in Location and `@BG` elsewhere in Description,
+  // the close-up sibling is the one the image pipeline should treat as
+  // the scene's location anchor.
+  const out: string[] = [];
+  for (const n of [...fromLoc, ...fromDesc, ...carryover]) {
+    if (!out.includes(n)) out.push(n);
+  }
+  return out;
+};
 
 const FORMAT_RATIO: Record<string, number> = {
   horizontal: 16 / 9,
@@ -1309,10 +1376,11 @@ export const SortableContiCard = memo(
             </div>
 
             {/* Variants quick-access icons (Relight / Use as Style).
-                Camera Variations / Change Angle 은 현재 NB2 단일 파이프라인으로는
-                원본 유지 + 앵글 변경이 안정적으로 안 되므로(모델 구조상 novel-view
-                synthesis 불가) 호버 퀵 아이콘에서 제거. 사이드패널 Variants 에는
-                "Unavailable" 로 여전히 노출되어 기능 존재 자체는 드러낸다. */}
+                Camera Variations / Change Angle 은 NB2 단일 파이프라인으로
+                원본 유지 + 앵글 변경이 안정적으로 안 되므로(novel-view
+                synthesis 모델 부재) 호버 퀵 아이콘에서 다시 제거. 사이드패널
+                Variants 에는 "Unavailable" 로 노출되어 기능 존재 자체는
+                드러낸다. */}
             {hasImage && (onRelight || onUseAsStyle) && (
               <div
                 style={{
@@ -1477,7 +1545,10 @@ export const SortableContiCard = memo(
                 value={scene.description ?? ""}
                 assets={assets}
                 existingTags={scene.tagged_assets ?? []}
-                onChange={(desc, tags) => saveField({ description: desc, tagged_assets: tags })}
+                onChange={(desc, tags) => {
+                  const nextTags = computeTaggedAssets(desc, scene.location, assets, tags);
+                  saveField({ description: desc, tagged_assets: nextTags });
+                }}
               />
             ) : (
               <>
@@ -1512,7 +1583,20 @@ export const SortableContiCard = memo(
                       }
                       if (k === "location") {
                         setLocalLocation(v);
-                        saveField({ location: v });
+                        // Recompute tagged_assets from BOTH location and the
+                        // (unchanged) description so a `@BG_medium` typed in
+                        // Location actually reaches generateConti via
+                        // fetchTaggedAssets — without this it never landed
+                        // in the persisted tagged_assets and the generator
+                        // fell back to whatever description-only tag was
+                        // there (typically the bare `@BG`).
+                        const nextTags = computeTaggedAssets(
+                          scene.description,
+                          v,
+                          assets,
+                          scene.tagged_assets ?? [],
+                        );
+                        saveField({ location: v, tagged_assets: nextTags });
                       }
                       if (k === "duration_sec") {
                         setLocalDuration(v);
@@ -1525,7 +1609,13 @@ export const SortableContiCard = memo(
                   value={scene.description ?? ""}
                   assets={assets}
                   existingTags={scene.tagged_assets ?? []}
-                  onChange={(desc, tags) => saveField({ description: desc, tagged_assets: tags })}
+                  onChange={(desc, tags) => {
+                    // DescriptionField only scans the description text, so
+                    // merge in tags found in the (unchanged) location field
+                    // here too. Mirrors the location handler above.
+                    const nextTags = computeTaggedAssets(desc, scene.location, assets, tags);
+                    saveField({ description: desc, tagged_assets: nextTags });
+                  }}
                 />
                 {!scene.description?.trim() && !isBusy && (
                   <div

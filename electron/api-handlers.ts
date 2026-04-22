@@ -38,8 +38,13 @@ export async function handleEnhanceInpaintPrompt(body: any) {
   // 1) PRESERVE: 원본에서 보존해야 할 요소 목록
   // 2) TAG_IDENTITY: 태그 에셋의 구체적 식별 특징
   // 두 블록을 프롬프트에 주입 → 이후 NB2 가 "인물 날리기" / "일반화" 실수 둘 다 줄어듦.
-  const hasSourceImage = !!sourceImageBase64 && hasMask;
-  const hasTagImage = !!tagImageBase64 && hasMask;
+  //
+  // 과거에는 hasMask=true 일 때만 이미지를 봤는데, 그 경우 브러시 없이 태그로만
+  // 호출하면 Gemini 가 TAG_IDENTITY 블록을 만들지 않아 NB2 가 태그 에셋을
+  // 제너릭하게 해석하는 문제가 있었다. 마스크 유무와 무관하게 이미지가 주어지면
+  // 보고 PRESERVE / TAG_IDENTITY 블록을 생성하도록 바꾼다.
+  const hasSourceImage = !!sourceImageBase64;
+  const hasTagImage = !!tagImageBase64;
 
   const systemPrompt = `You are an expert prompt writer for high-precision image inpainting/editing.
 
@@ -49,7 +54,7 @@ Your job:
 3. Rewrite it into a SHORT, EXTREMELY SPECIFIC editing prompt optimized for image editing AI.
 ${hasSourceImage ? `
 ═══ SCENE PRESERVATION (CRITICAL) ═══
-You will be given the SOURCE scene image. Study it first and silently identify every element that must be preserved OUTSIDE the masked region:
+You will be given the SOURCE scene image. Study it first and silently identify every element that must be preserved outside the edit target (${hasMask ? "the area OUTSIDE the painted mask" : "every subject/element NOT explicitly targeted by the user's edit request"}):
  - all people (count, pose, clothing, facial features, gaze direction, position)
  - background environment and layout
  - other objects (furniture, props, vehicles, etc.)
@@ -60,7 +65,7 @@ Then include a concise "PRESERVE:" block in the output prompt that explicitly li
   PRESERVE: 1 male character on the left wearing a navy suit, facing camera; industrial warehouse interior; cool blue-teal color grading; low-angle shot.
 ` : ""}${hasTagImage ? `
 ═══ TAG IDENTITY (CRITICAL) ═══
-You will also be given the TAG reference image — the exact object to place inside the masked region. Study it and write a "TAG_IDENTITY:" block that lists every visually distinctive feature the downstream model MUST reproduce so the object is immediately recognizable:
+You will also be given the TAG reference image — the exact object the user wants ${hasMask ? "placed inside the masked region" : "to appear as the edit target (the object/character/prop referenced by the user's request)"}. Study it and write a "TAG_IDENTITY:" block that lists every visually distinctive feature the downstream model MUST reproduce so the object is immediately recognizable:
  - object category and specific model/type (e.g., "AR-15 carbine", "Hermès Birkin bag 30cm", "Porsche 911 Carrera")
  - overall shape and proportions
  - dominant colors and color distribution (be specific: "matte black polymer body with tan FDE grip and handguard")
@@ -83,9 +88,9 @@ Rules:
 
 ═══ UNIVERSAL RULES ═══
 - Keep the prompt FOCUSED (up to ~14 sentences including PRESERVE and TAG_IDENTITY blocks).
-- The FIRST sentence must be the primary action on the masked region.
+- The FIRST sentence must be the primary action on ${hasMask ? "the masked region" : "the edit target referenced by the user"}.
 - Never introduce creative additions the user didn't ask for.
-- Always end with: Preserve all unmasked content exactly as-is — same people, same background, same lighting, same composition. Match the tag identity exactly inside the masked region.
+- Always end with: Preserve all ${hasMask ? "unmasked" : "non-target"} content exactly as-is — same people, same background, same lighting, same composition. Match the tag identity exactly ${hasMask ? "inside the masked region" : "on the targeted object"}.
 ${assetDescriptions ? `\nAdditional asset notes (supplementary — the TAG reference image is authoritative):\n${assetDescriptions}` : ""}${hasMask ? "\n[User painted a brush mask on the target area.]" : "\n[No brush mask. Full-image edit.]"}
 
 Return ONLY the final prompt. No explanations. No markdown.`;
@@ -225,6 +230,41 @@ export async function handleOpenaiImage(body: any) {
   const openaiKey = settings.openai_api_key;
   const storagePath = getStorageBasePath();
 
+  // save_local — the renderer hands us a pre-made image (base64) and we just
+  // persist it to storage + return a public URL. Used by Camera Variations
+  // Contact Sheet when the user picks one of the 9 client-split tiles, so
+  // we can keep the splitter in the renderer (no sharp/pngjs dep needed in
+  // the electron bundle) while still getting a normal storage URL we can
+  // write into the scene record.
+  if (body.mode === "save_local") {
+    const { imageBase64, projectId, sceneNumber, suffix = "local", folder } = body;
+    // Same bucket routing as the main inpaint path — see comment there.
+    if (!imageBase64 || !projectId || sceneNumber === undefined) {
+      return { error: "Missing required fields: imageBase64, projectId, sceneNumber" };
+    }
+    try {
+      const buf = Buffer.from(imageBase64, "base64");
+      const bucket = folder === "mood" ? "mood" : folder === "assets" ? "assets" : "contis";
+      const filePath = await saveToStorage(
+        storagePath,
+        bucket,
+        projectId,
+        `scene-${sceneNumber}-${suffix}-${Date.now()}.png`,
+        buf,
+      );
+      return { publicUrl: storageFileUrl(filePath), usedModel: `save-local:${suffix}` };
+    } catch (e) {
+      return { error: "save_local failed", detail: String(e) };
+    }
+  }
+
+  // gptModel: caller-pinned gpt-image variant for any GPT-side call inside
+  // this request (generations / vision-generate / edits). Defaults to
+  // gpt-image-2 (current GA). Mood Ideation passes "gpt-image-1.5"
+  // because image-2 takes 1–2 min per image and a 9-image batch in
+  // image-2 is unworkable for the mood-board UX.
+  const gptModel: string = body.gptModel ?? "gpt-image-2";
+
   if (body.mode === "style_transfer") {
     const { sourceImageUrl, styleImageUrl, prompt, gptPrompt, imageSize, projectId, sceneNumber } = body;
     if (!sourceImageUrl || !prompt || !projectId || sceneNumber === undefined) return { error: "Missing required fields" };
@@ -232,22 +272,34 @@ export async function handleOpenaiImage(body: any) {
       const imageUrls = [sourceImageUrl, ...(styleImageUrl ? [styleImageUrl] : [])];
       const aspect = sizeToNB2Aspect(imageSize ?? "1024x1536");
       const imgBuf = await callVertexNB2(settings, prompt, imageUrls, aspect);
-      const filePath = saveToStorage(storagePath, "contis", projectId, `scene_${sceneNumber}_style-nb2_${Date.now()}.png`, imgBuf);
+      const filePath = await saveToStorage(storagePath, "contis", projectId, `scene_${sceneNumber}_style-nb2_${Date.now()}.png`, imgBuf);
       return { publicUrl: storageFileUrl(filePath), usedModel: "nano-banana-2" };
     } catch (e) { console.error("[StyleTransfer] NB2 failed:", (e as Error).message); }
     try {
       if (!openaiKey) throw new Error("OPENAI_API_KEY not set");
       const srcBuf = await downloadImage(sourceImageUrl);
-      const imgBytes = await callGptInpaint(openaiKey, srcBuf.toString("base64"), null, gptPrompt ?? prompt, imageSize ?? "1024x1536", styleImageUrl ? [styleImageUrl] : []);
-      const filePath = saveToStorage(storagePath, "contis", projectId, `scene_${sceneNumber}_style-gpt_${Date.now()}.png`, imgBytes);
-      return { publicUrl: storageFileUrl(filePath), usedModel: "style-gpt-fallback" };
+      const imgBytes = await callGptInpaint(openaiKey, srcBuf.toString("base64"), null, gptPrompt ?? prompt, imageSize ?? "1024x1536", styleImageUrl ? [styleImageUrl] : [], gptModel);
+      const filePath = await saveToStorage(storagePath, "contis", projectId, `scene_${sceneNumber}_style-gpt_${Date.now()}.png`, imgBytes);
+      return { publicUrl: storageFileUrl(filePath), usedModel: `style-gpt-fallback:${gptModel}` };
     } catch (e) { return { error: "NB2 및 GPT 폴백 모두 실패", detail: String(e) }; }
   }
 
-  const { mode, prompt, imageBase64, maskBase64, sourceImageUrl, referenceImageUrls = [], projectId, sceneNumber, imageSize, size: sizeAlias, assetImageUrls = [], forceGpt = false, model, useNanoBanana = false, folder } = body;
+  const { mode, prompt, imageBase64, maskBase64, sourceImageUrl, referenceImageUrls = [], projectId, sceneNumber, imageSize, size: sizeAlias, assetImageUrls = [], forceGpt = false, model, useNanoBanana = false, folder, nb2ImageSize } = body;
+  // nb2ImageSize is the Vertex-side rendering resolution override ("1K" | "2K").
+  // Defaults to "1K" inside callVertexNB2; the Contact Sheet path bumps it to
+  // "2K" so each of the 9 post-split tiles has enough pixels to survive
+  // application to a scene thumbnail.
+  const nb2Size: "1K" | "2K" = nb2ImageSize === "2K" ? "2K" : "1K";
   if (!prompt || !projectId || sceneNumber === undefined) return { error: "Missing required fields: prompt, projectId, sceneNumber" };
   const size = imageSize ?? sizeAlias ?? "1024x1536";
-  const bucket = folder === "mood" ? "mood" : "contis";
+  // Bucket routing:
+  //   folder === "mood"   → mood reference images (briefs / mood-board)
+  //   folder === "assets" → asset library images (background framings, etc.)
+  //                          live alongside the original asset photo uploads
+  //                          so cleanup/backup/listing all see them as
+  //                          first-class asset blobs.
+  //   default              → conti scene outputs.
+  const bucket = folder === "mood" ? "mood" : folder === "assets" ? "assets" : "contis";
   let imageBytes: Buffer | undefined;
   let suffix: string = "";
   console.log("[openai-image] Request:", {
@@ -293,7 +345,7 @@ export async function handleOpenaiImage(body: any) {
             return `${role} ${u.length > 80 ? u.slice(0, 77) + "..." : u}`;
           }),
         );
-        imageBytes = await callVertexNB2(settings, prompt, nbUrls, sizeToNB2Aspect(size));
+        imageBytes = await callVertexNB2(settings, prompt, nbUrls, sizeToNB2Aspect(size), nb2Size);
         suffix = hasMask ? "inpaint-nb2-masked" : "inpaint-nb2";
       } catch (e) {
         console.error("[inpaint] NB2 failed, falling back to GPT edits:", (e as Error).message);
@@ -307,23 +359,28 @@ export async function handleOpenaiImage(body: any) {
         return { error: "GPT edits 폴백에 imageBase64 가 필요합니다", usedModel: "inpaint-failed" };
       }
       if (!openaiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다.");
-      imageBytes = await callGptInpaint(openaiKey, imageBase64, maskBase64 ?? null, prompt, size, referenceImageUrls);
-      suffix = hasMask ? "inpaint-gpt-masked-fallback" : "inpaint-gpt-fallback";
+      imageBytes = await callGptInpaint(openaiKey, imageBase64, maskBase64 ?? null, prompt, size, referenceImageUrls, gptModel);
+      suffix = hasMask ? `inpaint-gpt-masked-fallback:${gptModel}` : `inpaint-gpt-fallback:${gptModel}`;
     }
   } else if (model === "gpt") {
     if (!openaiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다. Settings에서 OpenAI API Key를 입력하세요.");
     if (openaiKey.startsWith("sk-ant-")) throw new Error("OpenAI 필드에 Anthropic 키가 입력되어 있습니다. Settings에서 올바른 OpenAI API Key(sk-proj-...)를 입력하세요.");
-    imageBytes = await callGptGenerations(openaiKey, prompt, size);
-    suffix = "gen-gpt";
+    // Vision-aware: when the renderer attached `assetImageUrls`, route
+    // through callGptVisionGenerate so gpt-image actually SEES the
+    // tagged assets instead of relying on text descriptions only. With
+    // no refs the helper transparently falls back to the text-only
+    // generations endpoint, so this is safe to call unconditionally.
+    imageBytes = await callGptVisionGenerate(openaiKey, prompt, size, assetImageUrls, gptModel);
+    suffix = assetImageUrls?.length > 0 ? `gen-gpt-vision:${gptModel}` : `gen-gpt:${gptModel}`;
   } else if (model === "nano-banana-2") {
-    try { imageBytes = await callVertexNB2(settings, prompt, assetImageUrls?.length > 0 ? assetImageUrls : undefined, sizeToNB2Aspect(size)); suffix = "nano-banana-2"; }
-    catch (e) { console.error("[nano-banana-2] failed:", (e as Error).message); if (!openaiKey) throw new Error("NB2 실패, GPT 폴백에 OPENAI_API_KEY 필요"); imageBytes = await callGptGenerations(openaiKey, prompt, size); suffix = "nb2-gpt-fallback"; }
+    try { imageBytes = await callVertexNB2(settings, prompt, assetImageUrls?.length > 0 ? assetImageUrls : undefined, sizeToNB2Aspect(size), nb2Size); suffix = "nano-banana-2"; }
+    catch (e) { console.error("[nano-banana-2] failed:", (e as Error).message); if (!openaiKey) throw new Error("NB2 실패, GPT 폴백에 OPENAI_API_KEY 필요"); imageBytes = await callGptVisionGenerate(openaiKey, prompt, size, assetImageUrls, gptModel); suffix = assetImageUrls?.length > 0 ? `nb2-gpt-vision-fallback:${gptModel}` : `nb2-gpt-fallback:${gptModel}`; }
   } else {
-    try { imageBytes = await callVertexNB2(settings, prompt, assetImageUrls?.length > 0 ? assetImageUrls : undefined, sizeToNB2Aspect(size)); suffix = "nano-banana-2"; }
-    catch { if (!openaiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다."); imageBytes = await callGptGenerations(openaiKey, prompt, size); suffix = "gen-gpt"; }
+    try { imageBytes = await callVertexNB2(settings, prompt, assetImageUrls?.length > 0 ? assetImageUrls : undefined, sizeToNB2Aspect(size), nb2Size); suffix = "nano-banana-2"; }
+    catch { if (!openaiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다."); imageBytes = await callGptVisionGenerate(openaiKey, prompt, size, assetImageUrls, gptModel); suffix = assetImageUrls?.length > 0 ? `gen-gpt-vision:${gptModel}` : `gen-gpt:${gptModel}`; }
   }
 
-  const filePath = saveToStorage(storagePath, bucket, projectId, `scene-${sceneNumber}-${suffix}-${Date.now()}.png`, imageBytes!);
+  const filePath = await saveToStorage(storagePath, bucket, projectId, `scene-${sceneNumber}-${suffix}-${Date.now()}.png`, imageBytes!);
   console.log("[openai-image] Saved:", filePath, "model:", suffix);
   return { publicUrl: storageFileUrl(filePath), usedModel: suffix };
 }
@@ -358,7 +415,16 @@ async function callVertexGemini(settings: any, model: string, requestBody: any):
 }
 
 // ── Vertex AI NB2 ──
-async function callVertexNB2(settings: any, prompt: string, imageUrls?: string[], aspectRatio?: string): Promise<Buffer> {
+// `imageSize` can be "1K" (default, fast) or "2K" (higher-res, used by the
+// Contact Sheet tab where we need enough pixels to crop a 3x3 grid into
+// 9 usable tiles without ending up with postage-stamp-sized thumbnails).
+async function callVertexNB2(
+  settings: any,
+  prompt: string,
+  imageUrls?: string[],
+  aspectRatio?: string,
+  imageSize?: "1K" | "2K",
+): Promise<Buffer> {
   const saKeyJson = settings.google_service_account_key;
   const gcpProjectId = settings.google_cloud_project_id;
   if (!saKeyJson || !gcpProjectId) throw new Error("Google Cloud credentials not configured");
@@ -377,7 +443,7 @@ async function callVertexNB2(settings: any, prompt: string, imageUrls?: string[]
       if (buf) parts.push({ inlineData: { mimeType: "image/png", data: buf.toString("base64") } });
     }
   }
-  const body = JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: aspectRatio ?? "9:16", imageSize: "1K" } } });
+  const body = JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: aspectRatio ?? "9:16", imageSize: imageSize ?? "1K" } } });
 
   /** Single attempt. Bubbles up a sentinel so the outer retry can decide to
    *  refresh the cached access token on 401 (revoked/expired/wall-clock-drift). */
@@ -489,9 +555,35 @@ async function getVertexAccessToken(saKeyJson: string): Promise<string> {
   }
 }
 
-async function callGptGenerations(apiKey: string, prompt: string, size: string): Promise<Buffer> {
-  console.log("[callGptGenerations] Starting:", { size, promptLen: prompt.length });
-  const body = { model: "gpt-image-1.5", prompt, n: 1, size, quality: "high", output_format: "png" };
+/* ── GPT image generations / edits ─────────────────────────────────────
+ *
+ * Three entry points:
+ *   1. callGptGenerations       — text-only (no refs).      /v1/images/generations
+ *   2. callGptVisionGenerate    — text + asset ref images.  /v1/images/edits (no mask)
+ *   3. callGptInpaint           — text + source + (mask).   /v1/images/edits
+ *
+ * All three accept a `model` parameter so callers can pin a specific
+ * gpt-image variant. Defaults to "gpt-image-2" (current GA). Mood
+ * Ideation passes "gpt-image-1.5" because image-2 generations take
+ * 1–2 minutes per image, and a 9-image mood batch in image-2 would
+ * blow past the user's patience budget.
+ *
+ * input_fidelity caveat: only `gpt-image-1.5` accepts the
+ * `input_fidelity` parameter — `gpt-image-2` returns HTTP 400
+ * (`invalid_input_fidelity_model`) when the field is present. The
+ * helpers below conditionally emit it based on the model name. */
+
+const SUPPORTS_INPUT_FIDELITY = (model: string) => model === "gpt-image-1.5";
+const DEFAULT_GPT_IMAGE_MODEL = "gpt-image-2";
+
+async function callGptGenerations(
+  apiKey: string,
+  prompt: string,
+  size: string,
+  model: string = DEFAULT_GPT_IMAGE_MODEL,
+): Promise<Buffer> {
+  console.log("[callGptGenerations] Starting:", { model, size, promptLen: prompt.length });
+  const body = { model, prompt, n: 1, size, quality: "high", output_format: "png" };
   const res = await fetchWithRetry(
     "https://api.openai.com/v1/images/generations",
     {
@@ -499,7 +591,7 @@ async function callGptGenerations(apiKey: string, prompt: string, size: string):
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
     },
-    { label: "openai-generations", timeoutMs: 180_000, retries: 1 },
+    { label: `openai-generations:${model}`, timeoutMs: 180_000, retries: 1 },
   );
   if (!res.ok) {
     const errBody = (await res.json().catch(() => ({}))) as any;
@@ -517,16 +609,111 @@ async function callGptGenerations(apiKey: string, prompt: string, size: string):
   return Buffer.from(b64, "base64");
 }
 
-async function callGptInpaint(apiKey: string, imageB64: string, maskB64: string | null, prompt: string, size: string, refUrls: string[] = []): Promise<Buffer> {
+/* Vision-aware generation: feeds ref images directly to gpt-image so it
+ * can preserve asset identity (faces, costumes, specific props, location
+ * geometry) instead of relying purely on the text description in the
+ * prompt. Routes through /v1/images/edits because /v1/images/generations
+ * does NOT accept any reference image parameter (verified live —
+ * `image_input` / `reference_images` / etc. all return `unknown_parameter`).
+ *
+ * image[] layout (current — same shape as callGptInpaint, max 4 slots
+ * accepted by gpt-image edits in practice):
+ *   image[0]  = refUrls[0]   (acts as the compositional canvas the model
+ *                             starts from + first identity reference)
+ *   image[1..]= refUrls[1..3] (additional identity references)
+ *
+ * Caller is responsible for ordering refUrls so that the most spatially
+ * informative asset (background → mood reference → primary character)
+ * sits at index 0. `buildAssetImageUrls` in src/lib/conti.ts already
+ * does this ordering.
+ *
+ * If refUrls is empty this delegates to plain callGptGenerations so the
+ * vision routing can be applied unconditionally at the call site. */
+async function callGptVisionGenerate(
+  apiKey: string,
+  prompt: string,
+  size: string,
+  refUrls: string[],
+  model: string = DEFAULT_GPT_IMAGE_MODEL,
+): Promise<Buffer> {
+  if (!refUrls || refUrls.length === 0) {
+    return callGptGenerations(apiKey, prompt, size, model);
+  }
+  console.log("[callGptVisionGenerate] Starting:", {
+    model,
+    size,
+    refCount: refUrls.length,
+    promptLen: prompt.length,
+  });
   const formData = new FormData();
-  formData.append("model", "gpt-image-1.5"); formData.append("prompt", prompt); formData.append("n", "1"); formData.append("size", size); formData.append("quality", "high"); formData.append("input_fidelity", "high"); formData.append("output_format", "png");
+  formData.append("model", model);
+  formData.append("prompt", prompt);
+  formData.append("n", "1");
+  formData.append("size", size);
+  formData.append("quality", "high");
+  formData.append("output_format", "png");
+  if (SUPPORTS_INPUT_FIDELITY(model)) formData.append("input_fidelity", "high");
+  // Cap at 8 image[] entries. `/v1/images/edits` accepts up to 16 but the
+  // identity-lift curve flattens well before that. 4 was too tight for
+  // Mood Ideation scenes that routinely have
+  //   [background] + [2 characters] + [weapon/prop] + [mood ref]
+  // → at 4 the weapon (ordered last by the caller) got starved and the
+  // model invented a generic rifle. 8 covers those multi-asset scenes
+  // comfortably while keeping per-call input cost bounded.
+  const cap = Math.min(refUrls.length, 8);
+  let attached = 0;
+  for (let i = 0; i < cap; i++) {
+    try {
+      const buf = await downloadImage(refUrls[i]);
+      formData.append("image[]", new Blob([buf], { type: "image/png" }), `ref-${i}.png`);
+      attached++;
+    } catch (e) {
+      console.warn(`[callGptVisionGenerate] ref ${i} download failed, skipping:`, (e as Error).message);
+    }
+  }
+  if (attached === 0) {
+    // All refs failed to download — fall back to text-only generations so
+    // the user still gets an image instead of a hard error.
+    console.warn("[callGptVisionGenerate] no refs attached, falling back to text-only generations");
+    return callGptGenerations(apiKey, prompt, size, model);
+  }
+  const res = await fetchWithRetry(
+    "https://api.openai.com/v1/images/edits",
+    { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: formData },
+    { label: `openai-vision-generate:${model}`, timeoutMs: 180_000, retries: 1 },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as any;
+    const msg = err.error?.message ?? `GPT vision generate failed (HTTP ${res.status})`;
+    console.error("[callGptVisionGenerate] API error:", res.status, msg);
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as any;
+  const b64 = data.data?.[0]?.b64_json;
+  if (!b64) throw new Error("No b64_json in GPT vision response");
+  console.log("[callGptVisionGenerate] Success, image bytes:", b64.length, "| refs attached:", attached);
+  return Buffer.from(b64, "base64");
+}
+
+async function callGptInpaint(
+  apiKey: string,
+  imageB64: string,
+  maskB64: string | null,
+  prompt: string,
+  size: string,
+  refUrls: string[] = [],
+  model: string = DEFAULT_GPT_IMAGE_MODEL,
+): Promise<Buffer> {
+  const formData = new FormData();
+  formData.append("model", model); formData.append("prompt", prompt); formData.append("n", "1"); formData.append("size", size); formData.append("quality", "high"); formData.append("output_format", "png");
+  if (SUPPORTS_INPUT_FIDELITY(model)) formData.append("input_fidelity", "high");
   formData.append("image[]", new Blob([Buffer.from(imageB64, "base64")], { type: "image/png" }), "image.png");
   for (let i = 0; i < Math.min(refUrls.length, 3); i++) { try { const refBuf = await downloadImage(refUrls[i]); formData.append("image[]", new Blob([refBuf], { type: "image/png" }), `ref-${i}.png`); } catch {} }
   if (maskB64) formData.append("mask", new Blob([Buffer.from(maskB64, "base64")], { type: "image/png" }), "mask.png");
   const res = await fetchWithRetry(
     "https://api.openai.com/v1/images/edits",
     { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: formData },
-    { label: "openai-edits", timeoutMs: 180_000, retries: 1 },
+    { label: `openai-edits:${model}`, timeoutMs: 180_000, retries: 1 },
   );
   if (!res.ok) {
     const err = (await res.json()) as any;
@@ -539,13 +726,13 @@ async function callGptInpaint(apiKey: string, imageB64: string, maskB64: string 
 async function downloadImage(url: string): Promise<Buffer> {
   if (url.startsWith("local-file://")) {
     const stripped = url.replace(/^local-file:\/\//i, "").split(/[?#]/)[0];
-    return fs.readFileSync(decodeURIComponent(stripped)) as unknown as Buffer;
+    return (await fs.promises.readFile(decodeURIComponent(stripped))) as unknown as Buffer;
   }
   const localPrefix = `${LOCAL_SERVER_BASE_URL}/storage/file/`;
   if (url.startsWith(localPrefix)) {
     const relative = decodeURIComponent(url.slice(localPrefix.length));
     const fullPath = path.join(getStorageBasePath(), relative);
-    return fs.readFileSync(fullPath) as unknown as Buffer;
+    return (await fs.promises.readFile(fullPath)) as unknown as Buffer;
   }
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to download: ${res.status}`);
@@ -560,10 +747,10 @@ function sizeToNB2Aspect(size: string): string {
   return "9:16";
 }
 
-function saveToStorage(basePath: string, bucket: string, projectId: string, fileName: string, data: Buffer): string {
+async function saveToStorage(basePath: string, bucket: string, projectId: string, fileName: string, data: Buffer): Promise<string> {
   const dir = path.join(basePath, bucket, projectId);
-  fs.mkdirSync(dir, { recursive: true });
+  await fs.promises.mkdir(dir, { recursive: true });
   const fullPath = path.join(dir, fileName);
-  fs.writeFileSync(fullPath, data);
+  await fs.promises.writeFile(fullPath, data);
   return fullPath;
 }

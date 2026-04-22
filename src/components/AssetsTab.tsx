@@ -27,7 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 
-import { type Asset, type AssetType, type FocalPoint, KR, KR_BG, KR_BORDER, TYPE_META } from "./assets/types";
+import { type Asset, type AssetType, type FocalPoint, type PhotoVariation, KR, KR_BG, KR_BORDER, TYPE_META } from "./assets/types";
 import { fileToBase64, urlToBase64 } from "./assets/imageUtils";
 import { callVisionAnalyze } from "./assets/vision";
 import { AssetDetailModal } from "./assets/AssetDetailModal";
@@ -160,6 +160,50 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
     fetchAssets();
     fetchSceneCounts();
   }, [fetchAssets, fetchSceneCounts, projectId]);
+
+  // Live merge of background-variation work that happens out-of-band:
+  //   - `preflow:asset-created` fires once per sibling spawned from the
+  //     AssetDetailModal's "Generate Camera Framings" buttons (or from
+  //     the legacy photo_variations migration). We append the new row
+  //     to `assets` so it appears in the grid immediately and so the
+  //     modal's sibling chip list reconciles without a refetch.
+  //   - `preflow:asset-variations-updated` still fires during legacy
+  //     migration to clear a parent's stale `photo_variations` array.
+  //     We patch the in-memory cache so the migration banner stops
+  //     retriggering.
+  useEffect(() => {
+    const onAssetCreated = (e: Event) => {
+      const ce = e as CustomEvent<Asset>;
+      const created = ce.detail;
+      if (!created || !created.id) return;
+      setAssets((prev) => (prev.some((a) => a.id === created.id) ? prev : [...prev, created]));
+    };
+    const onVariationsUpdated = (e: Event) => {
+      const ce = e as CustomEvent<{ assetId: string; variations: PhotoVariation[] }>;
+      const detail = ce.detail;
+      if (!detail || !detail.assetId) return;
+      setAssets((prev) =>
+        prev.map((a) =>
+          a.id === detail.assetId ? { ...a, photo_variations: detail.variations } : a,
+        ),
+      );
+      setPreviewAsset((p) =>
+        p && p.id === detail.assetId ? { ...p, photo_variations: detail.variations } : p,
+      );
+    };
+    window.addEventListener("preflow:asset-created", onAssetCreated as EventListener);
+    window.addEventListener(
+      "preflow:asset-variations-updated",
+      onVariationsUpdated as EventListener,
+    );
+    return () => {
+      window.removeEventListener("preflow:asset-created", onAssetCreated as EventListener);
+      window.removeEventListener(
+        "preflow:asset-variations-updated",
+        onVariationsUpdated as EventListener,
+      );
+    };
+  }, []);
 
   const resetForm = () => {
     setTagName("");
@@ -476,23 +520,77 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
         </div>
       );
 
-    /* ?? */
-    return (
-      <div
-        key={asset.id}
-        className="border border-border bg-card overflow-hidden hover:border-primary/30 transition-all group cursor-pointer"
-        style={{ borderRadius: 4 }}
-        onClick={() => setPreviewAsset(asset)}
-      >
-        <div className="relative aspect-video bg-background overflow-hidden">
-          {asset.photo_url ? (
-            <img src={asset.photo_url} className="w-full h-full object-cover" alt={asset.tag_name} loading="lazy" decoding="async" />
-          ) : (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <MapPin className="w-8 h-8 text-muted-foreground/20" />
-            </div>
-          )}
-        </div>
+    /* Background card */
+    {
+      // Count sibling background assets spawned off this one via the
+      // "Generate Camera Framings" action. Matches `{parent}_{framing}`
+      // and `{parent}_{framing}_<n>` against the framing vocabulary.
+      const parentTag = asset.tag_name.replace(/^@/, "");
+      const siblingPattern = new RegExp(
+        `^${parentTag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}_(wide|medium|close|detail)(?:_\\d+)?$`,
+      );
+      const siblingCount = assets.reduce((n, a) => {
+        if (a.id === asset.id) return n;
+        if (a.asset_type !== "background") return n;
+        return siblingPattern.test(a.tag_name.replace(/^@/, "")) ? n + 1 : n;
+      }, 0);
+      // Legacy photo_variations (migrated on next modal-open) still count
+      // toward the badge so users aren't confused by an empty badge on
+      // pre-migration projects.
+      const legacyVariationCount = Array.isArray(asset.photo_variations)
+        ? asset.photo_variations.length
+        : 0;
+      const variationCount = siblingCount + legacyVariationCount;
+      return (
+        <div
+          key={asset.id}
+          className="border border-border bg-card overflow-hidden hover:border-primary/30 transition-all group cursor-pointer"
+          style={{ borderRadius: 4 }}
+          onClick={() => setPreviewAsset(asset)}
+        >
+          <div className="relative aspect-video bg-background overflow-hidden">
+            {asset.photo_url ? (
+              <img src={asset.photo_url} className="w-full h-full object-cover" alt={asset.tag_name} loading="lazy" decoding="async" />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <MapPin className="w-8 h-8 text-muted-foreground/20" />
+              </div>
+            )}
+            {/* Camera framings indicator ? small overlay showing the
+                number of sibling framing assets the user has generated
+                off this parent. Visible at 0 too so users discover the
+                feature; brightens once at least one exists. Clicking
+                the card opens AssetDetailModal where they can generate
+                more. Hidden entirely on siblings themselves (whose
+                tag_name already matches the framing pattern) so we
+                don't recursively label `@BG_wide` with its own badge. */}
+            {asset.photo_url && !siblingPattern.test(parentTag) && (
+              <div
+                className="absolute top-1.5 right-1.5 flex items-center gap-1 px-1.5 py-0.5"
+                style={{
+                  background: variationCount > 0 ? "rgba(0,0,0,0.65)" : "rgba(0,0,0,0.45)",
+                  borderRadius: 2,
+                  border: variationCount > 0 ? `1px solid ${KR_BORDER}` : "1px solid rgba(255,255,255,0.12)",
+                }}
+                title={
+                  variationCount === 0
+                    ? "Click to generate camera framings"
+                    : `${variationCount} framing${variationCount === 1 ? "" : "s"} generated`
+                }
+              >
+                <Camera
+                  className="w-3 h-3"
+                  style={{ color: variationCount > 0 ? "#fca5a5" : "rgba(255,255,255,0.55)" }}
+                />
+                <span
+                  className="text-[9px] font-bold leading-none"
+                  style={{ color: variationCount > 0 ? "#fca5a5" : "rgba(255,255,255,0.55)" }}
+                >
+                  {variationCount}
+                </span>
+              </div>
+            )}
+          </div>
         <div className="px-3 py-2 space-y-1">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold" style={{ color: KR }}>
@@ -509,6 +607,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
         </div>
       </div>
     );
+    }
   };
 
   /* ????????????????????????????????????????
@@ -638,6 +737,29 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
           asset={previewAsset}
           sceneCount={sceneCounts[previewAsset.tag_name] ?? 0}
           onClose={() => setPreviewAsset(null)}
+          allAssets={assets}
+          onAssetCreated={(newAsset) => {
+            // Append the freshly inserted background asset so the grid
+            // reflects it immediately without a full refetch round-trip.
+            // (The `preflow:asset-created` broadcast handler also
+            // dedupes by id, so callers that also dispatch the event
+            // don't double-add.)
+            setAssets((prev) =>
+              prev.some((a) => a.id === newAsset.id)
+                ? prev
+                : [
+                    ...prev,
+                    { ...newAsset, asset_type: newAsset.asset_type ?? "background" },
+                  ],
+            );
+            // Switch to the Background tab so the user sees the new tile
+            // they just created (avoids the "did anything happen?" beat
+            // when they were viewing a different asset type's modal).
+            setActiveType("background");
+          }}
+          onSwitchAsset={(nextAsset) => {
+            setPreviewAsset(nextAsset);
+          }}
         />
       )}
 
@@ -918,7 +1040,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 <div>
                   <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
                     <Package className="w-3 h-3" /> Item Detail{" "}
-                    <span className="text-muted-foreground/40">(optional · auto-analyzable)</span>
+                    <span className="text-muted-foreground/40">(optional ? auto-analyzable)</span>
                   </label>
                   <Textarea
                     value={itemDescription}
@@ -932,7 +1054,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 <div>
                   <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
                     <MapPin className="w-3 h-3" /> Location Description{" "}
-                    <span className="text-muted-foreground/40">(optional · auto-analyzable)</span>
+                    <span className="text-muted-foreground/40">(optional ? auto-analyzable)</span>
                   </label>
                   <Textarea
                     value={spaceDescription}

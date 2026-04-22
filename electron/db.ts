@@ -142,6 +142,17 @@ function createTables() {
     d.exec(`ALTER TABLE assets ADD COLUMN photo_crop TEXT`);
   } catch (_) { /* column already exists */ }
 
+  // photo_variations: stores per-framing alternate views for `background` assets
+  // (wide / medium / close / detail / alt). Generated on-demand from the
+  // primary photo_url via the background_variations IPC, then used at scene
+  // gen time to select the framing-matched reference image instead of always
+  // forcing the same wide composition into close-up scenes. JSON-encoded
+  // array of { url, framing, caption?, generated_at }. Optional column —
+  // backgrounds without variations fall back to photo_url as before.
+  try {
+    d.exec(`ALTER TABLE assets ADD COLUMN photo_variations TEXT`);
+  } catch (_) { /* column already exists */ }
+
   d.exec(`
     CREATE TABLE IF NOT EXISTS scene_versions (
       id TEXT PRIMARY KEY,

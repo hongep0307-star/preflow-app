@@ -93,7 +93,9 @@ export function startLocalServer(): Promise<number> {
           res.end();
           return;
         }
-        if (!fs.existsSync(fullPath)) {
+        try {
+          await fs.promises.access(fullPath);
+        } catch {
           console.warn("[local-server] 404:", url, "→", fullPath);
           res.writeHead(404);
           res.end();
@@ -136,8 +138,8 @@ export function startLocalServer(): Promise<number> {
         } else if (url === "/storage/upload") {
           const { bucket, filePath: fp, data: dataB64 } = body;
           const fullPath = resolveBucketPath(bucket, fp);
-          fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-          fs.writeFileSync(fullPath, Buffer.from(dataB64, "base64"));
+          await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
+          await fs.promises.writeFile(fullPath, Buffer.from(dataB64, "base64"));
           result = { error: null };
         } else if (url === "/storage/getPublicUrl") {
           const { bucket, filePath: fp } = body;
@@ -145,19 +147,21 @@ export function startLocalServer(): Promise<number> {
           result = { data: { publicUrl: `local-file://${fullPath.replace(/\\/g, "/")}` } };
         } else if (url === "/storage/remove") {
           const { bucket, filePaths } = body;
-          for (const fp of filePaths) {
-            try {
-              fs.unlinkSync(resolveBucketPath(bucket, fp));
-            } catch {
-              /* ignore missing files / disallowed paths */
-            }
-          }
+          await Promise.all(
+            (filePaths as string[]).map(async (fp) => {
+              try {
+                await fs.promises.unlink(resolveBucketPath(bucket, fp));
+              } catch {
+                /* ignore missing files / disallowed paths */
+              }
+            }),
+          );
           result = { error: null };
         } else if (url === "/storage/list") {
           const { bucket, folder, options } = body;
           try {
             const dir = resolveBucketPath(bucket, folder ?? "");
-            const files = fs.readdirSync(dir);
+            const files = await fs.promises.readdir(dir);
             const limit = options?.limit ?? 1000;
             const offset = options?.offset ?? 0;
             result = {

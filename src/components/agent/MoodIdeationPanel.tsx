@@ -1,6 +1,11 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { generateMoodImages } from "@/lib/moodIdeation";
+import {
+  generateMoodImages,
+  MOOD_IMAGE_MODEL_DEFAULT,
+  MOOD_MODEL_USES_ASSET_REFS,
+  type MoodImageModel,
+} from "@/lib/moodIdeation";
 import { supabase } from "@/lib/supabase";
 import { Trash2, Loader2, X, Check, ExternalLink, Sparkles, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -469,9 +474,44 @@ export const MoodIdeationPanel = ({
     },
     [thumbColsKey],
   );
-  const [moodModel, setMoodModel] = useState<"creative" | "asset">("creative");
+  // Mood 이미지 생성 모델. 빠른 텍스트-only GPT 1.5 가 기본값.
+  // 사용자의 마지막 선택은 프로젝트 단위로 localStorage 에 저장되어
+  // 탭 이동/재진입/새로고침 후에도 유지된다.
+  const moodModelKey = `ff_mood_model_${projectId}`;
+  const [moodModel, setMoodModelState] = useState<MoodImageModel>(() => {
+    try {
+      const raw = typeof window !== "undefined" ? window.localStorage.getItem(moodModelKey) : null;
+      if (raw === "gpt-image-1.5" || raw === "gpt-image-2" || raw === "nano-banana-2") {
+        return raw;
+      }
+      // 과거 "creative" / "asset" 문자열을 신규 모델명으로 마이그레이트.
+      if (raw === "asset") return "nano-banana-2";
+      if (raw === "creative") return "gpt-image-1.5";
+    } catch {}
+    return MOOD_IMAGE_MODEL_DEFAULT;
+  });
+  const setMoodModel = useCallback(
+    (val: MoodImageModel) => {
+      setMoodModelState(val);
+      try {
+        window.localStorage.setItem(moodModelKey, val);
+      } catch {}
+    },
+    [moodModelKey],
+  );
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
+
+  const MOOD_MODEL_LABELS: Record<MoodImageModel, string> = {
+    "gpt-image-1.5": "GPT Image 1.5",
+    "gpt-image-2": "GPT Image 2",
+    "nano-banana-2": "Nano Banana 2",
+  };
+  const MOOD_MODEL_DESCRIPTIONS: Record<MoodImageModel, string> = {
+    "gpt-image-1.5": "Fastest · Text-based (asset appearance not reflected)",
+    "gpt-image-2": "Vision · Reflects asset images · Slow",
+    "nano-banana-2": "Reflects asset images · Vertex",
+  };
   const genMoodId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
   useEffect(() => {
@@ -655,6 +695,9 @@ export const MoodIdeationPanel = ({
   const likedCount = moodImages.filter((img) => img.liked).length;
   const attachImg = attachMenu ? moodImages.find((i) => i.id === attachMenu.id) : null;
 
+  const hasPhotoAssets = assets.some((a) => a.photo_url);
+  const MOOD_MODEL_OPTIONS: MoodImageModel[] = ["gpt-image-1.5", "gpt-image-2", "nano-banana-2"];
+
   const modelSelector = (
     <div ref={modelMenuRef} style={{ position: "relative" }}>
       <button
@@ -675,7 +718,7 @@ export const MoodIdeationPanel = ({
           fontWeight: 500,
         }}
       >
-        {moodModel === "creative" ? "Creative" : "Asset"}
+        {MOOD_MODEL_LABELS[moodModel]}
         <span style={{ fontSize: 9, opacity: 0.6 }}>{modelMenuOpen ? "▴" : "▾"}</span>
       </button>
       {modelMenuOpen && (
@@ -690,98 +733,78 @@ export const MoodIdeationPanel = ({
             overflow: "hidden",
             boxShadow: "0 4px 16px rgba(0,0,0,0.1)",
             zIndex: 100,
-            minWidth: 240,
+            minWidth: 260,
           }}
         >
-          <button
-            onClick={() => {
-              setMoodModel("creative");
-              setModelMenuOpen(false);
-            }}
-            style={{
-              width: "100%",
-              display: "flex",
-              flexDirection: "column",
-              padding: "8px 12px",
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              textAlign: "left",
-              fontFamily: "inherit",
-            }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span
-                style={{
-                  fontSize: 12,
-                  fontWeight: moodModel === "creative" ? 600 : 400,
-                  color: moodModel === "creative" ? KR : "hsl(var(--foreground))",
+          {MOOD_MODEL_OPTIONS.map((m) => {
+            const needsAsset = MOOD_MODEL_USES_ASSET_REFS[m];
+            const disabled = needsAsset && !hasPhotoAssets;
+            const active = moodModel === m;
+            return (
+              <button
+                key={m}
+                onClick={() => {
+                  if (disabled) {
+                    toast({
+                      title: "Register assets first",
+                      description: "Assets with images are required",
+                      variant: "destructive",
+                    });
+                    return;
+                  }
+                  setMoodModel(m);
+                  setModelMenuOpen(false);
                 }}
-              >
-                Creative
-              </span>
-              {moodModel === "creative" && (
-                <Check className="w-3 h-3 ml-auto" style={{ color: "hsl(var(--muted-foreground))" }} />
-              )}
-            </div>
-            <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
-              Multiple angles, cinematic direction (Asset appearance not reflected)
-            </span>
-          </button>
-          <button
-            onClick={() => {
-              const hasPhotoAssets = assets.some((a) => a.photo_url);
-              if (!hasPhotoAssets) {
-                toast({
-                  title: "에셋을 먼저 등록하세요",
-                  description: "이미지가 있는 에셋이 필요합니다",
-                  variant: "destructive",
-                });
-                return;
-              }
-              setMoodModel("asset");
-              setModelMenuOpen(false);
-            }}
-            style={{
-              width: "100%",
-              display: "flex",
-              flexDirection: "column",
-              padding: "8px 12px",
-              background: "none",
-              border: "none",
-              cursor: assets.some((a) => a.photo_url) ? "pointer" : "not-allowed",
-              textAlign: "left",
-              fontFamily: "inherit",
-              opacity: assets.some((a) => a.photo_url) ? 1 : 0.4,
-            }}
-            onMouseEnter={(e) => {
-              if (assets.some((a) => a.photo_url))
-                (e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))";
-            }}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span
                 style={{
-                  fontSize: 12,
-                  fontWeight: moodModel === "asset" ? 600 : 400,
-                  color: moodModel === "asset" ? KR : "hsl(var(--foreground))",
+                  width: "100%",
+                  display: "flex",
+                  flexDirection: "column",
+                  padding: "8px 12px",
+                  background: "none",
+                  border: "none",
+                  cursor: disabled ? "not-allowed" : "pointer",
+                  textAlign: "left",
+                  fontFamily: "inherit",
+                  opacity: disabled ? 0.4 : 1,
                 }}
+                onMouseEnter={(e) => {
+                  if (!disabled) (e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))";
+                }}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
               >
-                Asset
-              </span>
-              {moodModel === "asset" && (
-                <Check className="w-3 h-3 ml-auto" style={{ color: "hsl(var(--muted-foreground))" }} />
-              )}
-            </div>
-            <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
-              {assets.some((a) => a.photo_url)
-                ? "Actual asset implementation (Character/Environment)"
-                : "Register assets first"}
-            </span>
-          </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: active ? 600 : 400,
+                      color: active ? KR : "hsl(var(--foreground))",
+                    }}
+                  >
+                    {MOOD_MODEL_LABELS[m]}
+                  </span>
+                  {m === MOOD_IMAGE_MODEL_DEFAULT && (
+                    <span
+                      style={{
+                        fontSize: 9,
+                        padding: "1px 5px",
+                        border: "0.5px solid hsl(var(--border))",
+                        color: "hsl(var(--muted-foreground))",
+                        letterSpacing: 0.3,
+                      }}
+                    >
+                      DEFAULT
+                    </span>
+                  )}
+                  {active && (
+                    <Check className="w-3 h-3 ml-auto" style={{ color: "hsl(var(--muted-foreground))" }} />
+                  )}
+                </div>
+                <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
+                  {disabled ? "Register asset images first" : MOOD_MODEL_DESCRIPTIONS[m]}
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

@@ -30,8 +30,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Move3d, RotateCcw, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import type { Scene } from "./contiTypes";
+import type { Scene, Asset } from "./contiTypes";
 import { IMAGE_SIZE_MAP } from "@/lib/conti";
+import {
+  buildAdvancedChainPrompt,
+  EMOTION_CHIPS,
+  getEmotion,
+  type EmotionChip,
+} from "@/lib/cameraLibrary";
+import { buildSubjectDescriptor } from "@/lib/subjectDescriptor";
 
 type VideoFormat = keyof typeof IMAGE_SIZE_MAP;
 
@@ -177,38 +184,43 @@ const summarizeZoom = (zoom: number): string => {
   return `out ${-a}%`;
 };
 
-/* 짧고 선언적인 한 줄 프롬프트.
+/* Prompt construction delegates to buildAdvancedChainPrompt in the shared
+ * camera library. The "A, then B" chain pattern (yaw+zoom as one clause,
+ * pitch as a second step) has measurably better NB2 adherence than the
+ * older stacked-adjective run — NB2 would routinely collapse
+ * "pulled back, and 30° right orbit, and tilted up" into just the first
+ * clause. Routing both to the library also means any future prompt
+ * tuning happens in one place, not three.
  *
- * Gemini 이미지 모델은 긴 구조화 프롬프트보다 **짧은 declarative instruction** 에 훨씬 안정적.
- * Relight 가 잘 먹는 이유도 실질적으로 한 문장+수식어 구조이기 때문. Change Angle 도 동일
- * 패턴으로 깎는다:
+ * Mapping from sliders → clauses:
+ *   distanceClause = zoom + yaw   (framing bucket: "wider and orbited 30° right")
+ *   angleClause    = pitch        ("tilted slightly up at the subject")
  *
- *   "Same reference scene, same character, same outfit, same location, same lighting,
- *    same style — but shot from a camera that has been <camera move>. Cinematic."
- *
- * 사용자가 프리뷰에서 프롬프트를 직접 수정해 바로 테스트할 수 있도록, 기본 생성물은
- * 최대한 깔끔하게. 실험은 textarea 에서 자유롭게. */
-const buildChangeAnglePrompt = (cfg: ChangeAngleConfig): string => {
+ * Why group yaw with zoom: yaw without a distance change reads as a pure
+ * orbit, and that's a framing adjustment; keeping it in the first chain
+ * step lets the second step be a clean viewpoint tilt. */
+const buildChangeAnglePrompt = (
+  cfg: ChangeAngleConfig,
+  subject: string,
+  emotion: EmotionChip | null,
+): string => {
   const y = yawPhrase(cfg.yaw);
   const p = pitchPhrase(cfg.pitch);
   const z = zoomPhrase(cfg.zoom);
-  const extra = cfg.customText.trim();
-  const extraTail = extra ? " " + extra : "";
 
-  if (!y && !p && !z) {
-    return (
-      "Re-render the same reference scene, exactly the same camera angle, same character, same outfit, same props, same location, same lighting, same style." +
-      extraTail
-    );
-  }
+  // Combine zoom + yaw into a single distance/framing sentence. If only
+  // one of them is set, use that; if both, join with "and". Empty = no move.
+  const distanceParts = [z, y].filter((s): s is string => !!s);
+  const distanceClause = distanceParts.length > 0 ? distanceParts.join(" and ") : null;
+  const angleClause = p ?? null;
 
-  const parts = [y, p, z].filter((s): s is string => !!s);
-  const cameraMove = parts.join(", and ");
-
-  return (
-    `Same reference scene — same character, same outfit, same props, same location, same lighting, same style. Shot from a camera that has been ${cameraMove}. Keep identity and environment; only the camera position changes. Cinematic photography.` +
-    extraTail
-  );
+  return buildAdvancedChainPrompt({
+    subject,
+    distanceClause,
+    angleClause,
+    emotion,
+    extraNotes: cfg.customText,
+  });
 };
 
 /* ━━━ Sphere Control ━━━
@@ -591,6 +603,9 @@ const Section = ({ label, meta, icon, first, children }: SectionProps) => (
 /* ━━━ Main modal ━━━ */
 export interface ChangeAngleModalProps {
   scene: Scene;
+  /** Asset library — threaded into the subject descriptor so NB2 gets
+   *  a written identity anchor to complement the visual reference. */
+  assets?: Asset[];
   projectId: string;
   videoFormat: VideoFormat;
   onClose: () => void;
@@ -620,6 +635,7 @@ const PANEL_STYLE: React.CSSProperties = {
 
 export function ChangeAngleModal({
   scene,
+  assets = [],
   projectId,
   videoFormat,
   onClose,
@@ -631,8 +647,23 @@ export function ChangeAngleModal({
   const [error, setError] = useState<string | null>(null);
   /** null = auto-generated from cfg, string = user-edited override. */
   const [promptOverride, setPromptOverride] = useState<string | null>(null);
+  /** Mood/Intent chip. Biases framing and expression without overwriting
+   *  identity. See src/lib/cameraLibrary.ts → EMOTION_CHIPS. */
+  const [emotionId, setEmotionId] = useState<string>("neutral");
+  const emotion = useMemo<EmotionChip | null>(
+    () => getEmotion(emotionId) ?? null,
+    [emotionId],
+  );
 
-  const generatedPrompt = useMemo(() => buildChangeAnglePrompt(cfg), [cfg]);
+  const subject = useMemo(
+    () => buildSubjectDescriptor(scene, assets),
+    [scene, assets],
+  );
+
+  const generatedPrompt = useMemo(
+    () => buildChangeAnglePrompt(cfg, subject, emotion),
+    [cfg, subject, emotion],
+  );
   const prompt = promptOverride ?? generatedPrompt;
   const usingOverride = promptOverride !== null;
 
@@ -648,6 +679,7 @@ export function ChangeAngleModal({
     setCfg(DEFAULT_CONFIG);
     setPromptOverride(null);
     setError(null);
+    setEmotionId("neutral");
   };
 
   const handleApply = async () => {
@@ -770,6 +802,59 @@ export function ChangeAngleModal({
             >
               <X className="w-4 h-4" />
             </button>
+          </div>
+
+          {/* Mood / Intent chip row — biases framing and expression without
+              overwriting identity. Same set CameraVariationsModal uses,
+              so a user's aesthetic preference carries across modals. */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "8px 20px",
+              borderBottom: "1px solid rgba(255,255,255,0.05)",
+              flexShrink: 0,
+              background: "#0c0c0c",
+            }}
+          >
+            <div
+              style={{
+                color: "rgba(255,255,255,0.55)",
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: 0.6,
+                textTransform: "uppercase",
+                marginRight: 4,
+                whiteSpace: "nowrap",
+              }}
+            >
+              Mood
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {EMOTION_CHIPS.map((chip) => {
+                const active = emotionId === chip.id;
+                return (
+                  <button
+                    key={chip.id}
+                    onClick={() => !applying && setEmotionId(chip.id)}
+                    disabled={applying}
+                    style={{
+                      padding: "3px 10px",
+                      fontSize: 10.5,
+                      letterSpacing: 0.2,
+                      background: active ? "rgba(249,66,58,0.14)" : "transparent",
+                      border: `1px solid ${active ? "rgba(249,66,58,0.55)" : "rgba(255,255,255,0.12)"}`,
+                      color: active ? "#fca5a5" : "rgba(255,255,255,0.7)",
+                      cursor: applying ? "not-allowed" : "pointer",
+                      fontFamily: "inherit",
+                    }}
+                  >
+                    {chip.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Body */}

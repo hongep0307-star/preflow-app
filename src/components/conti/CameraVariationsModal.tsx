@@ -1,36 +1,34 @@
 /**
- * CameraVariationsModal — generates multiple camera-angle variations of a scene.
+ * CameraVariationsModal — generates camera-angle variations of a scene.
  *
- * Two modes, user-selectable per session:
+ * Two modes, surfaced as tabs in the modal body:
  *
- *   ● "preserve"  — default. Sends the current scene image to NB2 as source and
- *                   asks for the EXACT SAME world re-photographed from a new
- *                   camera position. This is the pattern RelightModal uses
- *                   (mode: "inpaint", useNanoBanana: true, referenceImageUrls: [])
- *                   and is how we cash in NB2's strength: identity-consistent
- *                   editing of a single source image.
- *                   The prompt explicitly enumerates what to PRESERVE (face,
- *                   costume, props, environment, lighting palette, style) and
- *                   what to CHANGE (camera position only). This discourages the
- *                   model's two failure modes — (a) freeze everything and output
- *                   source unchanged, and (b) 2D rotate subject while leaving
- *                   background static.
+ *   ● Presets        — multi-select N cameras from a 22-preset library
+ *                      (Distance / Angle / Creative), fire one NB2 call per
+ *                      preset in parallel. Each call uses the scene's source
+ *                      image as the reference and prompts NB2 to RE-PHOTOGRAPH
+ *                      the same world from the new camera position, keeping
+ *                      identity, costume, environment, lighting and style.
+ *                      This is the workhorse path.
  *
- *   ● "fresh"     — classic text-to-image. Ignores the source image and renders
- *                   a brand-new frame from scene.description + tagged_assets
- *                   photo refs + the preset's camera phrase. Use this when the
- *                   angle change is large enough that NB2 can't plausibly
- *                   re-photograph the source (e.g. full orbit, top-down), or
- *                   when the source image itself is being re-imagined.
+ *   ● Contact Sheet  — single NB2 call that produces a 3x3 cinematographer's
+ *                      contact sheet in a 1:1 / 2K output. The 9 panels are
+ *                      split client-side (canvas), displayed as 9 clickable
+ *                      thumbnails; picking one uploads just that tile back
+ *                      to storage via the `save_local` mode. This gives us
+ *                      nine camera explorations for the latency cost of one
+ *                      API call, with strong intra-image consistency because
+ *                      all panels exist in a single NB2 canvas.
  *
- * Both modes share the same slot lifecycle: once generated, results persist in
- * a module-level cache keyed by scene.id so closing and re-opening the modal
- * does not throw work away. The user can mix modes across Generate cycles.
+ * Shared across both tabs:
+ *   - Subject descriptor (buildSubjectDescriptor) injected into prompts so
+ *     NB2 has a written identity anchor to complement the visual reference.
+ *   - Emotion/Intent chip row — biases framing and expression without
+ *     overwriting identity (e.g. "tense", "intimate", "triumphant").
  *
- * Pipeline: a single `generate(req)` callback is supplied by ContiTab that
- * dispatches on req.mode and reuses the tab's regenerate context
- * (briefAnalysis, style, mood, model) for the "fresh" path, and invokes
- * openai-image:inpaint for the "preserve" path.
+ * Prompt construction lives in src/lib/cameraLibrary.ts so every flow in
+ * the app (this modal, ChangeAngleModal's Advanced chain) speaks NB2 in
+ * the same voice.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -42,62 +40,74 @@ import {
   RotateCcw,
   Trash2,
   ArrowLeft,
-  Lock,
+  Grid3x3,
   Sparkles,
 } from "lucide-react";
-import type { Scene } from "./contiTypes";
+import type { Scene, Asset } from "./contiTypes";
 import { IMAGE_SIZE_MAP } from "@/lib/conti";
+import {
+  CAMERA_PRESETS,
+  CAMERA_PRESETS_BY_CATEGORY,
+  EMOTION_CHIPS,
+  buildPresetPrompt,
+  buildContactSheetPrompt,
+  contactSheetPresets,
+  getEmotion,
+  type CameraPreset,
+  type CameraCategory,
+  type EmotionChip,
+} from "@/lib/cameraLibrary";
+import { buildSubjectDescriptor } from "@/lib/subjectDescriptor";
+import { splitContactSheetDataUrl, dataUrlToBase64 } from "@/lib/contactSheet";
 
 type VideoFormat = keyof typeof IMAGE_SIZE_MAP;
 
 /* ━━━ Types ━━━ */
-interface CameraPreset {
-  id: string;
-  label: string;
-  shortDesc: string;
-  /** Injected into scene.camera_angle for this variation. */
-  phrase: string;
-  recommended?: boolean;
-}
-
 type SlotStatus = "queued" | "generating" | "success" | "error";
-type VariationMode = "preserve" | "fresh";
 
 interface VariationSlot {
   presetId: string;
   status: SlotStatus;
   url: string | null;
   error: string | null;
-  /** Which mode produced this slot — shown as a badge on result cards so the
-   *  user can see at a glance whether an image re-used the source or started fresh. */
-  mode?: VariationMode;
-  /** ms epoch when the slot entered "generating". Used to render a live
-   *  elapsed timer so the user can tell a slow call from a frozen one. */
   startedAt?: number;
-  /** ms the successful call took end-to-end. Shown on "Ready" badge so the
-   *  user gets a rough sense of per-call latency. */
   durationMs?: number;
 }
 
 /**
- * Request payload the modal hands to ContiTab's `generate` callback.
- * Discriminated on `mode`:
- *   - preserve → ContiTab invokes openai-image:inpaint with source image + built prompt
- *   - fresh    → ContiTab runs generateConti with camera_angle overridden
+ * Single generation request from modal → ContiTab. ContiTab dispatches on
+ * the discriminator:
+ *   preserve      → openai-image:inpaint (NB2) with source + built prompt.
+ *                   One request per preset in the Presets tab.
+ *   contact_sheet → openai-image:inpaint (NB2) with 1:1 / 2K imageSize +
+ *                   the contact-sheet prompt. Returns a single image URL
+ *                   containing the 3x3 grid.
+ *   save_local    → upload a pre-rendered base64 tile to storage. Used by
+ *                   the Contact Sheet "Apply" flow after the client has
+ *                   split a tile out of the sheet.
  */
 export type CameraVariationRequest =
-  | { mode: "preserve"; presetId: string; presetLabel: string; prompt: string; sourceImageUrl: string }
-  | { mode: "fresh"; presetId: string; presetLabel: string; overrideScene: Scene };
+  | {
+      mode: "preserve";
+      presetId: string;
+      presetLabel: string;
+      prompt: string;
+      sourceImageUrl: string;
+    }
+  | {
+      mode: "contact_sheet";
+      prompt: string;
+      sourceImageUrl: string;
+    }
+  | {
+      mode: "save_local";
+      base64: string;
+      suffix: string;
+    };
 
 /* ━━━ Module-level slot cache ━━━
- *
- * Keyed by scene.id. The URLs stored in each slot are persistent Supabase
- * storage URLs produced by the openai-image edge function, so they survive
- * across modal open/close cycles for as long as the tab is mounted. This is
- * exactly what the user asked for: "팝업 껐다가 다시 켜도 기존에 생성한거 남아있게".
- * (Persisting across a full page reload would require DB-backed storage; out
- * of scope for this modal.)
- */
+ * Keyed by scene.id. Survives modal open/close cycles so users can iterate
+ * across several Generate cycles without losing earlier results. */
 const slotsCache = new Map<string, Record<string, VariationSlot>>();
 const readSlots = (sceneId: string): Record<string, VariationSlot> =>
   slotsCache.get(sceneId) ?? {};
@@ -106,147 +116,20 @@ const writeSlots = (sceneId: string, next: Record<string, VariationSlot>) => {
   else slotsCache.set(sceneId, next);
 };
 
-/* ━━━ Constants ━━━ */
-// Preset phrases are written in the imperative, cinematographer-style language
-// NB2 responds to most reliably: a concrete camera position + what it sees +
-// framing qualifiers. These get injected into the SHOT TYPE (MANDATORY) block
-// of the conti prompt, so they are the single strongest directive the model
-// receives about how this frame should be composed.
-const CAMERA_PRESETS: CameraPreset[] = [
-  {
-    id: "wide",
-    label: "Wide establishing",
-    shortDesc: "Full environment visible",
-    phrase:
-      "EXTREME WIDE ESTABLISHING SHOT. Camera pulled far back. Subject small within the frame, integrated into the full environment. Deep-space composition with clear foreground, midground, and background layers. Landscape-oriented framing showing the whole location.",
-    recommended: true,
-  },
-  {
-    id: "medium",
-    label: "Medium shot",
-    shortDesc: "Waist-up, eye level",
-    phrase:
-      "MEDIUM SHOT. Camera at eye level. Subject framed from the waist up, centered, with moderate headroom. Background present but softly secondary.",
-  },
-  {
-    id: "close",
-    label: "Close-up",
-    shortDesc: "Subject fills the frame",
-    phrase:
-      "TIGHT CLOSE-UP. Camera moved in very close. Subject's face and upper chest fill the frame. Strong shallow depth of field, background reduced to creamy bokeh. Intimate and detailed.",
-    recommended: true,
-  },
-  {
-    id: "low_angle",
-    label: "Low angle",
-    shortDesc: "Looking up, heroic",
-    phrase:
-      "LOW-ANGLE HEROIC SHOT. Camera placed below waist height, tilted upward at the subject. The subject towers into the frame against the sky or ceiling. Strong upward foreshortening, dramatic imposing perspective.",
-  },
-  {
-    id: "high_angle",
-    label: "High angle",
-    shortDesc: "Looking down, observational",
-    phrase:
-      "HIGH-ANGLE SHOT. Camera placed well above the subject, tilted downward. Subject appears smaller and vulnerable, ground or floor visible around them. Slightly detached observational perspective.",
-  },
-  {
-    id: "over_shoulder",
-    label: "Over the shoulder",
-    shortDesc: "POV from behind a character",
-    phrase:
-      "OVER-THE-SHOULDER SHOT. Camera positioned just behind one character's shoulder, looking past it toward the rest of the scene. The foreground shoulder and back of the head are softly out of focus. Classic conversation framing.",
-  },
-  {
-    id: "dutch",
-    label: "Dutch tilt",
-    shortDesc: "Canted, uneasy",
-    phrase:
-      "DUTCH ANGLE. Camera rolled roughly 15–25 degrees so the horizon line is noticeably canted. Dynamic off-kilter tension. Subject still centered but the whole frame feels tilted.",
-  },
-  {
-    id: "overhead",
-    label: "Overhead",
-    shortDesc: "Top-down bird's-eye",
-    phrase:
-      "OVERHEAD TOP-DOWN SHOT. Camera directly above the subject, lens pointed straight down toward the floor. Bird's-eye view. Subject and surrounding floor elements laid out as a flat-lay composition.",
-  },
-];
+/* Contact-sheet session cache — one per scene.id. Stores the raw NB2 output
+ * URL plus the split tile data-URLs. Also preserved across open/close so a
+ * user who accidentally closes the modal doesn't lose an expensive render. */
+interface ContactSheetSession {
+  rawUrl: string;
+  tiles: string[];
+  generatedAt: number;
+}
+const sheetCache = new Map<string, ContactSheetSession>();
 
-/**
- * Parallelism per modal session.
- *
- * Each slot is a single NB2 (Vertex gemini-3.1-flash-image-preview) call that
- * itself takes ~10–14s end-to-end. At concurrency 3 the previous default,
- * 8 presets serialized into 3 batches (~40–45s wall time) which felt sluggish.
- *
- * NB2 via Vertex has no per-user rate limit at this scale, and the local
- * server fans out each request to an independent HTTPS worker, so 5 parallel
- * calls land comfortably. We keep headroom under typical project-wide
- * concurrent quotas (Vertex global defaults are generous, but other flows
- * — Regenerate, style transfer — may also be hitting NB2 simultaneously).
- */
+/* Concurrency per modal session. NB2 tolerates 5-wide burst comfortably. */
 const CONCURRENCY = 5;
 
-/* ━━━ Small helpers ━━━ */
-/**
- * "fresh" mode — build the scene with camera_angle overridden with the preset
- * phrase. generateConti's buildContiPrompt consumes this as the SHOT TYPE
- * (MANDATORY) directive. No "preserve the reference image" language — identity
- * preservation here comes purely from tagged_assets photo refs, since the
- * source scene image itself is intentionally ignored in fresh mode.
- */
-const buildVariationScene = (scene: Scene, preset: CameraPreset, notes: string): Scene => {
-  const trimmedNotes = notes.trim();
-  const camera = trimmedNotes ? `${preset.phrase} ${trimmedNotes}` : preset.phrase;
-  return { ...scene, camera_angle: camera };
-};
-
-/**
- * "preserve" mode — build the prompt that goes to openai-image:inpaint alongside
- * the source image. The prompt is deliberately front-loaded with a single
- * declarative instruction ("Re-photograph the EXACT SAME scene from a different
- * camera position."), followed by structured preserve/change bullets. This
- * mirrors what works in RelightModal — NB2 (Gemini 3.1 Flash Image) is most
- * obedient when the first sentence is an imperative verb + object + hard
- * constraint.
- *
- * The "STRICTLY PRESERVE" list enumerates what the model must keep from the
- * source reference: character identity, costumes, props, environment, lighting,
- * and art style. This counters NB2's two classic failure modes:
- *
- *   (a) Redesign failure — character's face/outfit drifts because the model
- *       re-imagines rather than re-cameras. Countered by naming each preserve
- *       target explicitly.
- *   (b) 2D-pivot failure — subject rotates but background stays static.
- *       Countered by the "same 3D world" framing + "second camera on set"
- *       metaphor, both of which describe a physical camera move rather than
- *       an image-space rotation.
- */
-const buildPreservePrompt = (preset: CameraPreset, notes: string): string => {
-  const trimmedNotes = notes.trim();
-  const body = [
-    "Re-photograph the EXACT SAME scene shown in the reference image from a different camera position.",
-    "",
-    "STRICTLY PRESERVE (must match the reference image):",
-    "• Every character — identical face, hair, skin tone, body proportions, age, expression",
-    "• All clothing and accessories — identical designs, colors, fabrics, patterns, wear",
-    "• All props, vehicles, and objects — same models, colors, surface details",
-    "• The environment, architecture, set dressing, terrain, and background layout",
-    "• Time of day, weather, overall lighting direction and color palette",
-    "• Art style, rendering technique, line quality, grain, and painterly feel",
-    "",
-    "CHANGE ONLY the camera position and framing:",
-    preset.phrase,
-    "",
-    "The world depicted in the reference image is unchanged — only the camera viewpoint has moved. Think of a second camera on the same set, shooting the same moment from a new angle. Do not add or remove any subjects. Do not redesign anything. Do not change the art style.",
-  ].join("\n");
-  return trimmedNotes ? `${body}\n\nAdditional notes: ${trimmedNotes}` : body;
-};
-
 /* ━━━ Palette ━━━ */
-// Accent color is kept in sync with the Generate button so the whole modal
-// reads as a single red-accented surface.
 const ACCENT = "#dc2626";
 const ACCENT_SOFT_BG = "rgba(220, 38, 38, 0.12)";
 const ACCENT_SOFT_BORDER = "rgba(220, 38, 38, 0.55)";
@@ -266,8 +149,8 @@ const BACKDROP_STYLE: React.CSSProperties = {
 const PANEL_STYLE: React.CSSProperties = {
   background: "#121212",
   border: "1px solid rgba(255,255,255,0.08)",
-  width: "min(1100px, 100%)",
-  height: "min(90vh, 820px)",
+  width: "min(1180px, 100%)",
+  height: "min(92vh, 860px)",
   display: "flex",
   flexDirection: "column",
   overflow: "hidden",
@@ -294,53 +177,233 @@ const FOOTER_STYLE: React.CSSProperties = {
   background: "#0e0e0e",
 };
 
+type Tab = "presets" | "contact_sheet";
+type FilterCategory = "all" | CameraCategory;
+
 /* ━━━ Main modal ━━━ */
 export interface CameraVariationsModalProps {
   scene: Scene;
+  /** Asset library — fed into the subject descriptor for richer NB2 prompts. */
+  assets?: Asset[];
   videoFormat: VideoFormat;
   onClose: () => void;
   onApplied: (newUrl: string, previousUrl: string | null) => void | Promise<void>;
   /**
-   * Single generation entry point. ContiTab dispatches on `req.mode`:
-   *   - preserve → openai-image:inpaint with req.sourceImageUrl + req.prompt
-   *   - fresh    → generateConti(req.overrideScene) with the tab's full context
-   * Returns the final public URL of the generated image.
+   * Single generation entry point. ContiTab dispatches on `req.mode` and
+   * returns the final public URL of the resulting image (or, for
+   * contact_sheet, the URL of the single grid image the client will
+   * then split).
    */
   generate: (req: CameraVariationRequest) => Promise<string>;
+  /** Optional initial tab. Lets other menu entries (Change Angle legacy, etc.)
+   *  land the user directly on a specific tab. */
+  initialTab?: Tab;
 }
 
 export function CameraVariationsModal({
   scene,
+  assets = [],
   videoFormat: _videoFormat,
   onClose,
   onApplied,
   generate,
+  initialTab = "presets",
 }: CameraVariationsModalProps) {
   const sourceUrl = scene.conti_image_url;
 
+  const [tab, setTab] = useState<Tab>(initialTab);
+  const [emotionId, setEmotionId] = useState<string>("neutral");
+  const emotion = useMemo<EmotionChip | null>(
+    () => getEmotion(emotionId) ?? null,
+    [emotionId],
+  );
+
+  // Written identity anchor for prompts — cheap to recompute, only depends
+  // on scene + assets, so memoise by reference equality.
+  const subject = useMemo(() => buildSubjectDescriptor(scene, assets), [scene, assets]);
+
+  return (
+    <div style={BACKDROP_STYLE} onClick={onClose}>
+      <div style={PANEL_STYLE} onClick={(e) => e.stopPropagation()}>
+        {/* Header */}
+        <div style={HEADER_STYLE}>
+          <Images className="w-4 h-4" style={{ color: "rgba(255,255,255,0.78)" }} />
+          <div
+            style={{
+              color: "rgba(255,255,255,0.95)",
+              fontSize: 14,
+              fontWeight: 600,
+              flex: 1,
+              letterSpacing: 0.1,
+            }}
+          >
+            Camera Variations
+          </div>
+          <button
+            onClick={onClose}
+            className="text-white/60 hover:text-white/90"
+            style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}
+            title="Close (Esc)"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Tab bar */}
+        <div
+          style={{
+            display: "flex",
+            gap: 2,
+            padding: "0 16px",
+            background: "#0e0e0e",
+            borderBottom: "1px solid rgba(255,255,255,0.06)",
+            flexShrink: 0,
+          }}
+        >
+          <TabBtn
+            active={tab === "presets"}
+            onClick={() => setTab("presets")}
+            icon={<Sparkles className="w-3.5 h-3.5" />}
+            label="Presets"
+            blurb="N parallel renders"
+          />
+          <TabBtn
+            active={tab === "contact_sheet"}
+            onClick={() => setTab("contact_sheet")}
+            icon={<Grid3x3 className="w-3.5 h-3.5" />}
+            label="Contact Sheet"
+            blurb="One call, 9 angles"
+          />
+        </div>
+
+        {/* Emotion chip row — shared across tabs.
+            NB2 reacts well to a single adjective-pack appended to the prompt
+            ("tense", "intimate", etc.), biasing framing and expression without
+            overwriting identity. We surface it once at the top so changing
+            tabs doesn't lose the selection. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "10px 20px",
+            borderBottom: "1px solid rgba(255,255,255,0.05)",
+            flexShrink: 0,
+            background: "#0c0c0c",
+          }}
+        >
+          <div
+            style={{
+              color: "rgba(255,255,255,0.55)",
+              fontSize: 10,
+              fontWeight: 600,
+              letterSpacing: 0.6,
+              textTransform: "uppercase",
+              marginRight: 4,
+              whiteSpace: "nowrap",
+            }}
+          >
+            Mood
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {EMOTION_CHIPS.map((e) => (
+              <EmotionChipBtn
+                key={e.id}
+                chip={e}
+                active={emotionId === e.id}
+                onClick={() => setEmotionId(e.id)}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
+          {!sourceUrl ? (
+            <div
+              style={{
+                flex: 1,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "rgba(255,255,255,0.6)",
+                fontSize: 13,
+                padding: 24,
+                textAlign: "center",
+              }}
+            >
+              No source scene image yet — generate the scene first, then use Camera Variations.
+            </div>
+          ) : tab === "presets" ? (
+            <PresetsTab
+              scene={scene}
+              subject={subject}
+              emotion={emotion}
+              sourceUrl={sourceUrl}
+              generate={generate}
+              onApplied={onApplied}
+              onClose={onClose}
+            />
+          ) : (
+            <ContactSheetTab
+              scene={scene}
+              subject={subject}
+              emotion={emotion}
+              sourceUrl={sourceUrl}
+              generate={generate}
+              onApplied={onApplied}
+              onClose={onClose}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * PRESETS TAB
+ * Multi-select N presets → fire N parallel NB2 calls → show results in
+ * a grid. Results are persisted per scene.id in slotsCache.
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+interface TabPaneProps {
+  scene: Scene;
+  subject: string;
+  emotion: EmotionChip | null;
+  sourceUrl: string;
+  generate: (req: CameraVariationRequest) => Promise<string>;
+  onApplied: (newUrl: string, previousUrl: string | null) => void | Promise<void>;
+  onClose: () => void;
+}
+
+function PresetsTab({
+  scene,
+  subject,
+  emotion,
+  sourceUrl,
+  generate,
+  onApplied,
+  onClose,
+}: TabPaneProps) {
+  // Default selection = every "recommended" preset so first-time users get
+  // a well-rounded batch without having to tick boxes.
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(CAMERA_PRESETS.filter((p) => p.recommended).map((p) => p.id)),
   );
+  const [filter, setFilter] = useState<FilterCategory>("all");
   const [notes, setNotes] = useState("");
-  const [mode, setMode] = useState<VariationMode>("preserve");
-  // Slots are sourced from the module-level cache so closing and re-opening the
-  // modal preserves every in-flight, successful, and failed variation.
   const [slots, setSlots] = useState<Record<string, VariationSlot>>(() => readSlots(scene.id));
   const [phase, setPhase] = useState<"setup" | "results">(() =>
     Object.keys(readSlots(scene.id)).length > 0 ? "results" : "setup",
   );
   const [applyingFromUrl, setApplyingFromUrl] = useState<string | null>(null);
 
-  // Keep cache in sync on every slot mutation so it survives unmount.
   useEffect(() => {
     writeSlots(scene.id, slots);
   }, [scene.id, slots]);
 
-  // Track which presets are currently running so we only start CONCURRENCY at a time.
-  // Queue entries carry their own mode so a mid-batch mode flip on the UI does
-  // not retroactively change already-queued jobs.
   const activeCountRef = useRef(0);
-  const pendingQueueRef = useRef<{ presetId: string; mode: VariationMode }[]>([]);
+  const pendingQueueRef = useRef<string[]>([]);
   const cancelledRef = useRef(false);
 
   useEffect(() => {
@@ -351,13 +414,17 @@ export function CameraVariationsModal({
     return () => window.removeEventListener("keydown", h);
   }, [applyingFromUrl, onClose]);
 
-  useEffect(() => {
-    return () => {
+  useEffect(
+    () => () => {
       cancelledRef.current = true;
-    };
-  }, []);
+    },
+    [],
+  );
 
-  const hasAnySlots = Object.keys(slots).length > 0;
+  const filteredPresets = useMemo(
+    () => (filter === "all" ? CAMERA_PRESETS : CAMERA_PRESETS_BY_CATEGORY[filter]),
+    [filter],
+  );
 
   const togglePreset = (id: string) => {
     setSelected((prev) => {
@@ -367,18 +434,12 @@ export function CameraVariationsModal({
       return next;
     });
   };
-
   const selectAll = () => setSelected(new Set(CAMERA_PRESETS.map((p) => p.id)));
   const selectNone = () => setSelected(new Set());
   const selectRecommended = () =>
     setSelected(new Set(CAMERA_PRESETS.filter((p) => p.recommended).map((p) => p.id)));
 
-  /**
-   * Run one variation for a given preset id, writing results into slot state.
-   * `runMode` is captured at enqueue time so that if the user flips the mode
-   * toggle mid-batch, already-queued jobs still finish with their original mode.
-   */
-  const runVariation = async (presetId: string, runMode: VariationMode) => {
+  const runVariation = async (presetId: string) => {
     const preset = CAMERA_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
 
@@ -388,38 +449,30 @@ export function CameraVariationsModal({
       [presetId]: {
         ...(prev[presetId] ?? { presetId, url: null, error: null }),
         status: "generating",
-        mode: runMode,
         startedAt,
         durationMs: undefined,
       },
     }));
 
     try {
-      let url: string;
-      if (runMode === "preserve") {
-        if (!sourceUrl) throw new Error("No source image on this scene");
-        const prompt = buildPreservePrompt(preset, notes);
-        url = await generate({
-          mode: "preserve",
-          presetId: preset.id,
-          presetLabel: preset.label,
-          prompt,
-          sourceImageUrl: sourceUrl,
-        });
-      } else {
-        const overrideScene = buildVariationScene(scene, preset, notes);
-        url = await generate({
-          mode: "fresh",
-          presetId: preset.id,
-          presetLabel: preset.label,
-          overrideScene,
-        });
-      }
+      const prompt = buildPresetPrompt({
+        preset,
+        subject,
+        emotion,
+        extraNotes: notes,
+      });
+      const url = await generate({
+        mode: "preserve",
+        presetId: preset.id,
+        presetLabel: preset.label,
+        prompt,
+        sourceImageUrl: sourceUrl,
+      });
       if (cancelledRef.current) return;
       const durationMs = Date.now() - startedAt;
       setSlots((prev) => ({
         ...prev,
-        [presetId]: { presetId, status: "success", url, error: null, mode: runMode, startedAt, durationMs },
+        [presetId]: { presetId, status: "success", url, error: null, startedAt, durationMs },
       }));
     } catch (e) {
       if (cancelledRef.current) return;
@@ -427,29 +480,22 @@ export function CameraVariationsModal({
       const durationMs = Date.now() - startedAt;
       setSlots((prev) => ({
         ...prev,
-        [presetId]: { presetId, status: "error", url: null, error: message, mode: runMode, startedAt, durationMs },
+        [presetId]: { presetId, status: "error", url: null, error: message, startedAt, durationMs },
       }));
     }
   };
 
-  /** Pump the pending queue up to CONCURRENCY in parallel. */
   const drainQueue = () => {
     while (activeCountRef.current < CONCURRENCY && pendingQueueRef.current.length > 0) {
       const next = pendingQueueRef.current.shift()!;
       activeCountRef.current++;
-      void runVariation(next.presetId, next.mode).finally(() => {
+      void runVariation(next).finally(() => {
         activeCountRef.current--;
         drainQueue();
       });
     }
   };
 
-  /**
-   * Which currently-selected presets still need a fresh generation?
-   * Skip anything already succeeded or currently running; retry errors.
-   * Kept as a derived value so the footer can show an honest count and
-   * disable the button when there is nothing meaningful to do.
-   */
   const toGenerateIds = useMemo(() => {
     return CAMERA_PRESETS.filter((p) => selected.has(p.id))
       .filter((p) => {
@@ -464,33 +510,26 @@ export function CameraVariationsModal({
   const handleGenerate = () => {
     if (toGenerateIds.length === 0) return;
 
-    // Capture the current mode at enqueue time; mid-batch mode flips won't
-    // affect jobs that were already queued.
-    const batchMode: VariationMode = mode;
-
     setSlots((prev) => {
       const next = { ...prev };
       for (const id of toGenerateIds) {
-        next[id] = { presetId: id, status: "queued", url: null, error: null, mode: batchMode };
+        next[id] = { presetId: id, status: "queued", url: null, error: null };
       }
       return next;
     });
 
     cancelledRef.current = false;
-    pendingQueueRef.current.push(...toGenerateIds.map((id) => ({ presetId: id, mode: batchMode })));
+    pendingQueueRef.current.push(...toGenerateIds);
     setPhase("results");
     drainQueue();
   };
 
   const handleReroll = (presetId: string) => {
-    // Reroll uses whichever mode is currently selected in the toggle, so the
-    // user can deliberately switch an individual slot between preserve/fresh.
-    const rerollMode: VariationMode = mode;
     setSlots((prev) => ({
       ...prev,
-      [presetId]: { presetId, status: "queued", url: null, error: null, mode: rerollMode },
+      [presetId]: { presetId, status: "queued", url: null, error: null },
     }));
-    pendingQueueRef.current.push({ presetId, mode: rerollMode });
+    pendingQueueRef.current.push(presetId);
     drainQueue();
   };
 
@@ -514,293 +553,64 @@ export function CameraVariationsModal({
     }
   };
 
-  /**
-   * "Back to presets" is now purely a view switch — existing results (success,
-   * error, or still-running) are preserved. This lets the user iteratively
-   * pick different camera angles across several Generate cycles without
-   * losing any prior work. Use the Discard button on an individual result
-   * card (or close the modal) to drop specific slots.
-   */
-  const handleBackToSetup = () => {
-    setPhase("setup");
-  };
-
-  if (!sourceUrl) {
-    return (
-      <div style={BACKDROP_STYLE} onClick={onClose}>
-        <div
-          style={{ ...PANEL_STYLE, padding: 24, height: "auto" }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>
-            No source scene image yet — generate the scene first, then use Camera Variations.
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const hasAnySlots = Object.keys(slots).length > 0;
 
   return (
-    <div style={BACKDROP_STYLE} onClick={onClose}>
-      <div style={PANEL_STYLE} onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div style={HEADER_STYLE}>
-          <Images className="w-4 h-4" style={{ color: "rgba(255,255,255,0.78)" }} />
-          <div
-            style={{
-              color: "rgba(255,255,255,0.95)",
-              fontSize: 14,
-              fontWeight: 600,
-              flex: 1,
-              letterSpacing: 0.1,
-            }}
-          >
-            Camera Variations
-          </div>
-          <button
-            onClick={onClose}
-            disabled={!!applyingFromUrl}
-            className="text-white/60 hover:text-white/90 disabled:opacity-40"
-            style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}
-            title="Close (Esc)"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div
-          style={{
-            flex: 1,
-            minHeight: 0,
-            display: "grid",
-            gridTemplateColumns: "minmax(260px, 320px) 1fr",
-            overflow: "hidden",
-          }}
-        >
-          {/* Left: scene reference */}
-          <div
-            style={{
-              borderRight: "1px solid rgba(255,255,255,0.06)",
-              display: "flex",
-              flexDirection: "column",
-              minHeight: 0,
-              background: "#0e0e0e",
-            }}
-          >
-            <div
-              style={{
-                padding: 14,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "#0a0a0a",
-                borderBottom: "1px solid rgba(255,255,255,0.06)",
-              }}
-            >
-              <img
-                src={sourceUrl}
-                alt={`Scene ${scene.scene_number}`}
-                style={{
-                  maxWidth: "100%",
-                  maxHeight: 220,
-                  objectFit: "contain",
-                  display: "block",
-                }}
-              />
-            </div>
-            <div
-              style={{
-                padding: "12px 14px",
-                overflow: "auto",
-                flex: 1,
-                minHeight: 0,
-                display: "flex",
-                flexDirection: "column",
-                gap: 10,
-              }}
-            >
-              <div>
-                <div
-                  style={{
-                    color: "rgba(255,255,255,0.5)",
-                    fontSize: 10,
-                    fontWeight: 600,
-                    letterSpacing: 0.6,
-                    textTransform: "uppercase",
-                    marginBottom: 4,
-                  }}
-                >
-                  Scene description
-                </div>
-                <div style={{ color: "rgba(255,255,255,0.82)", fontSize: 12, lineHeight: 1.5 }}>
-                  {scene.description || <span style={{ opacity: 0.5 }}>No description set</span>}
-                </div>
-              </div>
-              {scene.tagged_assets && scene.tagged_assets.length > 0 && (
-                <div>
-                  <div
-                    style={{
-                      color: "rgba(255,255,255,0.5)",
-                      fontSize: 10,
-                      fontWeight: 600,
-                      letterSpacing: 0.6,
-                      textTransform: "uppercase",
-                      marginBottom: 4,
-                    }}
-                  >
-                    Tags referenced
-                  </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                    {scene.tagged_assets.map((t) => (
-                      <span
-                        key={t}
-                        style={{
-                          fontSize: 10,
-                          fontFamily: "'SF Mono', monospace",
-                          color: "rgba(255,255,255,0.75)",
-                          background: "rgba(255,255,255,0.06)",
-                          padding: "2px 6px",
-                          borderRadius: 2,
-                        }}
-                      >
-                        {t.startsWith("@") ? t : `@${t}`}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {(scene.location || scene.mood) && (
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "auto 1fr",
-                    columnGap: 8,
-                    rowGap: 4,
-                    fontSize: 11,
-                  }}
-                >
-                  {scene.location && (
-                    <>
-                      <div style={{ color: "rgba(255,255,255,0.45)" }}>Location</div>
-                      <div style={{ color: "rgba(255,255,255,0.8)" }}>{scene.location}</div>
-                    </>
-                  )}
-                  {scene.mood && (
-                    <>
-                      <div style={{ color: "rgba(255,255,255,0.45)" }}>Mood</div>
-                      <div style={{ color: "rgba(255,255,255,0.8)" }}>{scene.mood}</div>
-                    </>
-                  )}
-                </div>
-              )}
-              <div
-                style={{
-                  fontSize: 11,
-                  color: "rgba(255,255,255,0.5)",
-                  lineHeight: 1.5,
-                  marginTop: 4,
-                  padding: "8px 10px",
-                  background: "rgba(255,255,255,0.03)",
-                  border: "1px solid rgba(255,255,255,0.06)",
-                }}
-              >
-                {mode === "preserve" ? (
-                  <>
-                    <span style={{ color: "rgba(255,255,255,0.82)" }}>Preserve source</span>{" "}
-                    — the existing scene image is sent to NB2 as a reference and re-photographed
-                    from each preset's camera position. Character, costume, props and environment
-                    are kept. Best for mild to moderate angle changes (same world, new viewpoint).
-                  </>
-                ) : (
-                  <>
-                    <span style={{ color: "rgba(255,255,255,0.82)" }}>Render new</span> — the source
-                    image is ignored. Each preset renders a fresh frame from the scene description
-                    plus tagged asset photos. Best for large camera moves (orbit, overhead) where
-                    re-photographing the original won't hold up.
-                  </>
-                )}{" "}
-                Original scene image is kept until you apply one.
-              </div>
-            </div>
-          </div>
-
-          {/* Right: presets or results */}
-          <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-            {phase === "setup" ? (
-              <SetupPanel
-                scene={scene}
-                slots={slots}
-                selected={selected}
-                togglePreset={togglePreset}
-                selectAll={selectAll}
-                selectNone={selectNone}
-                selectRecommended={selectRecommended}
-                notes={notes}
-                setNotes={setNotes}
-                mode={mode}
-                setMode={setMode}
-                hasSource={!!sourceUrl}
-              />
-            ) : (
-              <ResultsPanel
-                slots={slots}
-                applyingFromUrl={applyingFromUrl}
-                onApplyResult={handleApplyResult}
-                onReroll={handleReroll}
-                onDiscard={handleDiscard}
-              />
-            )}
-          </div>
-        </div>
-
-        {/* Footer */}
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "grid",
+        gridTemplateColumns: "minmax(260px, 320px) 1fr",
+        overflow: "hidden",
+      }}
+    >
+      <SourcePreview scene={scene} sourceUrl={sourceUrl} subject={subject} />
+      <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+        {phase === "setup" ? (
+          <PresetsSetup
+            filteredPresets={filteredPresets}
+            filter={filter}
+            setFilter={setFilter}
+            selected={selected}
+            togglePreset={togglePreset}
+            selectAll={selectAll}
+            selectNone={selectNone}
+            selectRecommended={selectRecommended}
+            slots={slots}
+            notes={notes}
+            setNotes={setNotes}
+          />
+        ) : (
+          <ResultsPanel
+            slots={slots}
+            applyingFromUrl={applyingFromUrl}
+            onApplyResult={handleApplyResult}
+            onReroll={handleReroll}
+            onDiscard={handleDiscard}
+          />
+        )}
         <div style={FOOTER_STYLE}>
           {phase === "results" ? (
             <button
-              onClick={handleBackToSetup}
+              onClick={() => setPhase("setup")}
               disabled={!!applyingFromUrl}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                background: "transparent",
-                border: "1px solid rgba(255,255,255,0.14)",
-                color: "rgba(255,255,255,0.8)",
-                padding: "6px 10px",
-                fontSize: 12,
-                cursor: applyingFromUrl ? "not-allowed" : "pointer",
-                marginRight: "auto",
-              }}
+              style={backBtnStyle(!!applyingFromUrl)}
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               Back to presets
             </button>
           ) : (
-            // In setup we still want status text on the left when there are
-            // already-generated variations, so the user knows results are kept.
             hasAnySlots && (
-              <button
-                onClick={() => setPhase("results")}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  background: "transparent",
-                  border: "1px solid rgba(255,255,255,0.14)",
-                  color: "rgba(255,255,255,0.8)",
-                  padding: "6px 10px",
-                  fontSize: 12,
-                  cursor: "pointer",
-                  marginRight: "auto",
-                }}
-              >
+              <button onClick={() => setPhase("results")} style={backBtnStyle(false)}>
                 View results ({Object.keys(slots).length})
               </button>
             )
           )}
           <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 11 }}>
-            {phase === "setup" ? summarizeSetup(selected, slots, toGenerateIds.length) : summarizeSlots(slots)}
+            {phase === "setup"
+              ? summarizeSetup(selected, slots, toGenerateIds.length)
+              : summarizeSlots(slots)}
           </div>
           {phase === "setup" && (
             <button
@@ -810,7 +620,7 @@ export function CameraVariationsModal({
                 toGenerateIds.length === 0
                   ? selected.size === 0
                     ? "Pick at least one preset"
-                    : "All selected presets already have results — use the Reroll button in Results to regenerate"
+                    : "All selected presets already have results — use Reroll in Results to regenerate"
                   : undefined
               }
               style={{
@@ -850,35 +660,37 @@ export function CameraVariationsModal({
   );
 }
 
-/* ━━━ Setup subpanel ━━━ */
-function SetupPanel({
-  scene,
-  slots,
+function PresetsSetup({
+  filteredPresets,
+  filter,
+  setFilter,
   selected,
   togglePreset,
   selectAll,
   selectNone,
   selectRecommended,
+  slots,
   notes,
   setNotes,
-  mode,
-  setMode,
-  hasSource,
 }: {
-  scene: Scene;
-  slots: Record<string, VariationSlot>;
+  filteredPresets: CameraPreset[];
+  filter: FilterCategory;
+  setFilter: (f: FilterCategory) => void;
   selected: Set<string>;
   togglePreset: (id: string) => void;
   selectAll: () => void;
   selectNone: () => void;
   selectRecommended: () => void;
+  slots: Record<string, VariationSlot>;
   notes: string;
   setNotes: (v: string) => void;
-  mode: VariationMode;
-  setMode: (m: VariationMode) => void;
-  hasSource: boolean;
 }) {
-  const hasTags = !!scene.tagged_assets && scene.tagged_assets.length > 0;
+  const filters: { id: FilterCategory; label: string }[] = [
+    { id: "all", label: "All" },
+    { id: "distance", label: "Distance" },
+    { id: "angle", label: "Angle" },
+    { id: "creative", label: "Creative" },
+  ];
 
   return (
     <div
@@ -892,72 +704,29 @@ function SetupPanel({
         gap: 14,
       }}
     >
-      {/* Mode selector — preserve source vs render new */}
-      <div>
-        <div
-          style={{
-            color: "rgba(255,255,255,0.85)",
-            fontSize: 12,
-            fontWeight: 600,
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
-            marginBottom: 6,
-          }}
-        >
-          Generation mode
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <ModeOption
-            active={mode === "preserve"}
-            disabled={!hasSource}
-            icon={<Lock className="w-3.5 h-3.5" />}
-            title="Preserve source"
-            blurb="Re-photograph this scene from a new angle. Keeps character, costume, environment."
-            onClick={() => hasSource && setMode("preserve")}
-          />
-          <ModeOption
-            active={mode === "fresh"}
-            icon={<Sparkles className="w-3.5 h-3.5" />}
-            title="Render new image"
-            blurb="Ignore source; regenerate from description + tags with the preset's angle."
-            onClick={() => setMode("fresh")}
-          />
-        </div>
-        {mode === "preserve" && !hasTags && null /* warning below still applies */}
-      </div>
-
-      {mode === "fresh" && !hasTags && (
-        <div
-          style={{
-            background: "rgba(245, 158, 11, 0.08)",
-            border: "1px solid rgba(245, 158, 11, 0.35)",
-            padding: "10px 12px",
-            fontSize: 11,
-            color: "rgba(252, 211, 77, 0.95)",
-            lineHeight: 1.5,
-          }}
-        >
-          <strong style={{ fontWeight: 600, letterSpacing: 0.2 }}>No tagged references</strong>
-          <div style={{ color: "rgba(255,255,255,0.75)", marginTop: 3 }}>
-            "Render new" mode relies on tagged references (e.g. <code>@character</code>,{" "}
-            <code>@location</code>) as identity anchors. Without them the subject and environment
-            may differ in each variation. Either tag the scene first, or switch to{" "}
-            <b>Preserve source</b> which anchors identity directly from the current image.
-          </div>
-        </div>
-      )}
-
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div
-          style={{
-            color: "rgba(255,255,255,0.85)",
-            fontSize: 12,
-            fontWeight: 600,
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
-          }}
-        >
-          Camera presets
+      {/* Filter + quick-select row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <div style={sectionLabelStyle}>Camera presets</div>
+        <div style={{ display: "flex", gap: 3 }}>
+          {filters.map((f) => (
+            <button
+              key={f.id}
+              onClick={() => setFilter(f.id)}
+              style={{
+                padding: "3px 10px",
+                fontSize: 10.5,
+                fontWeight: 600,
+                letterSpacing: 0.3,
+                background: filter === f.id ? ACCENT_SOFT_BG : "transparent",
+                border: `1px solid ${filter === f.id ? ACCENT_SOFT_BORDER : "rgba(255,255,255,0.12)"}`,
+                color: filter === f.id ? "#fca5a5" : "rgba(255,255,255,0.7)",
+                cursor: "pointer",
+                textTransform: "uppercase",
+              }}
+            >
+              {f.label}
+            </button>
+          ))}
         </div>
         <div style={{ flex: 1 }} />
         <QuickBtn onClick={selectRecommended} label="Recommended" />
@@ -965,6 +734,7 @@ function SetupPanel({
         <QuickBtn onClick={selectNone} label="None" />
       </div>
 
+      {/* Preset grid */}
       <div
         style={{
           display: "grid",
@@ -972,7 +742,7 @@ function SetupPanel({
           gap: 8,
         }}
       >
-        {CAMERA_PRESETS.map((p) => {
+        {filteredPresets.map((p) => {
           const active = selected.has(p.id);
           const slot = slots[p.id];
           return (
@@ -1029,22 +799,25 @@ function SetupPanel({
               <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 10.5, lineHeight: 1.35 }}>
                 {p.shortDesc}
               </div>
+              <div
+                style={{
+                  marginTop: 2,
+                  fontSize: 9,
+                  color: "rgba(255,255,255,0.35)",
+                  letterSpacing: 0.5,
+                  textTransform: "uppercase",
+                }}
+              >
+                {p.category}
+              </div>
             </button>
           );
         })}
       </div>
 
+      {/* Cinematic notes */}
       <div>
-        <div
-          style={{
-            color: "rgba(255,255,255,0.85)",
-            fontSize: 12,
-            fontWeight: 600,
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
-            marginBottom: 6,
-          }}
-        >
+        <div style={sectionLabelStyle}>
           Cinematic notes
           <span
             style={{
@@ -1053,6 +826,7 @@ function SetupPanel({
               fontSize: 10.5,
               marginLeft: 6,
               textTransform: "none",
+              letterSpacing: 0,
             }}
           >
             (optional, applied to every variation)
@@ -1080,7 +854,534 @@ function SetupPanel({
   );
 }
 
-/** Compact status chip shown on a preset card that already has a slot. */
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * CONTACT SHEET TAB
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+function ContactSheetTab({
+  scene,
+  subject,
+  emotion,
+  sourceUrl,
+  generate,
+  onApplied,
+  onClose,
+}: TabPaneProps) {
+  const [session, setSession] = useState<ContactSheetSession | null>(
+    () => sheetCache.get(scene.id) ?? null,
+  );
+  const [notes, setNotes] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [selectedTile, setSelectedTile] = useState<number | null>(null);
+  const [applying, setApplying] = useState(false);
+
+  // Persist session so accidental modal close doesn't throw away ~25s of work.
+  useEffect(() => {
+    if (session) sheetCache.set(scene.id, session);
+  }, [scene.id, session]);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !generating && !applying) onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [generating, applying, onClose]);
+
+  const presetsForSheet = useMemo(() => contactSheetPresets(), []);
+
+  const handleGenerate = async () => {
+    if (generating) return;
+    setError(null);
+    setSelectedTile(null);
+    setGenerating(true);
+    setStartedAt(Date.now());
+    try {
+      const prompt = buildContactSheetPrompt({
+        subject,
+        presets: presetsForSheet,
+        emotion,
+        extraNotes: notes,
+      });
+      const rawUrl = await generate({
+        mode: "contact_sheet",
+        prompt,
+        sourceImageUrl: sourceUrl,
+      });
+      const tiles = await splitContactSheetDataUrl(rawUrl);
+      const nextSession: ContactSheetSession = {
+        rawUrl,
+        tiles,
+        generatedAt: Date.now(),
+      };
+      setSession(nextSession);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleApplyTile = async () => {
+    if (!session || selectedTile == null || applying) return;
+    const tileDataUrl = session.tiles[selectedTile];
+    const preset = presetsForSheet[selectedTile];
+    if (!tileDataUrl || !preset) return;
+    setApplying(true);
+    try {
+      const base64 = dataUrlToBase64(tileDataUrl);
+      const publicUrl = await generate({
+        mode: "save_local",
+        base64,
+        suffix: `sheet-${preset.id}`,
+      });
+      await onApplied(publicUrl, sourceUrl);
+      onClose();
+    } catch (e) {
+      console.error("[ContactSheet] apply failed:", e);
+      setError(e instanceof Error ? e.message : String(e));
+      setApplying(false);
+    }
+  };
+
+  const handleDiscard = () => {
+    sheetCache.delete(scene.id);
+    setSession(null);
+    setSelectedTile(null);
+    setError(null);
+  };
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "grid",
+        gridTemplateColumns: "minmax(260px, 320px) 1fr",
+        overflow: "hidden",
+      }}
+    >
+      <SourcePreview scene={scene} sourceUrl={sourceUrl} subject={subject} />
+      <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflow: "auto",
+            padding: "14px 20px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+          }}
+        >
+          <div>
+            <div style={sectionLabelStyle}>How this works</div>
+            <div
+              style={{
+                padding: "10px 12px",
+                background: "rgba(255,255,255,0.03)",
+                border: "1px solid rgba(255,255,255,0.06)",
+                color: "rgba(255,255,255,0.7)",
+                fontSize: 11.5,
+                lineHeight: 1.55,
+              }}
+            >
+              One NB2 call renders a 3×3 contact sheet of nine different camera
+              angles of your scene in a single 2K image. We then split the
+              sheet into nine clickable tiles on your machine. Click the tile
+              you like → <b>Apply</b> replaces the scene image with that tile.
+              Nine angles for the latency cost of one call, with stronger
+              identity consistency than running nine separate generations.
+            </div>
+          </div>
+
+          {/* Panel-legend — tells users which preset is in which slot so they
+              can aim the generate call if they want to bias a rerun via notes. */}
+          <div>
+            <div style={sectionLabelStyle}>Panel layout (3 × 3)</div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, 1fr)",
+                gap: 4,
+              }}
+            >
+              {presetsForSheet.map((p, i) => (
+                <div
+                  key={p.id}
+                  style={{
+                    padding: "6px 8px",
+                    background: "rgba(255,255,255,0.03)",
+                    border: "1px solid rgba(255,255,255,0.06)",
+                    fontSize: 11,
+                    color: "rgba(255,255,255,0.82)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: "'SF Mono', monospace",
+                      color: "rgba(255,255,255,0.4)",
+                      fontSize: 10,
+                    }}
+                  >
+                    {i + 1}
+                  </span>
+                  <span style={{ fontWeight: 600 }}>{p.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div style={sectionLabelStyle}>
+              Cinematic notes
+              <span
+                style={{
+                  color: "rgba(255,255,255,0.4)",
+                  fontWeight: 400,
+                  fontSize: 10.5,
+                  marginLeft: 6,
+                  textTransform: "none",
+                  letterSpacing: 0,
+                }}
+              >
+                (optional, applied to all 9 panels)
+              </span>
+            </div>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              placeholder="e.g. stay in the same set dressing, keep the rainy-night palette"
+              disabled={generating}
+              style={{
+                width: "100%",
+                background: "rgba(255,255,255,0.03)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                color: "rgba(255,255,255,0.9)",
+                padding: 10,
+                fontSize: 12,
+                fontFamily: "inherit",
+                resize: "vertical",
+                outline: "none",
+              }}
+            />
+          </div>
+
+          {/* Result / in-flight surface */}
+          {generating ? (
+            <div
+              style={{
+                border: "1px solid rgba(255,255,255,0.08)",
+                background: "rgba(255,255,255,0.02)",
+                padding: 28,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 10,
+                minHeight: 280,
+              }}
+            >
+              <Loader2
+                className="w-6 h-6"
+                style={{ color: "rgba(255,255,255,0.6)", animation: "spin 1s linear infinite" }}
+              />
+              <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 12 }}>
+                Rendering 3×3 contact sheet…
+              </div>
+              <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 10, letterSpacing: 0.4 }}>
+                {startedAt ? `${Math.round((Date.now() - startedAt) / 1000)}s elapsed` : "…"} · typically 20–40s
+              </div>
+            </div>
+          ) : error ? (
+            <div
+              style={{
+                border: "1px solid rgba(220,38,38,0.35)",
+                background: "rgba(220,38,38,0.08)",
+                padding: "10px 12px",
+                color: "#fca5a5",
+                fontSize: 11,
+                lineHeight: 1.5,
+              }}
+            >
+              {error}
+            </div>
+          ) : session ? (
+            <div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginBottom: 8,
+                }}
+              >
+                <div style={sectionLabelStyle}>Pick a tile</div>
+                <div style={{ flex: 1 }} />
+                <button
+                  onClick={handleDiscard}
+                  disabled={applying}
+                  style={{
+                    padding: "3px 8px",
+                    fontSize: 10.5,
+                    background: "transparent",
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    color: "rgba(255,255,255,0.7)",
+                    cursor: applying ? "not-allowed" : "pointer",
+                  }}
+                  title="Discard this contact sheet and generate a new one"
+                >
+                  Discard
+                </button>
+              </div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3, 1fr)",
+                  gap: 6,
+                }}
+              >
+                {session.tiles.map((tile, i) => {
+                  const active = selectedTile === i;
+                  const preset = presetsForSheet[i];
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => setSelectedTile(i)}
+                      disabled={applying}
+                      style={{
+                        position: "relative",
+                        padding: 0,
+                        background: "#0a0a0a",
+                        border: `2px solid ${active ? ACCENT : "rgba(255,255,255,0.08)"}`,
+                        cursor: applying ? "not-allowed" : "pointer",
+                        overflow: "hidden",
+                        aspectRatio: "1 / 1",
+                        transition: "border-color 120ms ease",
+                      }}
+                    >
+                      <img
+                        src={tile}
+                        alt={preset?.label ?? `Panel ${i + 1}`}
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          objectFit: "cover",
+                          display: "block",
+                          pointerEvents: "none",
+                        }}
+                      />
+                      <div
+                        style={{
+                          position: "absolute",
+                          top: 4,
+                          left: 4,
+                          fontSize: 9,
+                          padding: "1px 5px",
+                          background: active ? ACCENT : "rgba(0,0,0,0.6)",
+                          color: "#fff",
+                          fontWeight: 700,
+                          letterSpacing: 0.4,
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        {i + 1} · {preset?.label}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div
+              style={{
+                border: "1px dashed rgba(255,255,255,0.12)",
+                padding: 28,
+                textAlign: "center",
+                color: "rgba(255,255,255,0.55)",
+                fontSize: 12,
+                lineHeight: 1.55,
+              }}
+            >
+              Press <b>Generate contact sheet</b> to render 9 camera angles of this scene in one call.
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={FOOTER_STYLE}>
+          {session && selectedTile != null && presetsForSheet[selectedTile] && (
+            <div
+              style={{
+                fontSize: 11,
+                color: "rgba(255,255,255,0.6)",
+                marginRight: "auto",
+              }}
+            >
+              Selected: <b style={{ color: "#fca5a5" }}>{presetsForSheet[selectedTile].label}</b>
+            </div>
+          )}
+          <button
+            onClick={handleGenerate}
+            disabled={generating || applying}
+            style={{
+              background: generating ? "rgba(220,38,38,0.25)" : ACCENT,
+              color: "#fff",
+              border: "none",
+              padding: "8px 14px",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: generating || applying ? "not-allowed" : "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            {generating && <Loader2 className="w-3 h-3 animate-spin" />}
+            {session ? "Regenerate contact sheet" : "Generate contact sheet"}
+          </button>
+          {session && (
+            <button
+              onClick={handleApplyTile}
+              disabled={selectedTile == null || applying || generating}
+              style={{
+                background:
+                  selectedTile == null || applying || generating
+                    ? "rgba(16,185,129,0.2)"
+                    : "#10b981",
+                color:
+                  selectedTile == null || applying || generating
+                    ? "rgba(255,255,255,0.5)"
+                    : "#fff",
+                border: "none",
+                padding: "8px 14px",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor:
+                  selectedTile == null || applying || generating ? "not-allowed" : "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+              title={
+                selectedTile == null
+                  ? "Click a tile first"
+                  : "Replace scene image with selected tile"
+              }
+            >
+              {applying ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+              Apply tile
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * Shared subpanels & atoms
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+function SourcePreview({
+  scene,
+  sourceUrl,
+  subject,
+}: {
+  scene: Scene;
+  sourceUrl: string;
+  subject: string;
+}) {
+  return (
+    <div
+      style={{
+        borderRight: "1px solid rgba(255,255,255,0.06)",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+        background: "#0e0e0e",
+      }}
+    >
+      <div
+        style={{
+          padding: 14,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#0a0a0a",
+          borderBottom: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
+        <img
+          src={sourceUrl}
+          alt={`Scene ${scene.scene_number}`}
+          style={{
+            maxWidth: "100%",
+            maxHeight: 220,
+            objectFit: "contain",
+            display: "block",
+          }}
+        />
+      </div>
+      <div
+        style={{
+          padding: "12px 14px",
+          overflow: "auto",
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+        }}
+      >
+        <div>
+          <div style={miniLabelStyle}>Scene description</div>
+          <div style={{ color: "rgba(255,255,255,0.82)", fontSize: 12, lineHeight: 1.5 }}>
+            {scene.description || <span style={{ opacity: 0.5 }}>No description set</span>}
+          </div>
+        </div>
+        {subject && (
+          <div>
+            <div style={miniLabelStyle}>Identity anchor</div>
+            <div style={{ color: "rgba(255,255,255,0.72)", fontSize: 11, lineHeight: 1.5 }}>
+              {subject}
+            </div>
+          </div>
+        )}
+        {(scene.location || scene.mood) && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "auto 1fr",
+              columnGap: 8,
+              rowGap: 4,
+              fontSize: 11,
+            }}
+          >
+            {scene.location && (
+              <>
+                <div style={{ color: "rgba(255,255,255,0.45)" }}>Location</div>
+                <div style={{ color: "rgba(255,255,255,0.8)" }}>{scene.location}</div>
+              </>
+            )}
+            {scene.mood && (
+              <>
+                <div style={{ color: "rgba(255,255,255,0.45)" }}>Mood</div>
+                <div style={{ color: "rgba(255,255,255,0.8)" }}>{scene.mood}</div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PresetStatusBadge({ status }: { status: SlotStatus }) {
   const cfg = {
     queued: { label: "Queued", color: "rgba(255,255,255,0.55)", bg: "rgba(255,255,255,0.08)" },
@@ -1106,8 +1407,6 @@ function PresetStatusBadge({ status }: { status: SlotStatus }) {
   );
 }
 
-/** Module-level hook: ticks every second while at least one slot is still
- *  running, and stays idle otherwise (no wasted renders on a quiet modal). */
 function useElapsedTicker(active: boolean): number {
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -1126,7 +1425,7 @@ const formatElapsed = (ms: number): string => {
   return `${m}m${s.toString().padStart(2, "0")}s`;
 };
 
-/* ━━━ Results subpanel ━━━ */
+/* ━━━ Results subpanel (Presets tab) ━━━ */
 function ResultsPanel({
   slots,
   applyingFromUrl,
@@ -1141,7 +1440,6 @@ function ResultsPanel({
   onDiscard: (presetId: string) => void;
 }) {
   const ordered = CAMERA_PRESETS.filter((p) => slots[p.id]);
-  // Drive an elapsed-time tick only while something is actively generating.
   const anyRunning = ordered.some(
     (p) => slots[p.id]?.status === "generating" || slots[p.id]?.status === "queued",
   );
@@ -1233,10 +1531,6 @@ function ResultCard({
           alignItems: "center",
           gap: 6,
           borderBottom: "1px solid rgba(255,255,255,0.05)",
-          // Header is a fixed-height single-line strip; narrower cards
-          // truncate the preset label with ellipsis so adding a live
-          // elapsed-time badge never forces the row to wrap and distort
-          // the card's image aspect ratio.
           minWidth: 0,
         }}
       >
@@ -1252,24 +1546,6 @@ function ResultCard({
         >
           {preset.label}
         </span>
-        {slot.mode && (
-          <span
-            title={slot.mode === "preserve" ? "Rendered from source image" : "Rendered from scratch"}
-            style={{
-              flexShrink: 0,
-              fontSize: 9,
-              letterSpacing: 0.4,
-              textTransform: "uppercase",
-              padding: "1px 5px",
-              border: `1px solid ${slot.mode === "preserve" ? "rgba(220,38,38,0.45)" : "rgba(255,255,255,0.18)"}`,
-              color: slot.mode === "preserve" ? "#fca5a5" : "rgba(255,255,255,0.55)",
-              background: slot.mode === "preserve" ? "rgba(220,38,38,0.08)" : "transparent",
-              fontWeight: 600,
-            }}
-          >
-            {slot.mode === "preserve" ? "Source" : "Fresh"}
-          </span>
-        )}
         <span
           style={{
             flexShrink: 0,
@@ -1374,45 +1650,83 @@ function ResultCard({
   );
 }
 
-/* ━━━ tiny presentational helpers ━━━ */
-function ModeOption({
+/* ━━━ atoms ━━━ */
+function TabBtn({
   active,
-  disabled,
-  icon,
-  title,
-  blurb,
   onClick,
+  icon,
+  label,
+  blurb,
 }: {
   active: boolean;
-  disabled?: boolean;
+  onClick: () => void;
   icon: React.ReactNode;
-  title: string;
+  label: string;
   blurb: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: "10px 16px",
+        background: active ? "#121212" : "transparent",
+        border: "none",
+        borderBottom: `2px solid ${active ? ACCENT : "transparent"}`,
+        color: active ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.6)",
+        cursor: "pointer",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        fontFamily: "inherit",
+        fontSize: 12,
+        fontWeight: 600,
+        letterSpacing: 0.2,
+        marginBottom: -1,
+      }}
+    >
+      <span style={{ display: "flex", color: active ? "#fca5a5" : "rgba(255,255,255,0.5)" }}>
+        {icon}
+      </span>
+      {label}
+      <span
+        style={{
+          fontSize: 10,
+          fontWeight: 400,
+          color: "rgba(255,255,255,0.4)",
+          letterSpacing: 0.1,
+          marginLeft: 2,
+        }}
+      >
+        {blurb}
+      </span>
+    </button>
+  );
+}
+
+function EmotionChipBtn({
+  chip,
+  active,
+  onClick,
+}: {
+  chip: EmotionChip;
+  active: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       onClick={onClick}
-      disabled={disabled}
       style={{
-        textAlign: "left",
-        padding: "10px 12px",
-        background: active ? ACCENT_SOFT_BG : "rgba(255,255,255,0.03)",
-        border: `1px solid ${active ? ACCENT_SOFT_BORDER : "rgba(255,255,255,0.08)"}`,
-        cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.45 : 1,
-        display: "flex",
-        flexDirection: "column",
-        gap: 4,
-        transition: "border-color 0.12s, background 0.12s",
+        padding: "3px 10px",
+        fontSize: 10.5,
+        letterSpacing: 0.2,
+        background: active ? ACCENT_SOFT_BG : "transparent",
+        border: `1px solid ${active ? ACCENT_SOFT_BORDER : "rgba(255,255,255,0.12)"}`,
+        color: active ? "#fca5a5" : "rgba(255,255,255,0.7)",
+        cursor: "pointer",
+        fontFamily: "inherit",
       }}
-      title={disabled ? "Requires a source image — generate this scene first" : undefined}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ color: active ? "#fca5a5" : "rgba(255,255,255,0.55)", display: "flex" }}>{icon}</span>
-        <div style={{ color: "rgba(255,255,255,0.95)", fontSize: 12, fontWeight: 600 }}>{title}</div>
-      </div>
-      <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 10.5, lineHeight: 1.35 }}>{blurb}</div>
+      {chip.label}
     </button>
   );
 }
@@ -1469,6 +1783,40 @@ function IconBtn({
   );
 }
 
+function backBtnStyle(disabled: boolean): React.CSSProperties {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    background: "transparent",
+    border: "1px solid rgba(255,255,255,0.14)",
+    color: "rgba(255,255,255,0.8)",
+    padding: "6px 10px",
+    fontSize: 12,
+    cursor: disabled ? "not-allowed" : "pointer",
+    marginRight: "auto",
+  };
+}
+
+const sectionLabelStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.85)",
+  fontSize: 12,
+  fontWeight: 600,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
+  marginBottom: 6,
+};
+
+const miniLabelStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.5)",
+  fontSize: 10,
+  fontWeight: 600,
+  letterSpacing: 0.6,
+  textTransform: "uppercase",
+  marginBottom: 4,
+};
+
+/* ━━━ status summaries ━━━ */
 function summarizeSlots(slots: Record<string, VariationSlot>): string {
   const vals = Object.values(slots);
   if (vals.length === 0) return "No variations";
@@ -1482,7 +1830,6 @@ function summarizeSlots(slots: Record<string, VariationSlot>): string {
   return parts.join(" · ");
 }
 
-/** Footer status text for the setup phase — reflects skip-done semantics. */
 function summarizeSetup(
   selected: Set<string>,
   slots: Record<string, VariationSlot>,

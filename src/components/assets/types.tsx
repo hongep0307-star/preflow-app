@@ -13,6 +13,33 @@ export interface FocalPoint {
   scale?: number;
 }
 
+/**
+ * Camera framing buckets for background asset variations. Used both as the
+ * generation slot key in `photo_variations` and as the matching key when
+ * the conti pipeline picks a reference image for a scene's shot type.
+ *
+ * - wide   : Wide / establishing — full architectural scope of the location
+ * - medium : Medium — meaningful corner / a character-scaled area of the room
+ * - close  : Close-up — a wall surface, a single feature (door, window, sign)
+ * - detail : Extreme detail — texture, material, prop micro-shot
+ *
+ * NOTE: An `alt` (alternative wide vantage point) slot was removed — NB2
+ * kept regenerating outputs visually indistinguishable from the primary
+ * `wide` shot, so the slot wasted UI space and generation budget. The
+ * literal stays in the union for backward compatibility with already-
+ * stored variations on existing assets; new generations and the picker's
+ * fallback chain no longer reference it.
+ */
+export type BackgroundFraming = "wide" | "medium" | "close" | "detail" | "alt";
+
+export interface PhotoVariation {
+  url: string;
+  framing: BackgroundFraming;
+  caption?: string | null;
+  /** ISO timestamp — useful for staleness UX ("regenerate older than X"). */
+  generated_at: string;
+}
+
 export interface Asset {
   id: string;
   project_id: string;
@@ -26,6 +53,10 @@ export interface Asset {
   asset_type: AssetType;
   source_type: string;
   created_at: string;
+  /** Optional. Background-only. Up to 5 framing-tagged alternate views of
+   *  the same location, generated from `photo_url` via the
+   *  background_variations IPC. Falls back to `photo_url` when absent. */
+  photo_variations?: PhotoVariation[] | null;
 }
 
 export const TYPE_LABEL: Record<AssetType, string> = {

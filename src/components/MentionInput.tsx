@@ -43,6 +43,8 @@ interface MentionInputProps {
   textareaRef?: React.RefObject<HTMLTextAreaElement>;
   /** Called when Enter is pressed in controlled mode */
   onSubmit?: () => void;
+  /** Remove rounded corners on the textarea (e.g. Inpaint prompt). */
+  squareCorners?: boolean;
 }
 
 /* ━━━━━ 드롭다운 아이템 ━━━━━ */
@@ -115,6 +117,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
   minHeight,
   textareaRef: externalTextareaRef,
   onSubmit,
+  squareCorners,
 }) => {
   const isControlled = value !== undefined && onChange !== undefined;
   const [internalText, setInternalText] = useState("");
@@ -250,7 +253,16 @@ const MentionInput: React.FC<MentionInputProps> = ({
 
   const renderHighlightedText = () => {
     if (!rawText) return null;
-    const tags = assets.map((a) => (a.tag_name.startsWith("@") ? a.tag_name : `@${a.tag_name}`));
+    // Sort by length DESCENDING before building the alternation so that
+    // sibling tags like `@BG_medium` are matched before their parent
+    // `@BG`. JS regex alternation matches left-to-right, so without
+    // this the shorter `@BG` wins and `_medium` is left as plain text
+    // (with our new sibling-asset model this is the common case —
+    // every background gets a parent + a handful of `{parent}_{framing}`
+    // children that share the same prefix).
+    const tags = assets
+      .map((a) => (a.tag_name.startsWith("@") ? a.tag_name : `@${a.tag_name}`))
+      .sort((a, b) => b.length - a.length);
     if (tags.length === 0) return <span>{rawText}</span>;
     const pattern = new RegExp(`(${tags.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g");
     const parts = rawText.split(pattern);
@@ -353,7 +365,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
         disabled={disabled}
         placeholder={placeholder}
         rows={isControlled ? undefined : 1}
-        className="flex-1 max-h-[120px] resize-none rounded border border-border bg-background px-3 py-2.5 text-sm leading-relaxed text-foreground outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 ring-offset-background placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
+        className={`flex-1 max-h-[120px] resize-none border border-border bg-background px-3 py-2.5 text-sm leading-relaxed text-foreground outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 ring-offset-background placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50 ${squareCorners ? "rounded-none" : "rounded"}`}
         style={{
           scrollbarWidth: "none",
           minHeight: minHeight ?? 40,

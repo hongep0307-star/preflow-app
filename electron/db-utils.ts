@@ -29,7 +29,7 @@ const TABLE_COLUMNS: Record<string, ReadonlySet<string>> = {
   assets: new Set([
     "id", "project_id", "asset_type", "tag_name", "photo_url", "ai_description",
     "outfit_description", "role_description", "space_description",
-    "signature_items", "photo_crop", "source_type", "created_at",
+    "signature_items", "photo_crop", "photo_variations", "source_type", "created_at",
   ]),
   scene_versions: new Set([
     "id", "project_id", "version_number", "version_name", "scenes",
@@ -70,6 +70,7 @@ export const JSON_COLUMNS = new Set<string>([
   "conti_image_history",
   "conti_image_crop",
   "photo_crop",
+  "photo_variations",
   "scenes",
   "reference_image_urls",
   "thumbnail_crop",

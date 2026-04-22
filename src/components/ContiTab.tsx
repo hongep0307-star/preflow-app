@@ -1706,6 +1706,29 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     if (data) setAssets(data as Asset[]);
   }, [projectId]);
 
+  // Live merge of new assets created elsewhere (e.g. AssetsTab "Save as
+  // Background" on a framing variation). Without this, ContiTab's assets
+  // state stays stale until the tab is unmounted/remounted, and any
+  // `@<new-tag>` typed in a scene would be misresolved by resolveAsset's
+  // prefix-fallback (or just rendered as plain text), then frozen into
+  // tagged_assets[]. Listening for the same project's id keeps cross-
+  // project events from leaking.
+  useEffect(() => {
+    const onAssetCreated = (e: Event) => {
+      const ce = e as CustomEvent<Asset & { project_id?: string }>;
+      const created = ce.detail;
+      if (!created || !created.tag_name) return;
+      if (created.project_id && created.project_id !== projectId) return;
+      setAssets((prev) => {
+        if (prev.some((a) => a.tag_name === created.tag_name)) return prev;
+        return [...prev, created as Asset];
+      });
+    };
+    window.addEventListener("preflow:asset-created", onAssetCreated as EventListener);
+    return () =>
+      window.removeEventListener("preflow:asset-created", onAssetCreated as EventListener);
+  }, [projectId]);
+
   const getMoodReferenceUrl = useCallback((sceneNumber: number): string | undefined => {
     const linked = moodImagesRef.current.find((img) => img.sceneRef === sceneNumber);
     return linked?.url ?? undefined;
@@ -2307,7 +2330,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const MODEL_OPTIONS: { id: ContiModel; name: string; desc: string }[] = [
     { id: "nano-banana-2", name: "Nano Banana 2", desc: "Consistency + composition (default)" },
-    { id: "gpt", name: "GPT", desc: "General purpose" },
+    { id: "gpt", name: "GPT 2", desc: "General purpose" },
   ];
   useEffect(() => {
     if (!showModelMenu) return;
@@ -2380,16 +2403,20 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     updateGeneratingSceneIds((prev) => new Set(prev).add(scene.id));
     setGeneratingSceneVersionMap((prev) => ({ ...prev, [scene.id]: activeVersionId }));
     try {
-      const styleAnchor = currentStyle?.style_prompt ?? undefined;
-      const styleImageUrl = currentStyle?.thumbnail_url ?? undefined;
+      // Generate / Regenerate intentionally does NOT forward currentStyle.
+      // Stuffing styleAnchor + styleImageUrl into the same prompt as scene
+      // text + mood ref + every tagged asset only diluted the model's
+      // attention and produced washed-out style adherence anyway. Style is
+      // applied exclusively via the dedicated Style Transfer flow now,
+      // which gives the model a focused 2-image (source + style) prompt
+      // and reliably picks up the look. The currentStyle chip stays in
+      // the toolbar so the Transfer button still works.
       const newUrl = await generateConti({
         scene,
         allScenes: activeScenes,
         projectId,
         videoFormat,
         briefAnalysis: briefAnalysisRef.current,
-        styleAnchor,
-        styleImageUrl,
         moodReferenceUrl: getMoodReferenceUrl(scene.scene_number),
         model: contiModel,
         onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
@@ -2441,8 +2468,9 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       return next;
     });
     setGenerateProgress({ done: 0, total: pending.length });
-    const styleAnchor = currentStyle?.style_prompt ?? undefined;
-    const styleImageUrl = currentStyle?.thumbnail_url ?? undefined;
+    // Generate-All matches the single-scene Generate path: no style
+    // forwarding. Style is applied only via the explicit Style Transfer
+    // flow (Select scenes → Transfer button). See handleGenerate above.
     let doneCount = 0;
     try {
       await Promise.all(
@@ -2465,8 +2493,6 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               projectId,
               videoFormat,
               briefAnalysis: briefAnalysisRef.current,
-              styleAnchor,
-              styleImageUrl,
               moodReferenceUrl: getMoodReferenceUrl(scene.scene_number),
               model: contiModel,
               onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
@@ -2571,15 +2597,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               // post-processing 을 체인에 enqueue — 완료될 때까지 await 해서 진행률/로딩 UI 가 정확히 맞도록.
               await enqueuePostProcess(async () => {
                 pushHistory(scene.id, oldUrl);
-                const { data: freshRow } = await supabase
-                  .from("scenes")
-                  .select("conti_image_crop")
-                  .eq("id", scene.id)
-                  .single();
-                const preservedCrop = freshRow?.conti_image_crop ?? scene.conti_image_crop ?? null;
+                // styleTransfer() 가 scenes 테이블의 conti_image_crop 도 null 로 비웠다.
+                // (새 이미지의 자연 비율 = FORMAT_RATIO[videoFormat] = 프리뷰 컨테이너 비율
+                //  → 별도 크롭 불필요. 옛 crop 의 좌표는 옛 이미지 콘텐츠 기준이라 새 이미지엔 안 맞음.)
+                // 버전 JSON 도 동일하게 비워서 일관성 유지.
                 const current = getSceneState(projectId)?.scenes ?? activeScenes;
                 const updated = current.map((s) =>
-                  s.id === scene.id ? { ...s, conti_image_url: newUrl, conti_image_crop: preservedCrop } : s,
+                  s.id === scene.id ? { ...s, conti_image_url: newUrl, conti_image_crop: null } : s,
                 );
                 await updateVersionScenes(updated);
                 bumpCache(scene.scene_number);
@@ -2744,6 +2768,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               imgWrap.style.cssText = `position:relative; width:100%; aspect-ratio:${aspect}; background:#2a2a2a; overflow:hidden; border-radius:0; flex-shrink:0;`;
               if (scene.conti_image_url) {
                 const exportCrop = getExportCrop(scene.conti_image_crop, videoFormat);
+                // NOTE: html2canvas mis-renders `<img object-fit:cover/fill>` on
+                // images whose intrinsic aspect ratio doesn't match the card's
+                // (e.g. a 1024x1024 GPT image inside a 16:9 card), forcing the
+                // image to stretch to fill the box. Using a <div> with
+                // background-image + background-size:cover sidesteps that bug
+                // and matches SortableContiCard.tsx's on-screen renderer 1:1
+                // (it uses the same div+backgroundImage approach).
                 if (exportCrop) {
                   const containerAspect = videoFormat === "vertical" ? 9 / 16 : videoFormat === "square" ? 1 : 16 / 9;
                   const ia = exportCrop.ia ?? containerAspect;
@@ -2754,18 +2785,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                     exportCrop.x,
                     exportCrop.y,
                   );
-                  const imgEl = document.createElement("img");
-                  imgEl.crossOrigin = "anonymous";
-                  imgEl.src = scene.conti_image_url;
-                  imgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;object-fit:fill;display:block;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
-                  imgWrap.appendChild(imgEl);
+                  const bgEl = document.createElement("div");
+                  bgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
+                  imgWrap.appendChild(bgEl);
                 } else {
-                  const imgEl = document.createElement("img");
-                  imgEl.crossOrigin = "anonymous";
-                  imgEl.src = scene.conti_image_url;
-                  imgEl.style.cssText =
-                    "position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;display:block;";
-                  imgWrap.appendChild(imgEl);
+                  const bgEl = document.createElement("div");
+                  bgEl.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;`;
+                  imgWrap.appendChild(bgEl);
                 }
               } else if (scene.is_transition) {
                 const flow = document.createElement("div");
@@ -2966,6 +2992,11 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 imgWrap.style.cssText = `position:relative; width:100%; aspect-ratio:${aspect}; background:#2a2a2a; overflow:hidden; flex-shrink:0;`;
                 if (scene.conti_image_url) {
                   const exportCrop = getExportCrop(scene.conti_image_crop, videoFormat);
+                  // See note in exportToPDFWithVersions: html2canvas mis-renders
+                  // <img object-fit:*> when the image's intrinsic aspect ratio
+                  // doesn't match the box (e.g. 1:1 GPT image inside a 16:9 card)
+                  // and stretches it. Use div + background-size:cover instead so
+                  // PNG export matches the on-screen scene card.
                   if (exportCrop) {
                     const containerAspect = videoFormat === "vertical" ? 9 / 16 : videoFormat === "square" ? 1 : 16 / 9;
                     const ia = exportCrop.ia ?? containerAspect;
@@ -2976,18 +3007,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                       exportCrop.x,
                       exportCrop.y,
                     );
-                    const imgEl = document.createElement("img");
-                    imgEl.crossOrigin = "anonymous";
-                    imgEl.src = scene.conti_image_url;
-                    imgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;object-fit:fill;display:block;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
-                    imgWrap.appendChild(imgEl);
+                    const bgEl = document.createElement("div");
+                    bgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
+                    imgWrap.appendChild(bgEl);
                   } else {
-                    const imgEl = document.createElement("img");
-                    imgEl.crossOrigin = "anonymous";
-                    imgEl.src = scene.conti_image_url;
-                    imgEl.style.cssText =
-                      "position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;display:block;";
-                    imgWrap.appendChild(imgEl);
+                    const bgEl = document.createElement("div");
+                    bgEl.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;`;
+                    imgWrap.appendChild(bgEl);
                   }
                 } else if (scene.is_transition) {
                   const flow = document.createElement("div");
@@ -3533,20 +3559,65 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           )}
         </div>
 
-        <button
-          onClick={() => setShowStyleModal(true)}
-          className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors"
+        <div
+          className="flex items-stretch h-8"
           style={{
             background: currentStyle ? KR_BG : "rgba(255,255,255,0.04)",
-            color: currentStyle ? KR : "rgba(255,255,255,0.35)",
             border: currentStyle ? `1px solid ${KR_BORDER2}` : "1px solid rgba(255,255,255,0.08)",
-            cursor: "pointer",
             borderRadius: 0,
           }}
         >
-          <Palette className="w-3.5 h-3.5" />
-          {currentStyle ? currentStyle.name : "Style"}
-        </button>
+          <button
+            onClick={() => setShowStyleModal(true)}
+            className="flex items-center gap-1.5 px-3 text-[11px] font-medium tracking-wide transition-colors"
+            style={{
+              background: "transparent",
+              color: currentStyle ? KR : "rgba(255,255,255,0.35)",
+              border: "none",
+              cursor: "pointer",
+              borderRadius: 0,
+            }}
+          >
+            <Palette className="w-3.5 h-3.5" />
+            {currentStyle ? currentStyle.name : "Style"}
+          </button>
+          {currentStyle && (
+            <button
+              onClick={async (e) => {
+                e.stopPropagation();
+                // 옵티미스틱: 클라이언트 state 먼저 비움 → 즉시 칩 사라짐.
+                setCurrentStyle(null);
+                setProjectInfo((prev) => ({ ...prev, conti_style_id: null }));
+                // DB 도 같이 비워야 탭 이동 후 재로드 시 다시 적용되지 않는다.
+                // (StylePickerModal 의 handleApply(NONE) 와 동일한 영속화)
+                try {
+                  const { error } = await supabase
+                    .from("projects")
+                    .update({ conti_style_id: null })
+                    .eq("id", projectId);
+                  if (error) throw error;
+                  toast({ title: "Style removed." });
+                } catch (err: any) {
+                  toast({ title: "Style remove failed", description: err.message, variant: "destructive" });
+                }
+              }}
+              title="Clear style"
+              className="flex items-center justify-center px-1.5 transition-colors"
+              style={{
+                background: "transparent",
+                color: KR,
+                border: "none",
+                borderLeft: `1px solid ${KR_BORDER2}`,
+                cursor: "pointer",
+                borderRadius: 0,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(249,66,58,0.18)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
 
         {selectedSceneIds.size > 0 ? (
           <>
@@ -3903,24 +3974,26 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       {cameraVariationsScene && (
         <CameraVariationsModal
           scene={cameraVariationsScene}
+          assets={assets}
           videoFormat={videoFormat}
           onClose={() => setCameraVariationsScene(null)}
           generate={async (req) => {
-            // The modal dispatches two distinct generation paths per request:
+            // The modal dispatches three distinct generation paths per request:
             //
-            //   preserve → NB2 edit of the current scene image. Same pipeline
-            //              RelightModal and ChangeAngleModal use — source image
-            //              goes in as sourceImageUrl, the built prompt tells NB2
-            //              to keep every identity / environment element and
-            //              change only camera position. This is where we get
-            //              "NB2 의 장점인 일관성" back: identity comes from the
-            //              real source pixels, not a description paraphrase.
+            //   preserve      → NB2 edit of the current scene image (1K). Used
+            //                   for the Presets tab — one request per selected
+            //                   camera preset, fired in parallel by the modal.
             //
-            //   fresh    → classic generateConti with camera_angle overridden.
-            //              Identity anchors are tagged_assets photo refs; the
-            //              source scene image is intentionally ignored so NB2
-            //              is free to recompose from scratch with the preset's
-            //              camera phrase.
+            //   contact_sheet → single NB2 edit of the current scene image at
+            //                   1:1 / 2K resolution with the contact-sheet
+            //                   prompt. Returns the URL of a single 3x3 grid
+            //                   image; the modal splits it client-side via
+            //                   splitContactSheetDataUrl.
+            //
+            //   save_local    → a client-side rendered base64 payload (e.g.
+            //                   the contact-sheet tile the user chose) that
+            //                   we persist to storage via the save_local
+            //                   path on the openai-image endpoint.
             if (req.mode === "preserve") {
               const { data, error } = await supabase.functions.invoke("openai-image", {
                 body: {
@@ -3941,20 +4014,43 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               return newUrl;
             }
 
-            // fresh mode
-            const styleAnchor = currentStyle?.style_prompt ?? undefined;
-            const styleImageUrl = currentStyle?.thumbnail_url ?? undefined;
-            const newUrl = await generateConti({
-              scene: req.overrideScene,
-              allScenes: activeScenes,
-              projectId,
-              videoFormat,
-              briefAnalysis: briefAnalysisRef.current,
-              styleAnchor,
-              styleImageUrl,
-              moodReferenceUrl: getMoodReferenceUrl(req.overrideScene.scene_number),
-              model: contiModel,
+            if (req.mode === "contact_sheet") {
+              // Aspect 1:1 + 2K output so each post-split tile still has
+              // enough pixels to survive being reused as a scene thumbnail.
+              const { data, error } = await supabase.functions.invoke("openai-image", {
+                body: {
+                  mode: "inpaint",
+                  useNanoBanana: true,
+                  sourceImageUrl: req.sourceImageUrl,
+                  referenceImageUrls: [],
+                  prompt: req.prompt,
+                  projectId,
+                  sceneNumber: cameraVariationsScene.scene_number,
+                  imageSize: "2048x2048",
+                  nb2ImageSize: "2K",
+                },
+              });
+              if (error) throw error;
+              const d = data as { publicUrl?: string; url?: string } | null;
+              const newUrl = d?.publicUrl ?? d?.url ?? null;
+              if (!newUrl) throw new Error("Contact-sheet generation returned no image URL");
+              return newUrl;
+            }
+
+            // save_local
+            const { data, error } = await supabase.functions.invoke("openai-image", {
+              body: {
+                mode: "save_local",
+                imageBase64: req.base64,
+                projectId,
+                sceneNumber: cameraVariationsScene.scene_number,
+                suffix: req.suffix,
+              },
             });
+            if (error) throw error;
+            const d = data as { publicUrl?: string; url?: string } | null;
+            const newUrl = d?.publicUrl ?? d?.url ?? null;
+            if (!newUrl) throw new Error("save_local returned no image URL");
             return newUrl;
           }}
           onApplied={async (newUrl, previousUrl) => {
@@ -3974,6 +4070,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       {changeAngleScene && (
         <ChangeAngleModal
           scene={changeAngleScene}
+          assets={assets}
           projectId={projectId}
           videoFormat={videoFormat}
           onClose={() => setChangeAngleScene(null)}
@@ -4016,10 +4113,16 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             const current = getSceneState(projectId)?.scenes ?? activeScenes;
             const liveScene = current.find((s) => s.id === studioScene.id);
             pushHistory(studioScene.id, liveScene?.conti_image_url ?? studioScene.conti_image_url);
-            await supabase.from("scenes").update({ conti_image_url: url }).eq("id", studioScene.id);
+            // ContiStudio 의 handleInpaint 가 이미 scenes 테이블에
+            // conti_image_url + conti_image_crop:null 을 기록했으므로 여기서는
+            // 로컬 state (active version scenes) 만 동기화하면 된다.
+            // conti_image_crop 을 null 로 같이 비워야 프리뷰가 옛 좌표계로
+            // 잘못 렌더되지 않는다 (style transfer 와 동일한 패턴).
             const latest = getSceneState(projectId)?.scenes ?? current;
             await updateVersionScenes(
-              latest.map((s) => (s.id === studioScene.id ? { ...s, conti_image_url: url } : s)),
+              latest.map((s) =>
+                s.id === studioScene.id ? { ...s, conti_image_url: url, conti_image_crop: null } : s,
+              ),
             );
             bumpCache(studioScene.scene_number);
           }}

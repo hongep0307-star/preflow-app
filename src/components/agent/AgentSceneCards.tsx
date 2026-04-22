@@ -894,10 +894,12 @@ export const EditablePendingSceneCard = React.memo(function EditablePendingScene
     setLocal(next);
     onUpdate(next);
   };
+  // Location tags come FIRST in tagged_assets so fetchTaggedAssets
+  // preserves the scene's primary background (bgAssets[0] downstream).
   const handleDescChange = (desc: string, tags: string[]) => {
     const locMentions = (local.location ?? "").match(/@([\w가-힣]+)/g) ?? [];
     const locFiltered = locMentions.map((t) => t.slice(1)).filter((n) => assetMap[n]);
-    update({ description: desc, tagged_assets: [...new Set([...tags, ...locFiltered])] });
+    update({ description: desc, tagged_assets: [...new Set([...locFiltered, ...tags])] });
   };
   const handleLocChange = (loc: string) => {
     const locMentions = (loc.match(/@([\w가-힣]+)/g) ?? [])
@@ -908,7 +910,7 @@ export const EditablePendingSceneCard = React.memo(function EditablePendingScene
       });
     const descTags = (local.description ?? "").match(/@([\w가-힣]+)/g) ?? [];
     const descFiltered = descTags.map((t) => t.slice(1)).filter((n) => assetMap[n]);
-    update({ location: loc, tagged_assets: [...new Set([...descFiltered, ...locMentions])] });
+    update({ location: loc, tagged_assets: [...new Set([...locMentions, ...descFiltered])] });
   };
   return (
     <div className="border bg-card p-3" style={{ borderRadius: 0, borderColor: "rgba(255,255,255,0.07)" }}>
@@ -1015,12 +1017,14 @@ export const SortableSceneCard = React.memo(function SortableSceneCard({
     return () => ro.disconnect();
   }, [scene.id, onContentHeight]);
 
+  // Location tags come FIRST in tagged_assets so fetchTaggedAssets
+  // preserves the scene's primary background (bgAssets[0] downstream).
   const handleDescChange = (desc: string, tags: string[]) => {
     const locMentions = (scene.location ?? "").match(/@([\w가-힣]+)/g) ?? [];
     const locFiltered = locMentions
       .map((t) => t.slice(1))
       .filter((n) => assetMap[n] && assetMap[n].asset_type === "background");
-    onUpdate(scene.id, { description: desc, tagged_assets: [...new Set([...tags, ...locFiltered])] });
+    onUpdate(scene.id, { description: desc, tagged_assets: [...new Set([...locFiltered, ...tags])] });
   };
 
   const handleLocChange = (loc: string) => {
@@ -1032,7 +1036,7 @@ export const SortableSceneCard = React.memo(function SortableSceneCard({
       });
     const descTags = (scene.description ?? "").match(/@([\w가-힣]+)/g) ?? [];
     const descFiltered = descTags.map((t) => t.slice(1)).filter((n) => assetMap[n]);
-    onUpdate(scene.id, { location: loc, tagged_assets: [...new Set([...descFiltered, ...locMentions])] });
+    onUpdate(scene.id, { location: loc, tagged_assets: [...new Set([...locMentions, ...descFiltered])] });
   };
 
   return (

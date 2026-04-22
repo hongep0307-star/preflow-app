@@ -49,8 +49,26 @@ export interface MoodGenerateOptions {
   videoFormat: string;
   count?: number;
   targetSceneNumber?: number | null;
-  model?: "creative" | "asset";
+  // 이전의 "creative" | "asset" 2-way 구분을 실제 이미지 모델 명으로 대체.
+  //   - "gpt-image-1.5": 가장 빠른 텍스트-only 모델. Mood Ideation 의 디폴트.
+  //                       에셋 이미지는 참조하지 않고 Claude 가 생성한 풍부한 묘사문만 씀.
+  //   - "gpt-image-2":   vision-aware GPT. 에셋 이미지를 레퍼런스로 함께 전달해
+  //                       실제 캐릭터/배경의 외형을 반영 (callGptVisionGenerate 경로).
+  //   - "nano-banana-2": Vertex NB2. 에셋 이미지 레퍼런스 기반 생성.
+  model?: MoodImageModel;
 }
+
+export type MoodImageModel = "gpt-image-1.5" | "gpt-image-2" | "nano-banana-2";
+
+export const MOOD_IMAGE_MODEL_DEFAULT: MoodImageModel = "gpt-image-1.5";
+
+/** 에셋 이미지를 실제 레퍼런스로 주입하는 모델. 이 모델군은 Claude 쪽에 ASSET system
+ *  prompt(프레이밍/포지션 중심) 를 사용하고, 에셋 포토가 없으면 vision 효용이 0 이다. */
+export const MOOD_MODEL_USES_ASSET_REFS: Record<MoodImageModel, boolean> = {
+  "gpt-image-1.5": false,
+  "gpt-image-2": true,
+  "nano-banana-2": true,
+};
 
 /* ━━━━━ Legacy 랜덤 풀 (폴백용 보존) ━━━━━ */
 
@@ -493,7 +511,8 @@ async function generateCineShotDescriptions(
 ): Promise<CineShotDescription[] | null> {
   try {
     const context = buildClaudeContext(opts);
-    const isAssetMode = opts.model === "asset";
+    const model = opts.model ?? MOOD_IMAGE_MODEL_DEFAULT;
+    const isAssetMode = MOOD_MODEL_USES_ASSET_REFS[model];
     const isSingleSceneMode = opts.targetSceneNumber != null;
     const systemPrompt = buildSystemPrompt(isAssetMode, opts.videoFormat, isSingleSceneMode);
 
@@ -555,24 +574,156 @@ Remember: ALL ${count} shots must have unique composition techniques. Ensure len
   }
 }
 
-/* ━━━━━ Asset mode helper ━━━━━ */
-function buildMoodAssetImageUrls(assets: MoodGenerateOptions["assets"]): string[] {
-  const urls: string[] = [];
+/* ━━━━━ Asset mode helpers ━━━━━
+ *
+ * Mood ideation originally told Claude to *not* describe asset appearance
+ * (the system prompt says "the reference images handle that"). In
+ * practice this fails for multi-asset scenes because:
+ *   1) `/v1/images/edits` caps attached image[] entries — when a scene
+ *      has background + 2 characters + weapon + mood ref, some refs
+ *      get dropped and there is no text anchor to recover the identity.
+ *   2) Items (props / weapons) were enumerated AFTER characters and
+ *      backgrounds, so they were always the first to fall off the cap.
+ *   3) The prompt used *all* project assets for refs, not just the ones
+ *      actually tagged by the scene, diluting relevance further.
+ *
+ * Fix — mirror the conti pipeline:
+ *   - Build a conti-style "ASSET REQUIREMENTS" appendix with identity +
+ *     outfit + "MUST be visible" anchors, and concatenate it into the
+ *     final gpt-image prompt. That way the text alone already carries
+ *     enough identity detail to reconstruct the scene even if a ref is
+ *     dropped at the edits endpoint.
+ *   - In single-scene mode, resolve `scene.tagged_assets` first and
+ *     place those photos at the head of the ref list so they always
+ *     survive the cap.
+ */
+
+/** Fuzzy-match `tag` (with or without leading `@`) to one of the
+ *  project's assets. Mirrors the loose equality used by conti's
+ *  `fetchTaggedAssets`. */
+function resolveTaggedAssets(
+  assets: MoodGenerateOptions["assets"],
+  taggedRaw: string[] | undefined,
+): MoodGenerateOptions["assets"] {
+  if (!taggedRaw || taggedRaw.length === 0) return [];
+  const out: MoodGenerateOptions["assets"] = [];
+  const seen = new Set<string>();
+  for (const t of taggedRaw) {
+    const a = assets.find(
+      (asset) =>
+        asset.tag_name === t ||
+        asset.tag_name === `@${t}` ||
+        normalize(asset.tag_name) === normalize(t),
+    );
+    if (a && !seen.has(a.tag_name)) {
+      out.push(a);
+      seen.add(a.tag_name);
+    }
+  }
+  return out;
+}
+
+/** Conti-style asset requirement appendix. Only includes assets that
+ *  will also be sent as reference photos, so the "[Reference image
+ *  provided — …]" marker stays truthful. */
+function buildMoodAssetAppendix(
+  assets: MoodGenerateOptions["assets"],
+  refUrls: string[],
+): string {
+  if (!assets || assets.length === 0) return "";
+  const refSet = new Set(refUrls);
+  const hasRef = (a: MoodGenerateOptions["assets"][number]) => !!a.photo_url && refSet.has(a.photo_url);
+
+  const characters = assets.filter((a) => (a.asset_type ?? "character") === "character");
+  const items = assets.filter((a) => a.asset_type === "item");
+  const backgrounds = assets.filter((a) => a.asset_type === "background");
+  const sections: string[] = [];
+
+  if (characters.length > 0) {
+    const lines = characters.map((a) => {
+      const name = normalize(a.tag_name);
+      const rows = [
+        `• ${name}:${
+          hasRef(a)
+            ? " [REFERENCE IMAGE PROVIDED — preserve this person's exact facial features, skin tone, hair, and body proportions.]"
+            : a.ai_description
+              ? ` ${a.ai_description}`
+              : ""
+        }`,
+        a.outfit_description ? `  OUTFIT (render exactly): ${a.outfit_description}` : "",
+        a.ai_description && hasRef(a) ? `  Appearance notes: ${a.ai_description}` : "",
+      ].filter(Boolean);
+      return rows.join("\n");
+    });
+    sections.push(
+      `[CHARACTERS — VISUAL CONSISTENCY IS MANDATORY]\nThe following characters MUST appear as described.\n` +
+        lines.join("\n"),
+    );
+  }
+
+  if (items.length > 0) {
+    const lines = items.map((a) => {
+      const name = normalize(a.tag_name);
+      const desc = a.ai_description ?? "as described by tag name";
+      return (
+        `• ${name}: ${desc}\n` +
+        `  → THIS ITEM MUST BE VISIBLY PRESENT AND CLEARLY RECOGNIZABLE IN THE FRAME.` +
+        (hasRef(a) ? " [Reference image provided — match the item's design precisely.]" : "")
+      );
+    });
+    sections.push(`[PROPS — MUST BE VISIBLE AND IDENTIFIABLE]\n${lines.join("\n")}`);
+  }
+
+  if (backgrounds.length > 0) {
+    const lines = backgrounds.map((a) => {
+      const name = normalize(a.tag_name);
+      const desc = a.space_description ?? a.ai_description ?? "as described by tag name";
+      return (
+        `• ${name}: ${desc}` +
+        (hasRef(a) ? "\n  → [Reference image provided — match this environment precisely.]" : "")
+      );
+    });
+    sections.push(
+      `[BACKGROUND / LOCATION — MAINTAIN SPATIAL CONSISTENCY]\n${lines.join("\n")}`,
+    );
+  }
+
+  if (sections.length === 0) return "";
+  return (
+    `\n\n═══ ASSET REQUIREMENTS (HIGHEST PRIORITY) ═══\n` +
+    sections.join("\n\n") +
+    `\n═══════════════════════════════════════════`
+  );
+}
+
+/** Build the ordered list of ref image URLs for gpt-image-2 / NB2. If
+ *  `priority` is provided (single-scene mode → scene.tagged_assets),
+ *  those photos lead so they always survive the edits endpoint's cap. */
+function buildMoodAssetImageUrls(
+  assets: MoodGenerateOptions["assets"],
+  priority?: MoodGenerateOptions["assets"],
+): string[] {
   const MAX_REFS = 14;
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const push = (u: string | null | undefined) => {
+    if (!u || seen.has(u) || urls.length >= MAX_REFS) return;
+    urls.push(u);
+    seen.add(u);
+  };
 
-  const characters = assets.filter((a) => a.asset_type === "character" && a.photo_url);
-  const backgrounds = assets.filter((a) => a.asset_type === "background" && a.photo_url);
-  const items = assets.filter((a) => a.asset_type === "item" && a.photo_url);
+  // 1) Scene-tagged priority (in the exact order the user tagged them).
+  if (priority) {
+    for (const a of priority) push(a.photo_url);
+  }
 
-  for (const c of characters) {
-    if (urls.length < MAX_REFS) urls.push(c.photo_url!);
-  }
-  for (const b of backgrounds) {
-    if (urls.length < MAX_REFS) urls.push(b.photo_url!);
-  }
-  for (const i of items) {
-    if (urls.length < MAX_REFS) urls.push(i.photo_url!);
-  }
+  // 2) Remaining project assets, grouped by type. Backgrounds provide
+  //    the most spatial information so they fill slot 1 (or slot N+1 if
+  //    priority took the lead). Items/props come before a *second* pass
+  //    at backgrounds so weapons don't get starved by extra locations.
+  for (const a of assets.filter((a) => a.asset_type === "background")) push(a.photo_url);
+  for (const a of assets.filter((a) => (a.asset_type ?? "character") === "character")) push(a.photo_url);
+  for (const a of assets.filter((a) => a.asset_type === "item")) push(a.photo_url);
 
   return urls;
 }
@@ -584,50 +735,88 @@ export const generateMoodImages = async (
 ): Promise<string[]> => {
   const count = opts.count ?? 9;
   const imageSize = SIZE_MAP[opts.videoFormat] ?? SIZE_MAP.horizontal;
-  const isAssetMode = opts.model === "asset";
+  const model = opts.model ?? MOOD_IMAGE_MODEL_DEFAULT;
+  const usesAssetRefs = MOOD_MODEL_USES_ASSET_REFS[model];
 
   const cineShots = await generateCineShotDescriptions(opts, count);
   const useCinePipeline = cineShots !== null && cineShots.length > 0;
 
-  const assetImageUrls = isAssetMode ? buildMoodAssetImageUrls(opts.assets) : undefined;
+  // ── 단일 씬 모드에서는 그 씬이 @태그한 에셋들을 ref 와 appendix 의
+  //    최우선 source 로 삼는다. 이렇게 해야 "세번째 이미지(=총기)" 같은
+  //    씬 핵심 에셋이 edits 엔드포인트 cap 에서 먼저 떨어지지 않는다.
+  const singleSceneTaggedAssets =
+    opts.targetSceneNumber != null
+      ? resolveTaggedAssets(
+          opts.assets,
+          opts.scenes.find((s) => s.scene_number === opts.targetSceneNumber)?.tagged_assets,
+        )
+      : [];
+  const priorityAssets = singleSceneTaggedAssets.length > 0 ? singleSceneTaggedAssets : undefined;
+  // Appendix 는 "실제로 scene 에 꼭 들어가야 하는 에셋만" 기술한다.
+  // 단일 씬 모드에서 tagged_assets 가 있으면 그것만, 아니면 전체 프로젝트 에셋.
+  const appendixAssets = singleSceneTaggedAssets.length > 0 ? singleSceneTaggedAssets : opts.assets;
+
+  const assetImageUrls = usesAssetRefs ? buildMoodAssetImageUrls(opts.assets, priorityAssets) : undefined;
+  const assetAppendix =
+    usesAssetRefs && assetImageUrls && assetImageUrls.length > 0
+      ? buildMoodAssetAppendix(appendixAssets, assetImageUrls)
+      : "";
 
   // ★ 단일 이미지 호출 헬퍼
   const generateOne = async (idx: number): Promise<string> => {
     let prompt: string;
     if (useCinePipeline && idx < cineShots!.length) {
-      // ✅ Fix 1: sanitizeImagePrompt 제거
-      // Claude가 공들여 만든 시네마틱 표현을 그대로 GPT에 전달
+      // Claude 가 공들여 만든 시네마틱 묘사를 sanitize 하지 않고 그대로 전달.
       prompt = cineShots![idx].full_prompt;
     } else {
       prompt = buildLegacyMoodPrompt(opts);
     }
+    // Asset-ref 모델 (gpt-image-2 / nano-banana-2) 은 Claude 의 시네마틱
+    // 묘사에 더해 conti 수준의 상세한 에셋 요구사항 텍스트도 함께 받는다.
+    // 레퍼런스 이미지가 edits cap 에서 탈락하더라도, 텍스트만으로 각 에셋의
+    // 정체성(얼굴/의상/무기 외형/배경 지형)이 복원 가능해야 "총기가 반영
+    // 안된다" 같은 실패가 사라진다.
+    if (assetAppendix) prompt = prompt + assetAppendix;
 
     const body: Record<string, any> = {
       prompt,
       projectId: opts.projectId,
       sceneNumber: -1,
       imageSize,
-      quality: "high", // ✅ Fix 2: "medium" → "high"
+      quality: "high",
       folder: "mood",
-      model: "gpt", // ✅ Fix 3: Creative 모드 GPT 명시
     };
 
-    if (isAssetMode && assetImageUrls && assetImageUrls.length > 0) {
-      body.assetImageUrls = assetImageUrls;
-      body.model = "nano-banana-2"; // Asset 모드는 NB2로 덮어씀
-      console.log("[Mood] Asset mode → NB2 호출", { imageUrls: assetImageUrls, prompt });
+    // 모델별 라우팅:
+    //   gpt-image-1.5  → text-only GPT. 에셋 이미지 레퍼런스 없이 묘사문만 사용.
+    //                     9장 배치에도 충분히 빠름(한 장당 ~20–30s). Mood 의 기본값.
+    //   gpt-image-2    → vision-aware GPT. 에셋 포토를 레퍼런스로 넘겨서
+    //                     api-handlers 의 callGptVisionGenerate 경로로 흐름.
+    //   nano-banana-2  → Vertex NB2. 에셋 레퍼런스 기반 생성.
+    if (model === "nano-banana-2") {
+      body.model = "nano-banana-2";
+      if (assetImageUrls && assetImageUrls.length > 0) body.assetImageUrls = assetImageUrls;
+    } else {
+      body.model = "gpt";
+      body.gptModel = model;
+      if (model === "gpt-image-2" && assetImageUrls && assetImageUrls.length > 0) {
+        body.assetImageUrls = assetImageUrls;
+      }
     }
 
     const { data, error } = await supabase.functions.invoke("openai-image", { body });
     if (error || !data?.publicUrl) throw new Error(error?.message ?? "No URL returned");
-    console.log(`[Mood] Image ${idx + 1} generated with: ${data.usedModel ?? "unknown"}`);
+    console.log(
+      `[Mood] Image ${idx + 1} generated with: ${data.usedModel ?? "unknown"} (requested: ${model})`,
+    );
     return data.publicUrl as string;
   };
 
   const urls: string[] = [];
 
-  if (isAssetMode) {
-    // ★ NB2(Asset 모드): 배치 크기 3 병렬 처리 + 완료 즉시 표시
+  // NB2 는 Vertex quota 특성상 병렬 3개 이상은 429 가 빈번 → 기존처럼 batch=3.
+  // GPT 계열은 OpenAI 쪽이 동시성 허용폭이 넉넉하므로 full parallel 유지.
+  if (model === "nano-banana-2") {
     const BATCH_SIZE = 3;
     for (let i = 0; i < count; i += BATCH_SIZE) {
       const batchIndices = Array.from({ length: Math.min(BATCH_SIZE, count - i) }, (_, j) => i + j);
@@ -645,11 +834,10 @@ export const generateMoodImages = async (
       urls.push(...batchUrls);
       batchResults
         .filter((r) => r.status === "rejected")
-        .forEach((r) => console.warn(`[Mood] Asset batch image failed:`, (r as PromiseRejectedResult).reason));
+        .forEach((r) => console.warn(`[Mood] NB2 batch image failed:`, (r as PromiseRejectedResult).reason));
       if (i + BATCH_SIZE < count) await new Promise((r) => setTimeout(r, 1000));
     }
   } else {
-    // ★ Creative 모드(GPT): 전체 병렬 처리
     const results = await Promise.allSettled(
       Array.from({ length: count }, (_, idx) =>
         generateOne(idx).then((url) => {
@@ -660,7 +848,7 @@ export const generateMoodImages = async (
     );
     for (const r of results) {
       if (r.status === "fulfilled") urls.push(r.value);
-      else console.warn("[Mood] Creative image failed:", r.reason);
+      else console.warn(`[Mood] ${model} image failed:`, r.reason);
     }
   }
 

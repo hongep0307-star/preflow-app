@@ -337,16 +337,54 @@ export const buildAssetMap = (assets: Asset[]) =>
     }),
   ) as Record<string, Asset>;
 
+/**
+ * Resolve an `@tag` mention to the registered asset.
+ *
+ *  1. **Exact match** wins outright (case-sensitive, matches stored tag_name).
+ *  2. **Prefix-match fallback** is intentionally narrow: it only fires when
+ *     the overflow tail is **non-ASCII** (e.g. Korean particles `가/를/이/는`).
+ *     This preserves the original UX of `@YD가` resolving to `@YD`, while
+ *     refusing to swallow longer registered tags such as `@BG_medium`,
+ *     `@BG2`, or `@BGwide` — those must hit step 1 with their full name.
+ *
+ *  Why the original prefix matcher was broken:
+ *  the user could create `@BG_medium` from a background framing variation,
+ *  type `@BG_medium` in a scene's location field, but if the renderer's
+ *  `assets` list was momentarily stale (no `BG_medium` yet), the matcher
+ *  would silently downgrade to `@BG`. That wrong tag would then be
+ *  written into `scene.tagged_assets` and persist forever, so the conti
+ *  pipeline never even saw `BG_medium` at generation time.
+ */
 export const resolveAsset = (raw: string, assets: Asset[]): { asset: Asset; name: string } | null => {
   const clean = raw.startsWith("@") ? raw.slice(1) : raw;
+  // Step 1 — exact match (case-sensitive, preferred).
   for (const a of assets) {
     const n = a.tag_name.startsWith("@") ? a.tag_name.slice(1) : a.tag_name;
     if (n === clean) return { asset: a, name: n };
   }
+  // Step 2 — case-insensitive exact match. Users routinely retype tags
+  // with different casing (`@BG_Medium` vs the registered `@BG_medium`).
+  // Without this the prefix fallback below would either reject (ASCII
+  // tail) or silently match the shorter `BG`, which is what the user
+  // saw as "BG_Medium 호출했는데 BG가 불러와짐".
+  const cleanLc = clean.toLowerCase();
+  for (const a of assets) {
+    const n = a.tag_name.startsWith("@") ? a.tag_name.slice(1) : a.tag_name;
+    if (n.toLowerCase() === cleanLc) return { asset: a, name: n };
+  }
+  // Step 3 — narrow prefix fallback, only for trailing non-ASCII (Korean
+  // particles etc.). Sort longest-first so that nested registrations like
+  // `YD` and `YDhyung` compete deterministically (longest-prefix wins).
   const sorted = [...assets].sort((a, b) => b.tag_name.length - a.tag_name.length);
   for (const a of sorted) {
     const n = a.tag_name.startsWith("@") ? a.tag_name.slice(1) : a.tag_name;
-    if (clean.startsWith(n) && clean.length > n.length) return { asset: a, name: n };
+    if (!clean.startsWith(n) || clean.length === n.length) continue;
+    const tail = clean.slice(n.length);
+    // Reject ASCII alnum / underscore tails — those almost always mean
+    // a different (longer) tag the user actually intended (`BG_medium`
+    // vs `BG`, `YDhyung` vs `YD`). Allow Hangul or other non-ASCII.
+    if (/^[A-Za-z0-9_]/.test(tail)) continue;
+    return { asset: a, name: n };
   }
   return null;
 };

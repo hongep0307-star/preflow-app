@@ -27,7 +27,12 @@ export function renderMessageWithMentions(text: string, assets: Asset[]): React.
     tagColorMap.set(tag, ASSET_COLORS[type] ?? FALLBACK);
   });
 
-  const tags = [...tagColorMap.keys()];
+  // Sort longest-first so a longer tag (e.g. "@BG_medium") wins the regex
+  // alternation against a shorter prefix tag ("@BG"). JS regex alternation
+  // returns the leftmost-listed alternative that matches at a position, so
+  // without this sort `@BG_medium` would be split into a `@BG` chip + a
+  // stray `_medium` text node.
+  const tags = [...tagColorMap.keys()].sort((a, b) => b.length - a.length);
   if (tags.length === 0) return text;
 
   const pattern = new RegExp(`(${tags.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g");

@@ -5,6 +5,13 @@ import { buildHookMoodAddendum } from "./hookLibrary";
 /* ━━━━━ 타입 ━━━━━ */
 type AssetType = "character" | "item" | "background";
 
+/**
+ * Background framings are now independent sibling assets
+ * (e.g. `@BG_wide`, `@BG_close`) rather than alternate views
+ * stored on a parent asset. The conti pipeline therefore no
+ * longer needs `photo_variations` here — each tag the user
+ * @-mentions resolves directly to its own `photo_url`.
+ */
 interface Asset {
   tag_name: string;
   photo_url: string | null;
@@ -63,8 +70,7 @@ export interface ContiGenerateOptions {
 }
 
 export interface StyleTransferOptions {
-  // conti_image_crop을 포함한 full Scene 객체를 허용
-  // ia(image aspect ratio)를 crop 데이터에서 읽어 정확한 imageSize를 계산하기 위함
+  // conti_image_crop 을 포함한 full Scene 객체를 허용 — 프리뷰 비율로 사전-크롭할 때 사용.
   scene: SceneForConti & { conti_image_url: string; conti_image_crop?: unknown };
   projectId: string;
   styleImageUrl: string;
@@ -107,6 +113,27 @@ export const IMAGE_SIZE_MAP: Record<VideoFormat, string> = {
   vertical: "1024x1536",
   horizontal: "1536x1024",
   square: "1024x1024",
+};
+
+/* ━━━━━ 프리뷰 컨테이너 비율 (씬카드와 동일) ━━━━━
+ * SortableContiCard.tsx 의 FORMAT_RATIO 와 1:1 일치해야 한다.
+ * NB2 가 출력할 비율(9:16, 16:9, 1:1)과도 정확히 일치한다.
+ */
+export const FORMAT_RATIO: Record<VideoFormat, number> = {
+  horizontal: 16 / 9,
+  vertical: 9 / 16,
+  square: 1,
+};
+
+/* ━━━━━ pre-crop 캔버스 출력 크기 ━━━━━
+ * FORMAT_RATIO 와 정확히 동일한 비율의 픽셀 사이즈.
+ * NB2 / GPT 의 size 인자(IMAGE_SIZE_MAP)와는 무관하다 — 어차피 NB2 는
+ * source 이미지의 픽셀 크기는 무시하고 aspectRatio 인자만 본다.
+ */
+const FORMAT_OUTPUT_SIZE: Record<VideoFormat, { w: number; h: number }> = {
+  horizontal: { w: 1536, h: 864 }, // 16:9
+  vertical: { w: 864, h: 1536 }, // 9:16
+  square: { w: 1024, h: 1024 }, // 1:1
 };
 
 const FORMAT_PROMPT_NOTE: Record<VideoFormat, string> = {
@@ -161,53 +188,131 @@ const isSparseScene = (scene: SceneForConti): boolean => {
   return filledFields <= 1;
 };
 
-/* ━━━━━ aspect ratio → imageSize 문자열 변환 ━━━━━
- * GPT/NB2가 지원하는 3가지 크기 중 가장 가까운 것을 선택.
- * 비표준 크기(1536x1536 등)를 반환하지 않아 GPT API 오류 방지.
+/* ━━━━━ 프리뷰 비율로 source 이미지 자르기 ━━━━━
+ * 씬카드의 AdjustImageModal.captureAsImage 와 동일한 cover-render 알고리즘.
+ * conti_image_crop 의 x/y/scale/rotate/ia 를 그대로 적용해, 사용자가 보고 있는
+ * 프리뷰의 visible region 만 잘라서 PNG Blob 으로 반환한다.
+ *
+ * 결과 이미지 비율 = FORMAT_RATIO[videoFormat] = NB2 출력 비율 → 스타일 변환 후
+ * 결과 이미지가 프리뷰 컨테이너에 정확히 들어맞아 더 이상 찌그러짐이 없다.
  */
-const imageSizeFromAspect = (ia: number): string => {
-  if (ia >= 1.4) return "1536x1024"; // 16:9 가로
-  if (ia <= 0.75) return "1024x1536"; // 9:16 세로
-  return "1024x1024"; // 정사각형 계열
+type PreflightCrop = {
+  x?: number;
+  y?: number;
+  scale?: number;
+  rotate?: number;
+  ia?: number;
 };
 
-/* ━━━━━ conti_image_crop 에서 ia 추출 ━━━━━
- * CropState: { ia?: number, fmt?: string, _v?: number, ... }
- * CropMap:   { horizontal?: CropState, vertical?: CropState, square?: CropState }
- * 어느 포맷이든 ia가 있으면 반환.
- */
-const getIaFromCrop = (crop: unknown): number | null => {
-  if (!crop || typeof crop !== "object") return null;
-  const obj = crop as Record<string, any>;
-  // CropMap 형식
-  for (const fmt of ["horizontal", "vertical", "square"]) {
-    const state = obj[fmt];
-    if (state && typeof state === "object" && typeof state.ia === "number" && state.ia > 0) {
-      return state.ia;
-    }
+const loadHTMLImage = (url: string): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(e);
+    img.src = url;
+  });
+
+/** SortableContiCard.tsx 의 getCropForFmt 와 동일 로직.
+ *  CropMap({horizontal, vertical, square}) 또는 단일 CropState 모두 지원. */
+const getCropForFmtFromStored = (stored: unknown, fmt: VideoFormat): PreflightCrop | null => {
+  if (!stored || typeof stored !== "object") return null;
+  const obj = stored as Record<string, any>;
+  if ("horizontal" in obj || "vertical" in obj || "square" in obj) {
+    const c = obj[fmt];
+    if (c && c._v === 2) return c as PreflightCrop;
+    return null;
   }
-  // 직접 CropState 형식
-  if (typeof obj.ia === "number" && obj.ia > 0) return obj.ia;
+  const s = obj as any;
+  if (s._v === 2 && (!s.fmt || s.fmt === fmt)) return s as PreflightCrop;
   return null;
 };
 
-/* ━━━━━ 소스 이미지 URL → imageSize 감지 (CORS 폴백용) ━━━━━
- * crop ia를 우선 사용하고 없을 때만 이 함수를 호출한다.
- * crossOrigin = "anonymous" 추가로 CORS 오류 방지.
- */
-const detectImageSize = (url: string, fallback: string): Promise<string> => {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      const w = img.naturalWidth;
-      const h = img.naturalHeight;
-      if (w <= 0 || h <= 0) return resolve(fallback);
-      resolve(imageSizeFromAspect(w / h));
-    };
-    img.onerror = () => resolve(fallback);
-    img.src = url;
+const cropImageForFormat = async (
+  imageUrl: string,
+  storedCrop: PreflightCrop | null,
+  videoFormat: VideoFormat,
+): Promise<Blob> => {
+  const img = await loadHTMLImage(imageUrl);
+  const { w: cW, h: cH } = FORMAT_OUTPUT_SIZE[videoFormat];
+
+  const canvas = document.createElement("canvas");
+  canvas.width = cW;
+  canvas.height = cH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D context unavailable");
+
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, cW, cH);
+
+  // crop 인자 — 없으면 정중앙 cover (x=0, y=0, scale=0.8 → 렌더 scale 1.0)
+  const x = storedCrop?.x ?? 0;
+  const y = storedCrop?.y ?? 0;
+  const baseScale = typeof storedCrop?.scale === "number" ? storedCrop.scale : 0.8;
+  const s = Math.max(0.1, baseScale) + 0.2;
+  const rad = ((storedCrop?.rotate ?? 0) * Math.PI) / 180;
+
+  // 항상 현재 이미지의 실제 자연 비율 사용 — 저장된 ia 값이 stale 인 경우(이전 NB2 변환 등)도 안전.
+  const ia = img.naturalWidth > 0 && img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : (storedCrop?.ia ?? cW / cH);
+
+  // 컨테이너에 cover-fit 시 이미지의 렌더 픽셀 크기.
+  const cAspect = cW / cH;
+  let covW: number, covH: number;
+  if (ia >= cAspect) {
+    covH = cH;
+    covW = cH * ia;
+  } else {
+    covW = cW;
+    covH = cW / ia;
+  }
+
+  ctx.save();
+  ctx.translate(cW / 2 + (x / 100) * cW, cH / 2 + (y / 100) * cH);
+  ctx.scale(s, s);
+  ctx.rotate(rad);
+  ctx.drawImage(img, -covW / 2, -covH / 2, covW, covH);
+  ctx.restore();
+
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("canvas.toBlob returned null"))),
+      "image/png",
+    );
   });
+};
+
+const uploadPreflightSource = async (
+  blob: Blob,
+  projectId: string,
+  sceneNumber: number,
+  label: string = "styletx-src",
+): Promise<string> => {
+  const path = `${projectId}/scene_${sceneNumber}_${label}_${Date.now()}.png`;
+  const { error } = await supabase.storage.from("contis").upload(path, blob, {
+    contentType: "image/png",
+    upsert: true,
+  });
+  if (error) throw new Error(`Pre-crop upload failed: ${error.message}`);
+  return supabase.storage.from("contis").getPublicUrl(path).data.publicUrl;
+};
+
+/* ━━━━━ 외부에서 재사용하는 preflight 래퍼 ━━━━━
+ * 씬 이미지를 프리뷰(= FORMAT_RATIO) 비율로 잘라 blob + publicUrl 로 돌려준다.
+ * style transfer, inpaint 등 "프리뷰에 보이는 영역만 원본으로 쓰고 싶은" 모든
+ * 파이프라인에서 동일하게 쓸 수 있다.
+ */
+export const preflightCropToFormat = async (
+  imageUrl: string,
+  storedCrop: unknown,
+  videoFormat: VideoFormat,
+  projectId: string,
+  sceneNumber: number,
+  label: string = "preflight-src",
+): Promise<{ blob: Blob; publicUrl: string }> => {
+  const crop = getCropForFmtFromStored(storedCrop, videoFormat);
+  const blob = await cropImageForFormat(imageUrl, crop, videoFormat);
+  const publicUrl = await uploadPreflightSource(blob, projectId, sceneNumber, label);
+  return { blob, publicUrl };
 };
 
 /* ━━━━━ 한→영 번역 — @태그 보호 ━━━━━ */
@@ -540,25 +645,63 @@ ${constraints.avoid.map((v) => `  ✗ ${sanitizeImagePrompt(v)}`).join("\n")}
     .join("\n");
 };
 
-/* ━━━━━ fetchTaggedAssets ━━━━━ */
+/* ━━━━━ fetchTaggedAssets ━━━━━
+ *
+ * Returns assets in the SAME order the caller passed tags in. This
+ * matters: `tagged_assets` is built location-first in ContiTab /
+ * AgentSceneCards, so the first background tag in the list is the
+ * scene's primary location. `buildAssetImageUrls` keys its "primary
+ * bg" selection on this ordering. Without explicit sort-by-input-order
+ * Supabase returns rows in heap order and the primary bg becomes
+ * whichever row the DB happened to return first. */
 export const fetchTaggedAssets = async (tags: string[], projectId: string): Promise<Asset[]> => {
   if (!tags || tags.length === 0) return [];
   const normalizedTags = tags.map((t) => (t.startsWith("@") ? t : `@${t}`));
   const rawTags = normalizedTags.map((t) => t.slice(1));
   const { data: allAssets } = (await supabase
     .from("assets")
-    .select("tag_name, photo_url, ai_description, outfit_description, signature_items, space_description, asset_type")
+    .select(
+      "tag_name, photo_url, ai_description, outfit_description, signature_items, space_description, asset_type",
+    )
     .eq("project_id", projectId)) as any;
   if (!allAssets) return [];
-  return (allAssets as any[]).filter((asset) => {
-    const norm = asset.tag_name.startsWith("@") ? asset.tag_name : `@${asset.tag_name}`;
+
+  const byRawTag = new Map<string, Asset>();
+  for (const asset of allAssets as Asset[]) {
     const raw = asset.tag_name.startsWith("@") ? asset.tag_name.slice(1) : asset.tag_name;
-    return normalizedTags.includes(norm) || normalizedTags.includes(asset.tag_name) || rawTags.includes(raw);
-  }) as Asset[];
+    const norm = asset.tag_name.startsWith("@") ? asset.tag_name : `@${asset.tag_name}`;
+    if (normalizedTags.includes(norm) || normalizedTags.includes(asset.tag_name) || rawTags.includes(raw)) {
+      byRawTag.set(raw, asset);
+    }
+  }
+
+  const out: Asset[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawTags) {
+    const hit = byRawTag.get(raw);
+    if (hit && !seen.has(raw)) {
+      out.push(hit);
+      seen.add(raw);
+    }
+  }
+  return out;
 };
 
-/* ━━━━━ assetImageUrls 조립 ━━━━━ */
-const buildAssetImageUrls = (assets: Asset[], styleImageUrl?: string, moodReferenceUrl?: string): string[] => {
+/* ━━━━━ assetImageUrls 조립 ━━━━━
+ *
+ * Each tag resolves to exactly one `photo_url`. There is no longer a
+ * framing picker — if the user wants the close-up view of a location
+ * they @-mention `@BG_close` directly, which is its own asset row.
+ *
+ * Order is preserved from `fetchTaggedAssets`, so `bgAssets[0]` is
+ * the location tag (because `computeTaggedAssets` and
+ * `handleLocChange` prepend location-derived tags). Subsequent
+ * backgrounds fill in if slots remain under the 6-image cap. */
+const buildAssetImageUrls = (
+  assets: Asset[],
+  styleImageUrl?: string,
+  moodReferenceUrl?: string,
+): string[] => {
   const MAX = 6;
   const urls: string[] = [];
 
@@ -566,7 +709,9 @@ const buildAssetImageUrls = (assets: Asset[], styleImageUrl?: string, moodRefere
   if (styleImageUrl) urls.push(styleImageUrl);
 
   const bgAssets = assets.filter((a) => a.asset_type === "background" && a.photo_url);
-  if (bgAssets.length > 0) urls.push(bgAssets[0].photo_url as string);
+  if (bgAssets.length > 0 && bgAssets[0].photo_url) {
+    urls.push(bgAssets[0].photo_url);
+  }
 
   for (const a of assets.filter((a) => a.asset_type === "character" && a.photo_url)) {
     if (urls.length >= MAX) break;
@@ -580,7 +725,7 @@ const buildAssetImageUrls = (assets: Asset[], styleImageUrl?: string, moodRefere
 
   for (const a of bgAssets.slice(1)) {
     if (urls.length >= MAX) break;
-    urls.push(a.photo_url as string);
+    if (a.photo_url) urls.push(a.photo_url);
   }
 
   return urls;
@@ -600,7 +745,11 @@ export const generateConti = async ({
   onStageChange,
 }: ContiGenerateOptions): Promise<string> => {
   const taggedAssets = await fetchTaggedAssets(scene.tagged_assets ?? [], projectId);
-  const assetImageUrls = buildAssetImageUrls(taggedAssets, styleImageUrl, moodReferenceUrl);
+  const assetImageUrls = buildAssetImageUrls(
+    taggedAssets,
+    styleImageUrl,
+    moodReferenceUrl,
+  );
   const assetSection = buildAssetSections(taggedAssets, assetImageUrls.length > 0);
 
   const safeBrief: BriefAnalysis | null = briefAnalysis
@@ -691,21 +840,34 @@ export const styleTransfer = async ({
   onStageChange,
 }: StyleTransferOptions): Promise<string> => {
   const styleDesc = stylePrompt?.trim() || "";
-  const fallbackSize = IMAGE_SIZE_MAP[videoFormat];
 
-  // ── imageSize 결정: 우선순위 순 ──
-  // 1순위: conti_image_crop의 ia (가장 신뢰도 높음 — 네트워크 요청 없음)
-  // 2순위: 이미지 URL 로드로 실제 픽셀 크기 감지 (crossOrigin 포함)
-  // 3순위: 프로젝트 포맷 폴백
-  const cropIa = getIaFromCrop(scene.conti_image_crop);
-  const imageSize = cropIa ? imageSizeFromAspect(cropIa) : await detectImageSize(scene.conti_image_url, fallbackSize);
+  // ── imageSize: 항상 프로젝트 포맷 = 프리뷰 컨테이너 비율과 일치한 NB2 비율로 통일 ──
+  // (1024x1536/1536x1024/1024x1024 → toNanoBananaAspectRatio 가 9:16/16:9/1:1 로 매핑)
+  const imageSize = IMAGE_SIZE_MAP[videoFormat];
 
-  console.log("[StyleTransfer] imageSize 결정", {
-    source: cropIa ? "crop_ia" : "detect",
-    cropIa,
-    imageSize,
-    fallback: fallbackSize,
-  });
+  // ── 프리뷰 비율로 source 이미지 사전-크롭 ──
+  // GPT(1:1, 2:3, 3:2 등)와 NB2(9:16, 16:9, 1:1)의 지원 비율이 달라, 그대로 NB2 에 넘기면
+  // 결과가 NB2 비율로 강제 변형되며 찌그러진다. 씬카드 프리뷰에 보이는 영역(=FORMAT_RATIO)을
+  // 그대로 잘라서 NB2 에 넘기면 입력/출력 비율이 같아 더 이상 찌그러지지 않는다.
+  let preflightSourceUrl = scene.conti_image_url;
+  try {
+    const { publicUrl } = await preflightCropToFormat(
+      scene.conti_image_url,
+      scene.conti_image_crop,
+      videoFormat,
+      projectId,
+      scene.scene_number,
+      "styletx-src",
+    );
+    preflightSourceUrl = publicUrl;
+    console.log("[StyleTransfer] pre-crop 완료", {
+      videoFormat,
+      formatRatio: FORMAT_RATIO[videoFormat],
+      preflightSourceUrl,
+    });
+  } catch (cropErr) {
+    console.warn("[StyleTransfer] pre-crop 실패 — 원본 이미지로 진행", cropErr);
+  }
 
   // ── NB2용 프롬프트: 이미지 스타일만 차용, 텍스트 style_prompt 제외 ──
   const nbPrompt = [
@@ -732,7 +894,8 @@ export const styleTransfer = async ({
   onStageChange?.("generating");
   console.log("[StyleTransfer] 호출", {
     scene: scene.scene_number,
-    sourceImageUrl: scene.conti_image_url,
+    sourceImageUrl: preflightSourceUrl,
+    originalImageUrl: scene.conti_image_url,
     stylePrompt: styleDesc || "(image-only)",
     imageSize,
   });
@@ -742,9 +905,9 @@ export const styleTransfer = async ({
       mode: "style_transfer",
       prompt: nbPrompt,
       gptPrompt: gptPrompt,
-      sourceImageUrl: scene.conti_image_url,
+      sourceImageUrl: preflightSourceUrl, // 프리뷰 비율로 잘라낸 이미지
       styleImageUrl: styleImageUrl ?? null,
-      imageSize, // 소스 이미지 실제 비율 기준
+      imageSize, // 프로젝트 포맷 기준
       projectId,
       sceneNumber: scene.scene_number,
     },
@@ -759,6 +922,11 @@ export const styleTransfer = async ({
   console.log("[StyleTransfer] 완료, usedModel:", data.usedModel);
 
   onStageChange?.("uploading");
-  await supabase.from("scenes").update({ conti_image_url: publicUrl }).eq("id", scene.id);
+  // 새 이미지의 자연 비율 = FORMAT_RATIO[videoFormat] = 프리뷰 컨테이너 비율 → 별도의 crop 불필요.
+  // (이전 crop 들은 옛 이미지의 콘텐츠 좌표 기준이라 새 이미지엔 안 맞으므로 모두 비운다.)
+  await supabase
+    .from("scenes")
+    .update({ conti_image_url: publicUrl, conti_image_crop: null })
+    .eq("id", scene.id);
   return publicUrl;
 };

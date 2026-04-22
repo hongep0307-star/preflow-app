@@ -32,7 +32,12 @@ export const TagChip = ({ name, assetType }: { name: string; assetType: string }
         fontSize: 9,
         fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
         fontWeight: 600,
-        textTransform: "uppercase" as const,
+        // No uppercase transform — the asset's registered casing is
+        // semantically meaningful (e.g. `BG_medium` ≠ `BG_MEDIUM` to
+        // the resolver, and now that the conti renderer properly
+        // resolves variations like `@BG_medium`, the chip should
+        // display them as-typed instead of flattening every tag to
+        // ALL CAPS like the side-panel doesn't.
         letterSpacing: "0.04em",
         padding: "1px 6px 1px 4px",
         borderRadius: 2,
@@ -78,20 +83,40 @@ export const TagChip = ({ name, assetType }: { name: string; assetType: string }
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// resolveAsset — 정확 매칭 우선, 그 다음 prefix 매칭
+// resolveAsset — exact-match first, then a deliberately *narrow*
+// prefix fallback that only fires for non-ASCII overflow (Korean
+// particles like 가/를/은/는). The wider "any prefix wins" policy
+// would silently downgrade a typed `@BG_medium` to `@BG` whenever
+// the renderer's assets list is momentarily stale, and that wrong
+// resolution gets persisted into scene.tagged_assets — meaning the
+// conti pipeline never sees the longer tag at generation time.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const resolveAsset = (raw: string, assets: Asset[]): { asset: Asset; name: string } | null => {
   const clean = raw.startsWith("@") ? raw.slice(1) : raw;
-  // 1. 정확 매칭
+  // 1. exact match (case-sensitive, preferred).
   for (const a of assets) {
     const n = a.tag_name.startsWith("@") ? a.tag_name.slice(1) : a.tag_name;
     if (n === clean) return { asset: a, name: n };
   }
-  // 2. prefix 매칭 (긴 것 우선)
+  // 2. case-insensitive exact match — `@BG_Medium` should still resolve
+  // to a registered `@BG_medium` instead of falling through to the
+  // prefix step (which would either reject or silently downgrade to
+  // the shorter `BG`). Returns the asset's canonical casing in `name`.
+  const cleanLc = clean.toLowerCase();
+  for (const a of assets) {
+    const n = a.tag_name.startsWith("@") ? a.tag_name.slice(1) : a.tag_name;
+    if (n.toLowerCase() === cleanLc) return { asset: a, name: n };
+  }
+  // 3. narrow prefix fallback — only when the tail is non-ASCII
+  // (Hangul / punctuation), so registered ASCII tags with `_` or
+  // alnum suffixes are never misclassified as a shorter sibling.
   const sorted = [...assets].sort((a, b) => b.tag_name.length - a.tag_name.length);
   for (const a of sorted) {
     const n = a.tag_name.startsWith("@") ? a.tag_name.slice(1) : a.tag_name;
-    if (clean.startsWith(n) && clean.length > n.length) return { asset: a, name: n };
+    if (!clean.startsWith(n) || clean.length === n.length) continue;
+    const tail = clean.slice(n.length);
+    if (/^[A-Za-z0-9_]/.test(tail)) continue;
+    return { asset: a, name: n };
   }
   return null;
 };
@@ -276,11 +301,15 @@ export const LocationField = ({
   }, [mentionQuery]);
 
   const bgAssets = assets.filter((a) => a.asset_type === "background");
+  // No hard cap — show every matching background tag (variations like
+  // BG_medium / BG_DETAIL would otherwise get hidden under a 6-item slice).
+  // The dropdown container below is scrollable so the list never overflows
+  // the side panel.
   const suggestions =
     mentionQuery !== null
-      ? bgAssets
-          .filter((a) => a.tag_name.replace(/^@/, "").toLowerCase().includes(mentionQuery.toLowerCase()))
-          .slice(0, 6)
+      ? bgAssets.filter((a) =>
+          a.tag_name.replace(/^@/, "").toLowerCase().includes(mentionQuery.toLowerCase()),
+        )
       : [];
 
   const commit = () => {
@@ -433,7 +462,11 @@ export const LocationField = ({
             background: "#1c1c1c",
             border: "1px solid rgba(255,255,255,0.08)",
             borderRadius: 0,
-            overflow: "hidden",
+            // Scrollable so all matching background tags are reachable —
+            // ~6 rows visible, the rest scroll. ArrowDown auto-scrolls
+            // the highlighted row into view via the ref callback below.
+            maxHeight: 240,
+            overflowY: "auto",
             boxShadow: "0 8px 28px rgba(0,0,0,0.5)",
           }}
         >
@@ -442,6 +475,9 @@ export const LocationField = ({
             return (
               <button
                 key={a.tag_name}
+                ref={(el) => {
+                  if (el && idx === selIdx) el.scrollIntoView({ block: "nearest" });
+                }}
                 type="button"
                 onMouseDown={(e) => {
                   e.preventDefault();
@@ -850,10 +886,13 @@ export const DescriptionField = ({
     });
   };
 
+  // No hard cap — show every matching tag (background variations, all
+  // characters, all items). The dropdown container below is scrollable
+  // so the list never overflows the side panel.
   const suggestions = mentionState
-    ? assets
-        .filter((a) => a.tag_name.replace(/^@/, "").toLowerCase().includes(mentionState.query.toLowerCase()))
-        .slice(0, 6)
+    ? assets.filter((a) =>
+        a.tag_name.replace(/^@/, "").toLowerCase().includes(mentionState.query.toLowerCase()),
+      )
     : [];
 
   if (editing)
@@ -914,18 +953,26 @@ export const DescriptionField = ({
         />
         {suggestions.length > 0 && (
           <div
-            className="absolute z-50 left-0 right-0 overflow-hidden"
+            className="absolute z-50 left-0 right-0"
             style={{
               background: "#1c1c1c",
               border: "1px solid rgba(255,255,255,0.08)",
               borderRadius: 0,
               boxShadow: "0 8px 28px rgba(0,0,0,0.5)",
               top: "calc(100% + 4px)",
+              // Scrollable so all matching tags (incl. background variations
+              // like BG_medium / BG_DETAIL) are reachable. ArrowDown keeps
+              // the highlighted row in view via the per-button ref callback.
+              maxHeight: 240,
+              overflowY: "auto",
             }}
           >
             {suggestions.map((asset, idx) => (
               <button
                 key={asset.tag_name}
+                ref={(el) => {
+                  if (el && idx === selectedIdx) el.scrollIntoView({ block: "nearest" });
+                }}
                 type="button"
                 onMouseDown={(e) => {
                   e.preventDefault();
@@ -1139,11 +1186,13 @@ export const SidePanel = ({
       fn: onRelight,
       danger: false,
     });
-  // Camera Variations / Change Angle 은 현재 NB2(Gemini 3.1 Flash Image) 단일 경로로는
-  // 원본 유지 + 카메라 앵글 변경이 안정적으로 안 된다(모델이 단일 레퍼런스 이미지로부터
-  // 3D 씬을 재구성하지 못해서 freeze / 2D-pivot / redesign failure mode 로 빠짐).
-  // 전용 novel-view 모델(Qwen-Image-Edit Multi-Angle 등)을 붙이기 전까지는 사이드패널에
-  // 항목은 남겨두되 "Unavailable" 로 비활성화하여 기능의 존재를 알리면서 호출은 차단한다.
+  // Camera Variations / Change Angle — temporarily disabled again.
+  // Even with the Phase 1-3 refactor (Presets / Contact Sheet / A-then-B
+  // chain prompts) NB2(Gemini 3.1 Flash Image) is not reliable enough at
+  // novel-view synthesis for production use. Keep the entries visible so
+  // operators know the feature exists, but block invocation. When we
+  // wire a dedicated novel-view model (Qwen-Image-Edit Multi-Angle etc.)
+  // flip `disabled` off and pass `onCameraVariations` / `onChangeAngle`.
   if (hasImage)
     variantsChildren.push({
       kind: "leaf",

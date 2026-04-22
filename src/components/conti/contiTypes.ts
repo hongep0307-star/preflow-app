@@ -37,6 +37,18 @@ export interface Scene {
   transition_type?: string | null;
   conti_image_crop?: any;
 }
+/** Camera framing buckets for background variations.
+ *  Mirrors src/components/assets/types.tsx → BackgroundFraming.
+ *  Kept narrow here so the conti pipeline can match by exact string. */
+export type BackgroundFraming = "wide" | "medium" | "close" | "detail" | "alt";
+
+export interface PhotoVariation {
+  url: string;
+  framing: BackgroundFraming;
+  caption?: string | null;
+  generated_at: string;
+}
+
 export interface Asset {
   tag_name: string;
   photo_url: string | null;
@@ -44,6 +56,10 @@ export interface Asset {
   ai_description?: string | null;
   outfit_description?: string | null;
   space_description?: string | null;
+  /** Background-only alternate views per camera framing. Used by
+   *  buildAssetImageUrls to pick a framing-matched reference image
+   *  for a scene; falls back to photo_url when absent. */
+  photo_variations?: PhotoVariation[] | null;
 }
 export interface ProjectInfo {
   title: string;

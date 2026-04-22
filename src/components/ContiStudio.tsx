@@ -4,6 +4,7 @@ import {
   sanitizeImagePrompt,
   IMAGE_SIZE_MAP,
   generateConti,
+  preflightCropToFormat,
   type VideoFormat,
   type BriefAnalysis,
   type GeneratingStage,
@@ -47,6 +48,7 @@ interface Scene {
   tagged_assets: string[];
   duration_sec: number | null;
   conti_image_url: string | null;
+  conti_image_crop?: unknown;
 }
 interface Asset {
   id?: string;
@@ -166,6 +168,19 @@ export const ContiStudio = ({
   const cursorCanvasRef = useRef<HTMLCanvasElement>(null);
   const eventDivRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  /* ── inpaint preflight 소스 URL ──
+   * style transfer 와 동일하게, inpaint 전에 원본 씬 이미지를 프리뷰 비율
+   * (= FORMAT_RATIO[videoFormat])로 잘라 Supabase 에 업로드하고, 그 URL 을
+   * 여기 저장해둔다. handleInpaint 는 이 URL 을 원본으로 사용해 NB2 에게
+   * 프리뷰와 정확히 같은 비율·프레이밍의 source 를 넘긴다.
+   *
+   * GPT(1:1/2:3/3:2 등)와 NB2(9:16/16:9/1:1) 의 지원 비율이 다르기 때문에,
+   * 원본 GPT 이미지를 그대로 NB2 inpaint 에 주면 결과물이 강제로 NB2 비율로
+   * 리샘플되며 찌그러진다. 프리뷰 비율로 사전-크롭 해두면 입력/출력 비율이
+   * 같아 더 이상 찌그러지지 않는다. */
+  const preflightSourceUrlRef = useRef<string | null>(null);
+  const preflightedSceneImageUrlRef = useRef<string | null>(null);
 
   /* ── 드로잉 상태 ──
    * brushSize 는 이제 "이미지 픽셀 기준 반지름" (해상도 독립).
@@ -402,7 +417,12 @@ export const ContiStudio = ({
     img.src = url;
   }, [currentScene.conti_image_url, previewUrl, activeTab]);
 
-  /* ━━━ 이미지 로드 (Inpaint 탭) ━━━ */
+  /* ━━━ 이미지 로드 (Inpaint 탭) ━━━
+   * style transfer 와 동일하게, 인페인트도 씬 이미지를 프리뷰 비율로 사전-크롭한
+   * 결과 위에서 수행한다. 즉 캔버스에 그려지는 이미지부터가 "프리뷰에 보이는
+   * 그 영역"이며, 사용자가 그리는 마스크도 최종 결과와 1:1 로 정렬된다.
+   * 크롭된 이미지는 Supabase 에 업로드되어 handleInpaint 가 NB2 에게 넘길
+   * sourceImageUrl 로 재사용된다. */
   useEffect(() => {
     if (activeTab !== "edit" || !currentScene.conti_image_url) return;
     setImageLoaded(false);
@@ -414,14 +434,52 @@ export const ContiStudio = ({
     hasMaskRef.current = false;
     lastPaintPtRef.current = null;
 
+    // 씬 이미지 URL 이 바뀌었으면 기존 preflight 캐시 무효화.
+    if (preflightedSceneImageUrlRef.current !== currentScene.conti_image_url) {
+      preflightSourceUrlRef.current = null;
+      preflightedSceneImageUrlRef.current = null;
+    }
+
+    let cancelled = false;
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(currentScene.conti_image_url!);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
+        const sourceUrl = currentScene.conti_image_url!;
+
+        // 1) 프리뷰 비율로 사전-크롭 (실패하면 원본으로 폴백).
+        let loadUrl = sourceUrl;
+        let objectUrl: string | null = null;
+        try {
+          const { blob, publicUrl } = await preflightCropToFormat(
+            sourceUrl,
+            currentScene.conti_image_crop,
+            videoFormat,
+            currentScene.project_id,
+            currentScene.scene_number,
+            "inpaint-src",
+          );
+          if (cancelled) return;
+          preflightSourceUrlRef.current = publicUrl;
+          preflightedSceneImageUrlRef.current = sourceUrl;
+          objectUrl = URL.createObjectURL(blob);
+          loadUrl = objectUrl;
+          console.log("[Inpaint] preflight crop 완료", { preflightSourceUrl: publicUrl });
+        } catch (preflightErr) {
+          console.warn("[Inpaint] preflight crop 실패 — 원본 이미지로 진행", preflightErr);
+          preflightSourceUrlRef.current = null;
+          preflightedSceneImageUrlRef.current = null;
+          const res = await fetch(sourceUrl);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          objectUrl = URL.createObjectURL(blob);
+          loadUrl = objectUrl;
+        }
+
         const img = new Image();
         img.onload = () => {
+          if (cancelled) {
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
+            return;
+          }
           const ic = imageCanvasRef.current;
           const mc = maskCanvasRef.current;
           const oc = overlayCanvasRef.current;
@@ -444,19 +502,29 @@ export const ContiStudio = ({
             setCanvasSize({ w: img.naturalWidth * scale, h: img.naturalHeight * scale });
           }
           setImageLoaded(true);
-          URL.revokeObjectURL(url);
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
         };
         img.onerror = () => {
           setImageError(true);
-          URL.revokeObjectURL(url);
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
         };
-        img.src = url;
+        img.src = loadUrl;
       } catch {
         setImageError(true);
       }
     }, 100);
-    return () => clearTimeout(timer);
-  }, [activeTab, currentScene.conti_image_url]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    activeTab,
+    currentScene.conti_image_url,
+    currentScene.conti_image_crop,
+    currentScene.project_id,
+    currentScene.scene_number,
+    videoFormat,
+  ]);
 
   /* ━━━ Undo 스냅샷 (alpha-채널 1바이트 압축)
    * soft 브러시의 알파 그라디언트를 보존하기 위해 R 대신 alpha 채널 저장.
@@ -1440,12 +1508,14 @@ export const ContiStudio = ({
           prompt: rawPrompt,
           hasMask: !maskEmpty,
           assetDescriptions: assetDescriptions || undefined,
-          // 브러시 모드에서만 SOURCE + TAG 이미지를 같이 보내서 Gemini 가
+          // Gemini 가 SOURCE + TAG 이미지를 모두 보고
           //   PRESERVE: (원본에서 보존할 요소)
           //   TAG_IDENTITY: (태그 에셋의 식별 특징)
-          // 블록을 모두 포함한 강화 프롬프트를 만들게 한다.
-          sourceImageBase64: !maskEmpty && sourceImageBase64 ? sourceImageBase64 : undefined,
-          tagImageBase64: !maskEmpty && tagImageBase64 ? tagImageBase64 : undefined,
+          // 블록을 포함한 강화 프롬프트를 만들게 한다.
+          // 브러시 없이 태그만으로 호출될 때도 태그 에셋의 식별 특징이 NB2 까지
+          // 그대로 흘러가야 반영률이 떨어지지 않으므로 hasMask 무관하게 전달.
+          sourceImageBase64: sourceImageBase64 || undefined,
+          tagImageBase64: tagImageBase64 || undefined,
         },
       });
       if (!error && data?.enhanced) {
@@ -1489,7 +1559,16 @@ export const ContiStudio = ({
     setIsGenerating(true);
     onEditGeneratingChange?.(currentScene.id, true);
     const sceneId = currentScene.id;
-    const sceneImageUrl = currentScene.conti_image_url;
+    // ── 프리뷰 비율로 사전-크롭된 URL 이 있으면 그걸 원본으로 사용 (style transfer 와 동일) ──
+    // 캔버스에 그려진 이미지와 마스크는 이미 이 크롭 결과 위에서 그려졌으므로,
+    // 모델에게도 동일한 크롭된 이미지를 넘겨야 mask 좌표계가 정확히 일치한다.
+    const preflightSourceUrl = preflightSourceUrlRef.current;
+    const effectiveSceneImageUrl =
+      preflightSourceUrl && preflightedSceneImageUrlRef.current === currentScene.conti_image_url
+        ? preflightSourceUrl
+        : currentScene.conti_image_url;
+    const sceneImageUrl = effectiveSceneImageUrl;
+    const usedPreflight = sceneImageUrl !== currentScene.conti_image_url;
     const sceneProjectId = currentScene.project_id;
     const sceneNumber = currentScene.scene_number;
     const promptText = inpaintPrompt;
@@ -1669,8 +1748,8 @@ Edit instruction (applies strictly inside the WHITE mask region):
               ? computeImageSizeFromDimensions(icSnapshot.width, icSnapshot.height)
               : IMAGE_SIZE_MAP[fmt];
 
-          maskPrefix = !maskEmptyVal
-            ? `INPAINT EDIT — full-image mode with binary mask.
+          if (!maskEmptyVal) {
+            maskPrefix = `INPAINT EDIT — full-image mode with binary mask.
 
 Reference images (exact order):
   [1] SOURCE — the original full scene. This is your canvas.
@@ -1686,8 +1765,32 @@ Hard output rules — ALL must hold:
  5. The object painted inside WHITE MUST be recognizably the same specific object in TAG_ASSET.` : ""}
 
 Edit instruction (applies strictly inside the WHITE mask region):
-`
-            : "";
+`;
+          } else if (hasTagRef) {
+            /* ━━━ 태그-only 모드 (브러시 없음 + @태그 있음) ━━━
+             * 역할 라벨이 없으면 NB2 가 [2] TAG_ASSET 을 단순 스타일/무드 레퍼런스처럼
+             * 약하게 참고해 반영률이 떨어진다. 명시적으로 정체성 소스임을 지정하고,
+             * SOURCE 의 구성·조명·다른 서브젝트는 유지하도록 강하게 묶어준다.
+             */
+            maskPrefix = `INPAINT EDIT — tag-driven edit (no brush mask).
+
+Reference images (exact order):
+  [1] SOURCE — the current scene. Preserve composition, camera angle, framing, lighting, color grading, and every subject/element that is NOT the target of the user's edit request.
+  [2] TAG_ASSET — identity reference for the object/character the user @-tagged. Treat this as the authoritative source for the tagged subject's identity (shape, proportions, colors, materials, markings, logos, distinctive details).${nbRefUrls.length > 1 ? `
+  [3+] STYLE/MOOD REFS — use only for style, color, and mood cues. Do NOT copy their subjects or composition.` : ""}
+
+Hard output rules — ALL must hold:
+ 1. Apply the user's edit instruction ONLY to the target implied by the prompt. Every non-target pixel must match [1] SOURCE (same people, same poses, same background, same props, same lighting).
+ 2. The tagged subject in the output MUST be recognizably the same specific object/character shown in [2] TAG_ASSET. Match its shape, proportions, colors, materials, surface finish, markings/logos/text, and distinguishing details. Adapt only viewing angle, lighting, and scale to blend with SOURCE.
+ 3. Do NOT generate a generic version of the tagged subject. Do NOT substitute it with a similar-but-different object.
+ 4. Output aspect ratio, framing, and crop MUST match SOURCE. No pan/zoom/rotate.
+ 5. Do NOT introduce extra changes (new objects, relighting the whole scene, re-framing) beyond what the user asked.
+
+Edit instruction:
+`;
+          } else {
+            maskPrefix = "";
+          }
         }
 
         console.log("[Inpaint:refs-debug]", {
@@ -1750,7 +1853,12 @@ Edit instruction (applies strictly inside the WHITE mask region):
           }
         }
 
-        await supabase.from("scenes").update({ conti_image_url: publicUrl }).eq("id", sceneId);
+        // 프리뷰 비율로 사전-크롭된 이미지 위에서 inpaint 한 경우, 결과 이미지의
+        // 자연 비율이 이미 FORMAT_RATIO 와 일치한다. 이전에 저장된 conti_image_crop
+        // 은 옛 이미지 좌표 기준이므로 반드시 비워야 프리뷰가 정상 출력된다.
+        const sceneUpdate: Record<string, any> = { conti_image_url: publicUrl };
+        if (usedPreflight) sceneUpdate.conti_image_crop = null;
+        await supabase.from("scenes").update(sceneUpdate).eq("id", sceneId);
         onSaveInpaint(publicUrl);
         toast({ title: "Inpainting complete" });
       } catch (e: any) {
@@ -1835,14 +1943,16 @@ Edit instruction (applies strictly inside the WHITE mask region):
               setIsLocalRegenerating(true);
               onEditGeneratingChange?.(currentScene.id, true);
               try {
+                // Regenerate intentionally drops styleAnchor / styleImageUrl
+                // here too — see ContiTab.handleGenerate for the rationale.
+                // Style is applied only via the dedicated Style Transfer
+                // flow, never as a soft hint mixed into generate prompts.
                 const newUrl = await generateConti({
                   scene: currentScene,
                   allScenes,
                   projectId: currentScene.project_id,
                   videoFormat,
                   briefAnalysis: briefAnalysis ?? undefined,
-                  styleAnchor,
-                  styleImageUrl,
                 });
                 onSaveInpaint(newUrl);
                 toast({ title: "Regeneration complete" });
@@ -2209,7 +2319,7 @@ Edit instruction (applies strictly inside the WHITE mask region):
                     }}
                     style={{
                       border: isDragOver ? "1.5px dashed #f9423a" : "1.5px dashed transparent",
-                      borderRadius: 8,
+                      borderRadius: 0,
                       transition: "border 0.15s",
                       background: isDragOver ? "rgba(249,66,58,0.04)" : "transparent",
                     }}
@@ -2221,6 +2331,7 @@ Edit instruction (applies strictly inside the WHITE mask region):
                       placeholder="Describe changes... (type @ to tag an asset)"
                       minHeight={72}
                       textareaRef={inpaintInputRef}
+                      squareCorners
                       onSubmit={() => {
                         if (inpaintPrompt.trim() && !isGenerating && imageLoaded) handleInpaint();
                       }}

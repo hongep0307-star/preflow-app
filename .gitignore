@@ -18,6 +18,7 @@ release
 npm-debug.log*
 .vite
 .cache
+*.tsbuildinfo
 
 # OS
 Thumbs.db

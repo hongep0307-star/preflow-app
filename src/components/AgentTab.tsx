@@ -332,6 +332,25 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
     return data as Asset[] | null;
   }, [projectId]);
 
+  // Mirror ContiTab: live-merge assets created in another tab so the
+  // mention resolver in scene fields/chat input doesn't operate on a
+  // stale list (which would silently corrupt tagged_assets[]).
+  useEffect(() => {
+    const onAssetCreated = (e: Event) => {
+      const ce = e as CustomEvent<Asset & { project_id?: string }>;
+      const created = ce.detail;
+      if (!created || !created.tag_name) return;
+      if (created.project_id && created.project_id !== projectId) return;
+      setProjectAssets((prev) => {
+        if (prev.some((a) => a.tag_name === created.tag_name)) return prev;
+        return [...prev, created as Asset];
+      });
+    };
+    window.addEventListener("preflow:asset-created", onAssetCreated as EventListener);
+    return () =>
+      window.removeEventListener("preflow:asset-created", onAssetCreated as EventListener);
+  }, [projectId]);
+
   const fetchScenes = useCallback(async () => {
     const { data } = await supabase
       .from("scenes")
