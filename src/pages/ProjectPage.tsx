@@ -110,11 +110,10 @@ const ProjectPage = () => {
     if (!id) return;
     let cancelled = false;
     (async () => {
-      const [briefRes, assetRes, sceneRes, projRes] = await Promise.all([
+      const [briefRes, assetRes, sceneRes] = await Promise.all([
         supabase.from("briefs").select("analysis").eq("project_id", id).limit(1),
         supabase.from("assets").select("id").eq("project_id", id).limit(1),
         supabase.from("scenes").select("id, conti_image_url").eq("project_id", id),
-        supabase.from("projects").select("status").eq("id", id).limit(1),
       ]);
       if (cancelled) return;
       const briefRow = (briefRes.data as Array<{ analysis: string | null }> | null)?.[0];
@@ -122,12 +121,11 @@ const ProjectPage = () => {
       const assetsDone = ((assetRes.data as unknown[] | null)?.length ?? 0) > 0;
       const sceneRows = (sceneRes.data as Array<{ id: string; conti_image_url: string | null }> | null) ?? [];
       const ideationDone = sceneRows.length > 0;
-      const projRow = (projRes.data as Array<{ status: string | null }> | null)?.[0];
-      const projectCompleted = (projRow?.status ?? "").toLowerCase() === "completed";
-      // Conti 완료 판정: 씬 이미지가 하나라도 생성되었거나 프로젝트가 Completed 상태일 때.
+      // Conti 완료 판정: 씬이 1개 이상이면서 모든 씬에 conti_image_url 이 채워져 있을 때.
+      // 씬이 0개면 당연히 미완료.
       const contiDone =
-        projectCompleted ||
-        sceneRows.some((s) => s.conti_image_url && s.conti_image_url.length > 0);
+        sceneRows.length > 0 &&
+        sceneRows.every((s) => !!(s.conti_image_url && s.conti_image_url.length > 0));
       setCompletion({
         brief: briefDone,
         assets: assetsDone,
