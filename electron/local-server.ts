@@ -18,7 +18,7 @@ import {
 import path from "path";
 import fs from "fs";
 
-import { LOCAL_SERVER_PORT } from "./constants";
+import { LOCAL_SERVER_PORT, setLocalServerPort } from "./constants";
 export { LOCAL_SERVER_PORT };
 
 function parseBody(req: http.IncomingMessage): Promise<any> {
@@ -67,8 +67,28 @@ function resolveBucketPath(bucket: string, sub: string): string {
   return target;
 }
 
+/** 실제로 한 번 listen 시도. 실패하면 Error(code 포함) 을 reject. */
+function listenOnce(server: http.Server, port: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (err: NodeJS.ErrnoException) => {
+      server.removeListener("listening", onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.removeListener("error", onError);
+      const actual = (server.address() as { port: number } | null)?.port ?? port;
+      resolve(actual);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 export function startLocalServer(): Promise<number> {
-  return new Promise((resolve) => {
+  return new Promise<number>(async (resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -201,10 +221,47 @@ export function startLocalServer(): Promise<number> {
       }
     });
 
-    server.listen(LOCAL_SERVER_PORT, "127.0.0.1", () => {
-      const port = (server.address() as any).port;
-      console.log(`[local-server] Running on port ${port}`);
+    // ── 포트 바인딩 전략 ─────────────────────────────────────────────
+    // 1. 선호 포트 19876 을 3 회까지 재시도 (TIME_WAIT / zombie 해제 대기).
+    // 2. 그래도 EADDRINUSE 면 port=0 으로 OS 가 할당해 주는 랜덤 포트 사용.
+    // 3. 실제 bind 된 포트를 setLocalServerPort() 로 기록해서 main/renderer
+    //    양쪽이 올바른 URL 을 쓰도록 한다.
+    const maxRetries = 3;
+    let lastErr: NodeJS.ErrnoException | null = null;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const port = await listenOnce(server, LOCAL_SERVER_PORT);
+        setLocalServerPort(port);
+        console.log(`[local-server] Running on port ${port}`);
+        resolve(port);
+        return;
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code !== "EADDRINUSE") {
+          reject(e);
+          return;
+        }
+        lastErr = e;
+        if (attempt < maxRetries - 1) {
+          console.warn(
+            `[local-server] Port ${LOCAL_SERVER_PORT} busy, retry ${attempt + 1}/${maxRetries - 1} in ${500 * (attempt + 1)}ms`,
+          );
+          await sleep(500 * (attempt + 1));
+        }
+      }
+    }
+
+    // Fallback: OS 가 할당하는 랜덤 포트로 시도.
+    console.warn(
+      `[local-server] Preferred port ${LOCAL_SERVER_PORT} unavailable after retries (${lastErr?.message}). Falling back to a random port.`,
+    );
+    try {
+      const port = await listenOnce(server, 0);
+      setLocalServerPort(port);
+      console.log(`[local-server] Running on fallback port ${port}`);
       resolve(port);
-    });
+    } catch (err) {
+      reject(err);
+    }
   });
 }

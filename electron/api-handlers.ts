@@ -1,6 +1,6 @@
 import { getSettings } from "./settings";
 import { getStorageBasePath } from "./paths";
-import { LOCAL_SERVER_BASE_URL } from "./constants";
+import { getLocalServerBaseUrl } from "./constants";
 import { fetchWithRetry } from "./http-utils";
 import fs from "fs";
 import path from "path";
@@ -9,7 +9,7 @@ import crypto from "crypto";
 function storageFileUrl(fullPath: string): string {
   const base = getStorageBasePath();
   const relative = path.relative(base, fullPath).replace(/\\/g, "/");
-  return `${LOCAL_SERVER_BASE_URL}/storage/file/${relative}`;
+  return `${getLocalServerBaseUrl()}/storage/file/${relative}`;
 }
 
 export async function handleClaudeProxy(body: any) {
@@ -728,7 +728,7 @@ async function downloadImage(url: string): Promise<Buffer> {
     const stripped = url.replace(/^local-file:\/\//i, "").split(/[?#]/)[0];
     return (await fs.promises.readFile(decodeURIComponent(stripped))) as unknown as Buffer;
   }
-  const localPrefix = `${LOCAL_SERVER_BASE_URL}/storage/file/`;
+  const localPrefix = `${getLocalServerBaseUrl()}/storage/file/`;
   if (url.startsWith(localPrefix)) {
     const relative = decodeURIComponent(url.slice(localPrefix.length));
     const fullPath = path.join(getStorageBasePath(), relative);

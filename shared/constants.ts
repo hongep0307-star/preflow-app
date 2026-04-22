@@ -1,5 +1,32 @@
 // Renderer(브라우저) 와 Electron main 양쪽에서 공유하는 상수.
 // 변경 시 한 곳만 고치면 양 빌드에 모두 반영됨.
 
+/** 선호 포트 — main 이 이 포트로 bind 시도.
+ *  실제 런타임 포트는 이 상수가 아니라 `LOCAL_SERVER_BASE_URL` 을 써야 한다
+ *  (main 이 포트 충돌 시 다른 포트로 fallback 될 수 있음). */
 export const LOCAL_SERVER_PORT = 19876;
-export const LOCAL_SERVER_BASE_URL = `http://127.0.0.1:${LOCAL_SERVER_PORT}`;
+
+/** 렌더러에서 local-server 와 통신할 때 쓰는 베이스 URL.
+ *
+ *  main 프로세스가 BrowserWindow 로드 시 URL query 에 `?preflowPort=XXX` 를
+ *  주입하므로, 렌더러에서는 이 쿼리를 읽어 실제 포트를 알아낸다. 포트가
+ *  지정돼 있지 않거나 (예: 브라우저 단독 테스트), main 에서 import 된 경우
+ *  default 값(LOCAL_SERVER_PORT) 을 사용한다. */
+function computeBaseUrl(): string {
+  // tsconfig.node 에서도 컴파일되도록 globalThis 로 안전하게 접근.
+  const g = globalThis as { location?: { search?: string } };
+  if (g.location && typeof g.location.search === "string") {
+    try {
+      const params = new URLSearchParams(g.location.search);
+      const p = params.get("preflowPort");
+      if (p && /^\d+$/.test(p)) {
+        return `http://127.0.0.1:${p}`;
+      }
+    } catch {
+      /* fall through to default */
+    }
+  }
+  return `http://127.0.0.1:${LOCAL_SERVER_PORT}`;
+}
+
+export const LOCAL_SERVER_BASE_URL = computeBaseUrl();

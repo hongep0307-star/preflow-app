@@ -24,7 +24,7 @@ import fs from "fs";
 import path from "path";
 import { getDb } from "./db";
 import { getStorageBasePath } from "./paths";
-import { LOCAL_SERVER_BASE_URL } from "../shared/constants";
+import { getLocalServerBaseUrl } from "./constants";
 
 const BUCKETS = ["contis", "assets", "briefs", "mood", "style-presets"] as const;
 type Bucket = (typeof BUCKETS)[number];
@@ -37,7 +37,7 @@ const RECENT_FILE_GRACE_MS = 5 * 60 * 1000;
  *  (`?t=...` 같은 cache-buster 쿼리스트링이 섞여있을 수 있음) */
 function parseStorageUrl(url: string): { bucket: string; filePath: string } | null {
   if (!url || typeof url !== "string") return null;
-  const prefix = `${LOCAL_SERVER_BASE_URL}/storage/file/`;
+  const prefix = `${getLocalServerBaseUrl()}/storage/file/`;
   if (!url.startsWith(prefix)) return null;
   let rest = url.slice(prefix.length);
   const qIdx = rest.search(/[?#]/);

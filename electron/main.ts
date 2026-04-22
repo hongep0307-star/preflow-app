@@ -3,11 +3,21 @@ import path from "path";
 import fs from "fs";
 import { initDatabase, closeDb } from "./db";
 import { startLocalServer } from "./local-server";
+import { getLocalServerPort } from "./constants";
 import { sweepOrphanFiles } from "./orphanSweep";
 
 // Chromium의 native UI(달력 피커, context menu 등) 언어를 영문으로 강제.
 // app.whenReady() 이전에 호출되어야 적용됨.
 app.commandLine.appendSwitch("lang", "en-US");
+
+// ── Single-instance lock ──────────────────────────────────────────
+// 두 번째 실행 시 새 Electron 프로세스를 띄우지 않고, 기존 창에 포커스를
+// 주는 것으로 교체. 이 작업이 없으면 두 번째 인스턴스가 19876 포트 바인딩
+// 에서 EADDRINUSE 로 크래시한다.
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+}
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -28,11 +38,21 @@ function createWindow() {
     },
   });
 
+  // 렌더러가 local-server 의 실제 포트를 알 수 있도록 URL query 로 주입.
+  // startLocalServer() 가 19876 이 아닌 다른 포트로 fallback 했을 때도
+  // 렌더러가 올바른 URL 로 통신하게 된다.
+  const port = getLocalServerPort();
+  const portQuery = `preflowPort=${port}`;
+
   if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    const devUrl = new URL(process.env.VITE_DEV_SERVER_URL);
+    devUrl.searchParams.set("preflowPort", String(port));
+    mainWindow.loadURL(devUrl.toString());
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(DIST, "index.html"));
+    mainWindow.loadFile(path.join(DIST, "index.html"), {
+      search: portQuery,
+    });
   }
 }
 
@@ -90,6 +110,14 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+// Single-instance lock 2 nd 이벤트 — 두 번째 실행 시 기존 창을 전면으로.
+app.on("second-instance", () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
 });
 
 app.on("window-all-closed", () => {
