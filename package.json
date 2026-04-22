@@ -116,8 +116,7 @@
       "target": [
         "nsis",
         "portable"
-      ],
-      "icon": "public/favicon.ico"
+      ]
     },
     "mac": {
       "target": [
@@ -128,8 +127,7 @@
             "arm64"
           ]
         }
-      ],
-      "icon": "public/favicon.ico"
+      ]
     }
   }
 }
