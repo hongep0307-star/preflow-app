@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
+import { deleteStoredFiles } from "@/lib/storageUtils";
 import { callClaude } from "@/lib/claude";
 import { detectMediaType } from "@/lib/detectMediaType";
 import { sanitizeImagePrompt } from "@/lib/conti";
@@ -377,7 +378,16 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
 
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const handleDelete = async (id: string) => {
+    const target = assets.find((a) => a.id === id);
+    const urls: Array<string | null | undefined> = [];
+    if (target) {
+      urls.push(target.photo_url);
+      if (Array.isArray(target.photo_variations)) {
+        for (const v of target.photo_variations) urls.push(v?.url);
+      }
+    }
     await supabase.from("assets").delete().eq("id", id);
+    await deleteStoredFiles(urls);
     await fetchAssets();
     toast({ title: "Deleted" });
     setDeleteTarget(null);

@@ -10,6 +10,7 @@ import {
   type SetStateAction,
 } from "react";
 import { supabase } from "@/lib/supabase";
+import { deleteStoredFile } from "@/lib/storageUtils";
 import { generateConti, styleTransfer, IMAGE_SIZE_MAP } from "@/lib/conti";
 import type { VideoFormat, BriefAnalysis, GeneratingStage } from "@/lib/conti";
 import { useToast } from "@/hooks/use-toast";
@@ -4191,6 +4192,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               const updatedHist = (imageHistory[sn] ?? []).filter((u) => u !== url);
               supabase.from("scenes").update({ conti_image_history: updatedHist }).eq("id", scene.id).then();
             }
+            // 히스토리에서 빼면서 실제 PNG 파일도 디스크에서 제거.
+            // 단, 그 URL 이 현재 active conti_image_url 이면 (하이라이트된
+            // 라이브 이미지) 파일 삭제는 건너뛴다 — 화면에서 깨진 이미지가
+            // 뜨는 걸 방지. active 아닌 과거 버전만 실제 삭제.
+            const allScenes = getSceneState(projectId)?.scenes ?? activeScenes;
+            const stillActive = allScenes.some((s) => s.conti_image_url === url);
+            if (!stillActive) void deleteStoredFile(url);
           }}
         />
       )}

@@ -266,6 +266,97 @@ interface CineShotDescription {
   mood: string;
 }
 
+/** Camera variant for a single mood shot — angle, lens, composition
+ *  pre-assigned so each shot in a batch explores a distinct cinematic
+ *  choice. Mood ideation's whole point is angle/composition reference,
+ *  so the camera axis is the variety axis while scene content stays
+ *  pinned by ShotAssignment.scene. */
+interface CameraVariant {
+  label: string;
+  camera: string;
+  lens: string;
+  composition: string;
+}
+
+/** Ordered pool of 10 visually distinct variants. A mood batch cycles
+ *  through this list so shots that share a scene still land on
+ *  different angles/lenses/compositions. The order is intentional:
+ *  wide → medium → extreme close → low → high → OTS → dutch → foreground
+ *  occlusion → silhouette → reflection. In a typical 9-shot batch this
+ *  covers roughly one of each archetypal coverage slot. */
+const MOOD_CAMERA_VARIANTS: CameraVariant[] = [
+  {
+    label: "WIDE ESTABLISHING",
+    camera: "wide establishing shot at eye level, static frame",
+    lens: "24mm f/5.6 deep focus, spacious environment visible front-to-back",
+    composition: "leading lines",
+  },
+  {
+    label: "MEDIUM — RULE OF THIRDS",
+    camera: "medium shot at eye level, slight push-in",
+    lens: "50mm f/2.8 classic standard lens",
+    composition: "rule of thirds",
+  },
+  {
+    label: "EXTREME CLOSE-UP",
+    camera: "extreme close-up on eyes, hands, or texture detail",
+    lens: "100mm macro f/2.8, razor-thin focus plane",
+    composition: "extreme detail — texture-driven, subject fills frame",
+  },
+  {
+    label: "LOW-ANGLE HERO",
+    camera: "low angle looking up at the subject, powerful and heroic",
+    lens: "28mm f/4, slight wide-angle distortion emphasizing scale",
+    composition: "worm's eye",
+  },
+  {
+    label: "HIGH-ANGLE OVERHEAD",
+    camera: "high angle, near-top-down overhead perspective",
+    lens: "35mm f/5.6, flattened perspective",
+    composition: "overhead flat lay",
+  },
+  {
+    label: "OVER THE SHOULDER",
+    camera: "over-the-shoulder intimate coverage, shallow focus on subject",
+    lens: "85mm f/1.8 shallow DOF, creamy bokeh background",
+    composition: "OTS rack focus",
+  },
+  {
+    label: "DUTCH TILT",
+    camera: "dutch angle, 15–20° lateral tilt, hand-held kinetic energy",
+    lens: "35mm f/2.8",
+    composition: "dutch angle",
+  },
+  {
+    label: "FOREGROUND OCCLUSION",
+    camera: "shot through a foreground element — window frame, leaves, bars, glass",
+    lens: "50mm f/1.4, foreground melted into soft bokeh",
+    composition: "frame within frame / foreground bokeh",
+  },
+  {
+    label: "SILHOUETTE / NEGATIVE SPACE",
+    camera: "profile silhouette against a bright or graphic background",
+    lens: "85mm f/2.8 telephoto compression",
+    composition: "silhouette, negative space",
+  },
+  {
+    label: "REFLECTION",
+    camera: "reflection in water, glass, or mirror — subject shown indirectly",
+    lens: "35mm f/2.8",
+    composition: "reflection",
+  },
+];
+
+/** One shot's full scope: the scene it represents + the assets that may
+ *  appear in it + the pre-assigned camera variant. Built up-front so
+ *  Claude context, reference image list, asset appendix, and camera
+ *  directive are all sourced from the same truth and stay consistent. */
+interface ShotAssignment {
+  scene: MoodGenerateOptions["scenes"][number] | null;
+  tagged: MoodGenerateOptions["assets"];
+  variant: CameraVariant;
+}
+
 const FORMAT_COMPOSITION_HINTS: Record<string, string> = {
   vertical:
     "FORMAT RULE — 9:16 VERTICAL: Favor portrait-oriented compositions. " +
@@ -283,8 +374,13 @@ const FORMAT_COMPOSITION_HINTS: Record<string, string> = {
     "or deliberate corner anchoring. Avoid wide landscape or tall portrait framings.",
 };
 
-function buildClaudeContext(opts: MoodGenerateOptions): string {
-  const { briefAnalysis, scenes, assets, targetSceneNumber, videoFormat } = opts;
+/** Strip leading "@" from tag mentions inside scene copy. */
+const cleanTagsInText = (text: string): string => text.replace(/@([\w가-힣]+)/g, "$1");
+
+/** Video format / brief preamble used by both single-scene and shot-plan
+ *  contexts. Extracted so the preamble is identical regardless of mode. */
+function buildBriefPreamble(opts: MoodGenerateOptions): string {
+  const { briefAnalysis, videoFormat, targetSceneNumber } = opts;
   const lines: string[] = [];
 
   const formatLabel =
@@ -322,96 +418,156 @@ function buildClaudeContext(opts: MoodGenerateOptions): string {
     }
   }
 
-  const scenePool = targetSceneNumber != null ? scenes.filter((s) => s.scene_number === targetSceneNumber) : scenes;
+  return lines.join("\n");
+}
 
-  if (scenePool.length > 0) {
-    if (targetSceneNumber != null) {
-      const scene = scenePool[0];
-      const cleanDesc = (text: string) => text.replace(/@([\w가-힣]+)/g, "$1");
+/** Single-scene context: Claude makes N variations of the same scene —
+ *  all share the same tagged_assets / headcount, but each shot gets a
+ *  distinct pre-assigned CameraVariant so angle/lens/composition stay
+ *  varied (mood's primary purpose). */
+function buildSingleSceneContext(opts: MoodGenerateOptions, assignments: ShotAssignment[]): string {
+  const { scenes, assets, targetSceneNumber } = opts;
+  const lines: string[] = [buildBriefPreamble(opts)];
 
-      lines.push(
-        `\n⚠️ SINGLE SCENE MODE — You are generating ${opts.count ?? 1} shot variations for ONE specific scene.`,
-      );
-      lines.push(`SCENE FIDELITY IS THE ABSOLUTE FIRST PRIORITY.`);
-      lines.push(
-        `Every shot MUST faithfully execute the scene description below. Do NOT reinterpret, substitute, or upgrade any element.`,
-      );
-      lines.push(`Cinematic style choices must SERVE the scene content, not override it.`);
-      lines.push(`\nSCENE DIRECTIVE:`);
-      const sl: string[] = [];
-      if (scene.title) sl.push(`Title: ${scene.title}`);
-      if (scene.description) sl.push(`Description (EXECUTE LITERALLY): ${cleanDesc(scene.description)}`);
-      if (scene.mood) sl.push(`Mood: ${scene.mood}`);
-      if (scene.location) sl.push(`Location: ${cleanDesc(scene.location)}`);
-      if (scene.camera_angle) sl.push(`Camera: ${scene.camera_angle}`);
-      lines.push(`  ` + sl.join(" | "));
+  const scene = scenes.find((s) => s.scene_number === targetSceneNumber);
+  if (!scene) return lines.join("\n");
 
-      if (scene.tagged_assets && scene.tagged_assets.length > 0) {
-        const taggedAssetDetails = scene.tagged_assets
-          .map((tag) => {
-            const a = assets.find(
-              (asset) =>
-                asset.tag_name === tag || asset.tag_name === `@${tag}` || normalize(asset.tag_name) === normalize(tag),
-            );
-            if (!a) return null;
-            const name = normalize(a.tag_name);
-            const type = a.asset_type ?? "character";
-            const desc =
-              type === "background"
-                ? (a.space_description ?? a.ai_description ?? "")
-                : `${a.ai_description ?? name}${a.outfit_description ? `, wearing ${a.outfit_description}` : ""}`;
-            return `  - [${type}] ${name}: ${desc}`;
-          })
-          .filter(Boolean);
+  lines.push(
+    `\n⚠️ SINGLE SCENE MODE — You are generating ${opts.count ?? 1} shot variations for ONE specific scene.`,
+  );
+  lines.push(`SCENE FIDELITY (cast, props, location) IS LOCKED.`);
+  lines.push(
+    `All shots share the same subject and setting. The VARIETY axis is the CAMERA — each shot uses a different angle / lens / composition assigned below.`,
+  );
+  lines.push(
+    `Do NOT reinterpret, substitute, or upgrade the scene's cast, props, or location. Do NOT override the assigned camera variant.`,
+  );
+  lines.push(`\nSCENE DIRECTIVE:`);
+  const sl: string[] = [];
+  if (scene.title) sl.push(`Title: ${scene.title}`);
+  if (scene.description) sl.push(`Description (EXECUTE LITERALLY): ${cleanTagsInText(scene.description)}`);
+  if (scene.mood) sl.push(`Mood: ${scene.mood}`);
+  if (scene.location) sl.push(`Location: ${cleanTagsInText(scene.location)}`);
+  // NOTE: scene.camera_angle is intentionally omitted. Mood ideation's
+  // whole purpose is to explore DIFFERENT angles than the conti shot —
+  // echoing the conti camera choice here forced Claude toward a single
+  // uniform composition across all N variations.
+  lines.push(`  ` + sl.join(" | "));
 
-        if (taggedAssetDetails.length > 0) {
-          lines.push(`\nREQUIRED ELEMENTS — ALL must appear simultaneously in EVERY shot:`);
-          lines.push(...(taggedAssetDetails as string[]));
-          if (taggedAssetDetails.length >= 2) {
-            lines.push(
-              `→ These ${taggedAssetDetails.length} elements MUST co-exist in the same frame. None may be omitted.`,
-            );
-            lines.push(`→ Compose the spatial relationship between them based on the scene description above.`);
-          } else {
-            lines.push(`→ This element MUST be visibly present and clearly recognizable in every shot.`);
-          }
-        }
+  if (scene.tagged_assets && scene.tagged_assets.length > 0) {
+    const taggedAssetDetails = scene.tagged_assets
+      .map((tag) => {
+        const a = assets.find(
+          (asset) =>
+            asset.tag_name === tag || asset.tag_name === `@${tag}` || normalize(asset.tag_name) === normalize(tag),
+        );
+        if (!a) return null;
+        const name = normalize(a.tag_name);
+        const type = a.asset_type ?? "character";
+        const desc =
+          type === "background"
+            ? (a.space_description ?? a.ai_description ?? "")
+            : `${a.ai_description ?? name}${a.outfit_description ? `, wearing ${a.outfit_description}` : ""}`;
+        return `  - [${type}] ${name}: ${desc}`;
+      })
+      .filter(Boolean);
+
+    if (taggedAssetDetails.length > 0) {
+      lines.push(`\nREQUIRED ELEMENTS — ALL must appear simultaneously in EVERY shot:`);
+      lines.push(...(taggedAssetDetails as string[]));
+      if (taggedAssetDetails.length >= 2) {
+        lines.push(
+          `→ These ${taggedAssetDetails.length} elements MUST co-exist in the same frame. None may be omitted.`,
+        );
+        lines.push(`→ Compose the spatial relationship between them based on the scene description above.`);
+      } else {
+        lines.push(`→ This element MUST be visibly present and clearly recognizable in every shot.`);
       }
-    } else {
-      lines.push(`\nSTORY OVERVIEW: ${scenePool.length} scenes total`);
-      const first = scenePool[0];
-      const mid = scenePool[Math.floor(scenePool.length / 2)];
-      const last = scenePool.at(-1);
-      if (first?.description) lines.push(`  OPENING: ${first.description.replace(/@/g, "").slice(0, 100)}`);
-      if (mid?.description && mid !== first) lines.push(`  MIDDLE: ${mid.description.replace(/@/g, "").slice(0, 100)}`);
-      if (last?.description && last !== first)
-        lines.push(`  CLOSING: ${last.description.replace(/@/g, "").slice(0, 100)}`);
-      const allMoods = [...new Set(scenePool.map((s) => s.mood).filter(Boolean))];
-      if (allMoods.length) lines.push(`  SCENE MOODS: ${allMoods.join(", ")}`);
-      const allLocations = [
-        ...new Set(
-          scenePool
-            .map((s) => s.location)
-            .filter(Boolean)
-            .map((l) => l!.replace(/@/g, "")),
-        ),
-      ];
-      if (allLocations.length) lines.push(`  LOCATIONS: ${allLocations.join(", ")}`);
+      lines.push(
+        `→ Do NOT add extra characters, props, or locations that are not listed above — this scene's headcount is exactly what is tagged.`,
+      );
     }
   }
 
-  if (assets.length > 0) {
-    lines.push("\nASSETS:");
-    for (const a of assets) {
-      const name = normalize(a.tag_name);
-      const type = a.asset_type ?? "character";
-      const desc =
-        type === "background"
-          ? (a.space_description ?? a.ai_description ?? "")
-          : `${a.ai_description ?? name}${a.outfit_description ? `, wearing ${a.outfit_description}` : ""}`;
-      lines.push(`  [${type}] ${name}: ${desc}`);
-    }
-  }
+  lines.push(`\nASSIGNED CAMERA VARIANTS — each shot (in array order) MUST use its variant. No two shots may share a variant.`);
+  assignments.forEach((a, i) => {
+    lines.push(
+      `  Shot ${i + 1}: ${a.variant.label}\n    Camera: ${a.variant.camera}\n    Lens: ${a.variant.lens}\n    Composition: ${a.variant.composition}`,
+    );
+  });
+  lines.push(
+    `→ The scene content is identical across shots; only the camera axis changes. Execute each variant literally — do NOT default to a safer standard angle.`,
+  );
+
+  return lines.join("\n");
+}
+
+/** Multi-scene shot plan: one row per shot, explicitly pinned to a
+ *  specific scene so Claude can't invent cross-scene compositions.
+ *
+ *  Why this exists: when Claude was given a single "STORY OVERVIEW"
+ *  plus a flat ASSETS list, it freely combined assets that never
+ *  co-appear in any scene (e.g. rendering all 3 characters in one
+ *  frame even when no scene has that). Pinning each shot to a single
+ *  scene + that scene's tagged_assets stops that hallucination cold. */
+function buildShotPlanContext(opts: MoodGenerateOptions, assignments: ShotAssignment[]): string {
+  const lines: string[] = [buildBriefPreamble(opts)];
+
+  lines.push(`\nSHOT PLAN — ${assignments.length} shots total.`);
+  lines.push(
+    `Each shot below is PINNED to one specific scene. The shot MUST faithfully execute ONLY that scene's description and MUST contain ONLY that scene's tagged elements.`,
+  );
+  lines.push(
+    `Do NOT merge characters, props, or locations across scenes. Do NOT add any person or object that is not tagged in the shot's assigned scene.`,
+  );
+  lines.push(
+    `Your JSON array output MUST have exactly ${assignments.length} entries in the SAME ORDER as this plan — array index N corresponds to SHOT ${assignments[0] ? 1 : 0}+N below.`,
+  );
+
+  assignments.forEach((a, i) => {
+    const scene = a.scene;
+    const tagLine =
+      a.tagged.length > 0
+        ? a.tagged
+            .map((t) => {
+              const type = t.asset_type ?? "character";
+              const name = normalize(t.tag_name);
+              const short =
+                type === "background"
+                  ? (t.space_description ?? t.ai_description ?? "")
+                  : `${t.ai_description ?? ""}${t.outfit_description ? `, wearing ${t.outfit_description}` : ""}`;
+              return `${name} [${type}]${short ? ` — ${short.slice(0, 120)}` : ""}`;
+            })
+            .join("; ")
+        : "(no tagged assets — pure environment / atmosphere shot)";
+
+    const headcountHint = (() => {
+      const chars = a.tagged.filter((t) => (t.asset_type ?? "character") === "character");
+      if (chars.length === 0) return "No characters in frame.";
+      if (chars.length === 1) return "Exactly ONE character in frame — do NOT add other people.";
+      return `Exactly ${chars.length} characters in frame (the ones listed above) — no extras, no crowd.`;
+    })();
+
+    lines.push(
+      `\nSHOT ${i + 1} → Scene ${scene.scene_number}${scene.title ? ` "${scene.title}"` : ""}`,
+    );
+    if (scene.description) lines.push(`  Description (RENDER LITERALLY): ${cleanTagsInText(scene.description)}`);
+    if (scene.location) lines.push(`  Location: ${cleanTagsInText(scene.location)}`);
+    if (scene.mood) lines.push(`  Mood: ${scene.mood}`);
+    // NOTE: scene.camera_angle deliberately NOT forwarded. Mood's job is
+    // to explore *alternative* angles to the conti shot; echoing the
+    // conti camera here caused every shot pinned to the same scene to
+    // converge on one composition. The Camera directive below (pre-
+    // assigned per shot) is the sole angle source.
+    lines.push(`  Required elements (ONLY these): ${tagLine}`);
+    lines.push(`  Headcount rule: ${headcountHint}`);
+    lines.push(
+      `  Camera directive: ${a.variant.label} — ${a.variant.camera} | Lens: ${a.variant.lens} | Composition: ${a.variant.composition}`,
+    );
+    lines.push(
+      `    → Execute this camera variant literally. Do NOT fall back to a standard angle. No other shot uses the same variant.`,
+    );
+  });
 
   return lines.join("\n");
 }
@@ -508,28 +664,55 @@ function buildSystemPrompt(isAssetMode: boolean, videoFormat: string, isSingleSc
 async function generateCineShotDescriptions(
   opts: MoodGenerateOptions,
   count: number,
+  assignments: ShotAssignment[],
 ): Promise<CineShotDescription[] | null> {
   try {
-    const context = buildClaudeContext(opts);
     const model = opts.model ?? MOOD_IMAGE_MODEL_DEFAULT;
     const isAssetMode = MOOD_MODEL_USES_ASSET_REFS[model];
     const isSingleSceneMode = opts.targetSceneNumber != null;
     const systemPrompt = buildSystemPrompt(isAssetMode, opts.videoFormat, isSingleSceneMode);
 
-    const userMessage = isSingleSceneMode
-      ? `Based on the following scene directive, generate exactly ${count} cinematic shot variations as a JSON array.
+    // Has at least one shot pinned to a real scene? If so we go through
+    // the strict shot-plan path (each shot is scoped to exactly one
+    // scene's content). Otherwise fall back to the brief-only prompt.
+    const hasScenes = assignments.some((a) => a.scene !== null);
+
+    let userMessage: string;
+    if (isSingleSceneMode) {
+      const context = buildSingleSceneContext(opts, assignments);
+      userMessage = `Based on the following scene directive, generate exactly ${count} cinematic shot variations as a JSON array.
 
 ${context}
 
-CRITICAL: Every shot MUST include ALL REQUIRED ELEMENTS simultaneously in the same frame.
-Apply diverse camera angles and compositions, but NEVER omit or substitute any required element.
-The scene description is a LITERAL directive — execute it faithfully across all ${count} shots.
-Output ONLY the JSON array.`
-      : `Based on the following project context, generate exactly ${count} cinematic shot descriptions as a JSON array.
+CRITICAL:
+- Every shot MUST include ALL REQUIRED ELEMENTS simultaneously in the same frame.
+- Array index N corresponds to Shot N+1 in the ASSIGNED CAMERA VARIANTS list. Each shot's full_prompt MUST execute its assigned variant literally (angle + lens + composition).
+- The scene cast/props/location are LOCKED across all ${count} shots. Only the camera axis varies.
+- Do NOT substitute an easier standard angle. No two shots may share a variant.
+- Output ONLY the JSON array.`;
+    } else if (hasScenes) {
+      const context = buildShotPlanContext(opts, assignments);
+      userMessage = `Generate exactly ${count} cinematic shots as a JSON array. The array index MUST match the SHOT number in the plan below.
+
+${context}
+
+CRITICAL RULES:
+- Shot N renders ONLY scene N's description. Never merge characters, props, or locations across different shots/scenes.
+- Respect each shot's Headcount rule exactly — do not invent extra people or crowds.
+- Each shot's full_prompt MUST literally execute its pre-assigned Camera directive (angle + lens + composition). Do NOT substitute a standard angle or ignore the directive.
+- full_prompt MUST literally execute the assigned scene's Description. Do not reinterpret or expand the cast.
+- No two shots may share a Camera directive label.
+- Output ONLY the JSON array with exactly ${count} entries in plan order.`;
+    } else {
+      // No scenes at all — very early in a project. Keep the old
+      // brief-only behaviour so Claude can still produce mood refs.
+      const context = buildBriefPreamble(opts);
+      userMessage = `Based on the following project brief, generate exactly ${count} cinematic shot descriptions as a JSON array.
 
 ${context}
 
 Remember: ALL ${count} shots must have unique composition techniques. Ensure lens and angle diversity as specified. Align the atmosphere and color palette with the REFERENCE MOOD and VISUAL DIRECTION provided. Output ONLY the JSON array.`;
+    }
 
     const { data, error } = await supabase.functions.invoke("claude-proxy", {
       body: {
@@ -597,6 +780,46 @@ Remember: ALL ${count} shots must have unique composition techniques. Ensure len
  *     place those photos at the head of the ref list so they always
  *     survive the cap.
  */
+
+/** Distribute `count` shots across the scene pool, round-robin. Each
+ *  shot gets its own `ShotAssignment` so downstream prompt + ref + appendix
+ *  construction stays strictly per-scene.
+ *
+ *  - Single-scene mode (`targetSceneNumber != null`): every shot points
+ *    at that one scene (all variations share the same tagged assets).
+ *  - Multi-scene: cycles through `scenes` so each scene gets roughly
+ *    `count / scenes.length` shots, preserving narrative coverage.
+ *  - No scenes at all: returns a list of empty assignments; the caller
+ *    falls back to brief-only prompts. */
+function buildShotAssignments(opts: MoodGenerateOptions, count: number): ShotAssignment[] {
+  const pool =
+    opts.targetSceneNumber != null
+      ? opts.scenes.filter((s) => s.scene_number === opts.targetSceneNumber)
+      : opts.scenes;
+  // Camera variants cycle through the full pool. We also shuffle the
+  // starting offset per batch so consecutive regenerations don't always
+  // start on "WIDE ESTABLISHING" — otherwise users would see the same
+  // lead shot every time.
+  const variantOffset = Math.floor(Math.random() * MOOD_CAMERA_VARIANTS.length);
+  const pickVariant = (i: number) =>
+    MOOD_CAMERA_VARIANTS[(variantOffset + i) % MOOD_CAMERA_VARIANTS.length];
+
+  if (pool.length === 0) {
+    return Array.from({ length: count }, (_, i) => ({
+      scene: null,
+      tagged: [],
+      variant: pickVariant(i),
+    }));
+  }
+  return Array.from({ length: count }, (_, i) => {
+    const scene = pool[i % pool.length];
+    return {
+      scene,
+      tagged: resolveTaggedAssets(opts.assets, scene.tagged_assets),
+      variant: pickVariant(i),
+    };
+  });
+}
 
 /** Fuzzy-match `tag` (with or without leading `@`) to one of the
  *  project's assets. Mirrors the loose equality used by conti's
@@ -696,35 +919,21 @@ function buildMoodAssetAppendix(
   );
 }
 
-/** Build the ordered list of ref image URLs for gpt-image-2 / NB2. If
- *  `priority` is provided (single-scene mode → scene.tagged_assets),
- *  those photos lead so they always survive the edits endpoint's cap. */
-function buildMoodAssetImageUrls(
-  assets: MoodGenerateOptions["assets"],
-  priority?: MoodGenerateOptions["assets"],
-): string[] {
+/** Build the ordered list of ref image URLs for ONE shot. Only the
+ *  assets actually tagged in that shot's scene are passed as references,
+ *  so gpt-image-2 / NB2 never sees off-scene people, props, or
+ *  backgrounds that could bleed into the frame. Order mirrors how users
+ *  typed the tags, which also matches conti's `fetchTaggedAssets`. */
+function buildShotRefUrls(tagged: MoodGenerateOptions["assets"]): string[] {
   const MAX_REFS = 14;
   const urls: string[] = [];
   const seen = new Set<string>();
-  const push = (u: string | null | undefined) => {
-    if (!u || seen.has(u) || urls.length >= MAX_REFS) return;
+  for (const a of tagged) {
+    const u = a.photo_url;
+    if (!u || seen.has(u) || urls.length >= MAX_REFS) continue;
     urls.push(u);
     seen.add(u);
-  };
-
-  // 1) Scene-tagged priority (in the exact order the user tagged them).
-  if (priority) {
-    for (const a of priority) push(a.photo_url);
   }
-
-  // 2) Remaining project assets, grouped by type. Backgrounds provide
-  //    the most spatial information so they fill slot 1 (or slot N+1 if
-  //    priority took the lead). Items/props come before a *second* pass
-  //    at backgrounds so weapons don't get starved by extra locations.
-  for (const a of assets.filter((a) => a.asset_type === "background")) push(a.photo_url);
-  for (const a of assets.filter((a) => (a.asset_type ?? "character") === "character")) push(a.photo_url);
-  for (const a of assets.filter((a) => a.asset_type === "item")) push(a.photo_url);
-
   return urls;
 }
 
@@ -738,32 +947,26 @@ export const generateMoodImages = async (
   const model = opts.model ?? MOOD_IMAGE_MODEL_DEFAULT;
   const usesAssetRefs = MOOD_MODEL_USES_ASSET_REFS[model];
 
-  const cineShots = await generateCineShotDescriptions(opts, count);
+  // Pre-assign every shot to exactly one scene. This is the single
+  // source of truth for the whole generation: Claude sees each
+  // assignment as a pinned shot, and `generateOne` uses `assignments[idx]`
+  // to scope refs + appendix to only that shot's tagged assets.
+  //
+  // The previous flat-context approach handed Claude the full asset
+  // list with no per-shot boundary, so it would freely generate "3
+  // characters together" shots even when no single scene had that
+  // headcount. Pinning shots to scenes makes cross-scene hallucinations
+  // structurally impossible — a shot simply has no way to reach assets
+  // outside its assigned scene.
+  const assignments = buildShotAssignments(opts, count);
+
+  const cineShots = await generateCineShotDescriptions(opts, count, assignments);
   const useCinePipeline = cineShots !== null && cineShots.length > 0;
-
-  // ── 단일 씬 모드에서는 그 씬이 @태그한 에셋들을 ref 와 appendix 의
-  //    최우선 source 로 삼는다. 이렇게 해야 "세번째 이미지(=총기)" 같은
-  //    씬 핵심 에셋이 edits 엔드포인트 cap 에서 먼저 떨어지지 않는다.
-  const singleSceneTaggedAssets =
-    opts.targetSceneNumber != null
-      ? resolveTaggedAssets(
-          opts.assets,
-          opts.scenes.find((s) => s.scene_number === opts.targetSceneNumber)?.tagged_assets,
-        )
-      : [];
-  const priorityAssets = singleSceneTaggedAssets.length > 0 ? singleSceneTaggedAssets : undefined;
-  // Appendix 는 "실제로 scene 에 꼭 들어가야 하는 에셋만" 기술한다.
-  // 단일 씬 모드에서 tagged_assets 가 있으면 그것만, 아니면 전체 프로젝트 에셋.
-  const appendixAssets = singleSceneTaggedAssets.length > 0 ? singleSceneTaggedAssets : opts.assets;
-
-  const assetImageUrls = usesAssetRefs ? buildMoodAssetImageUrls(opts.assets, priorityAssets) : undefined;
-  const assetAppendix =
-    usesAssetRefs && assetImageUrls && assetImageUrls.length > 0
-      ? buildMoodAssetAppendix(appendixAssets, assetImageUrls)
-      : "";
 
   // ★ 단일 이미지 호출 헬퍼
   const generateOne = async (idx: number): Promise<string> => {
+    const assignment = assignments[idx] ?? { scene: null, tagged: [] };
+
     let prompt: string;
     if (useCinePipeline && idx < cineShots!.length) {
       // Claude 가 공들여 만든 시네마틱 묘사를 sanitize 하지 않고 그대로 전달.
@@ -771,12 +974,16 @@ export const generateMoodImages = async (
     } else {
       prompt = buildLegacyMoodPrompt(opts);
     }
-    // Asset-ref 모델 (gpt-image-2 / nano-banana-2) 은 Claude 의 시네마틱
-    // 묘사에 더해 conti 수준의 상세한 에셋 요구사항 텍스트도 함께 받는다.
-    // 레퍼런스 이미지가 edits cap 에서 탈락하더라도, 텍스트만으로 각 에셋의
-    // 정체성(얼굴/의상/무기 외형/배경 지형)이 복원 가능해야 "총기가 반영
-    // 안된다" 같은 실패가 사라진다.
-    if (assetAppendix) prompt = prompt + assetAppendix;
+
+    // Per-shot refs + appendix. We only ship the photos of assets
+    // tagged in THIS shot's scene, and the appendix describes only
+    // those same assets — so even if the edits endpoint drops a ref,
+    // the text fallback is about the right people/props, and
+    // gpt-image-2 can't be tempted by unrelated refs.
+    const shotRefUrls = usesAssetRefs ? buildShotRefUrls(assignment.tagged) : [];
+    const shotAppendix =
+      usesAssetRefs && shotRefUrls.length > 0 ? buildMoodAssetAppendix(assignment.tagged, shotRefUrls) : "";
+    if (shotAppendix) prompt = prompt + shotAppendix;
 
     const body: Record<string, any> = {
       prompt,
@@ -795,12 +1002,12 @@ export const generateMoodImages = async (
     //   nano-banana-2  → Vertex NB2. 에셋 레퍼런스 기반 생성.
     if (model === "nano-banana-2") {
       body.model = "nano-banana-2";
-      if (assetImageUrls && assetImageUrls.length > 0) body.assetImageUrls = assetImageUrls;
+      if (shotRefUrls.length > 0) body.assetImageUrls = shotRefUrls;
     } else {
       body.model = "gpt";
       body.gptModel = model;
-      if (model === "gpt-image-2" && assetImageUrls && assetImageUrls.length > 0) {
-        body.assetImageUrls = assetImageUrls;
+      if (model === "gpt-image-2" && shotRefUrls.length > 0) {
+        body.assetImageUrls = shotRefUrls;
       }
     }
 
@@ -808,6 +1015,9 @@ export const generateMoodImages = async (
     if (error || !data?.publicUrl) throw new Error(error?.message ?? "No URL returned");
     console.log(
       `[Mood] Image ${idx + 1} generated with: ${data.usedModel ?? "unknown"} (requested: ${model})`,
+      assignment.scene
+        ? { scene: assignment.scene.scene_number, taggedCount: assignment.tagged.length }
+        : { scene: "none" },
     );
     return data.publicUrl as string;
   };

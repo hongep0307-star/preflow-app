@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import type { VideoFormat } from "@/lib/conti";
 import { supabase } from "@/lib/supabase";
+import { deleteStoredFiles } from "@/lib/storageUtils";
 import { callClaude } from "@/lib/claude";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -462,12 +463,23 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
     async (ids: string[]) => {
       const idsSet = new Set(ids);
       const connectedSceneIds: string[] = [];
+      // 삭제 대상의 파일 URL 을 수집 (씬에 현재 등록된 상태면 그 URL 은
+      // 씬 conti 이미지로 재사용되는 중이므로 파일은 남겨둔다).
+      const urlsToDelete: string[] = [];
       for (const id of ids) {
         const img = moodImages.find((i) => i.id === id);
-        if (img?.sceneRef !== null && img?.sceneRef !== undefined) {
+        if (!img) continue;
+        let connectedToScene = false;
+        if (img.sceneRef !== null && img.sceneRef !== undefined) {
           const scene = scenes.find((s) => s.scene_number === img.sceneRef && s.conti_image_url === img.url);
-          if (scene) connectedSceneIds.push(scene.id);
+          if (scene) {
+            connectedSceneIds.push(scene.id);
+            connectedToScene = true;
+          }
         }
+        // Mood 배열에서만 빠지는 경우 (씬에도 없는 고아 mood 파일) 만
+        // 디스크 삭제. 씬이 아직 참조중이면 씬 쪽 삭제 경로에서 처리.
+        if (!connectedToScene && img.url) urlsToDelete.push(img.url);
       }
       if (connectedSceneIds.length > 0) {
         await Promise.all(
@@ -482,6 +494,8 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
         saveMoodImagesToDB(next);
         return next;
       });
+      // DB 반영 후 실제 파일 삭제. 실패해도 orphan sweep 이 수거함.
+      if (urlsToDelete.length > 0) await deleteStoredFiles(urlsToDelete);
     },
     [moodImages, scenes, saveMoodImagesToDB],
   );

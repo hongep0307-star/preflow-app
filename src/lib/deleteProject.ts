@@ -20,10 +20,17 @@ const purgeStorageFolder = async (bucket: string, folder: string) => {
 
 export const deleteProjectCompletely = async (projectId: string): Promise<void> => {
   // ── 1. Storage 파일 삭제 ─────────────────────────────────────────
+  // 모든 project-scoped 버킷을 purge. `mood` 누락으로 9장짜리 mood 배치가
+  // 프로젝트 삭제 후에도 디스크에 남아 계속 쌓이던 누수를 차단.
+  //
+  // NOTE: `style-presets` 버킷은 user-scoped (style_presets 테이블에
+  //       project_id 컬럼이 없음) 이라 여기서 purge 하지 않는다 —
+  //       여러 프로젝트가 같은 프리셋을 공유하기 때문.
   await Promise.all([
     purgeStorageFolder("contis", projectId),
     purgeStorageFolder("assets", projectId),
     purgeStorageFolder("briefs", projectId),
+    purgeStorageFolder("mood", projectId),
   ]);
 
   // ── 2. DB 레코드 삭제 (참조 순서 준수) ──────────────────────────

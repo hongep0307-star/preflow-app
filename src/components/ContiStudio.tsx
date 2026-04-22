@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
+import { deleteStoredFile } from "@/lib/storageUtils";
 import {
   sanitizeImagePrompt,
   IMAGE_SIZE_MAP,
@@ -1861,6 +1862,12 @@ Edit instruction:
         await supabase.from("scenes").update(sceneUpdate).eq("id", sceneId);
         onSaveInpaint(publicUrl);
         toast({ title: "Inpainting complete" });
+        // inpaint 성공 후 preflight 임시 파일 정리.
+        // - preflightSourceUrl 은 이 호출 전에 snapshot 된 로컬 변수라서,
+        //   다음 useEffect 재실행으로 ref 가 바뀌든 말든 안전하게 그 파일만 지움.
+        // - 다음 inpaint 는 scene 의 새 conti_image_url 로 useEffect 가
+        //   preflight 를 새로 만들어주므로 캐시 손실이 없다.
+        if (usedPreflight && preflightSourceUrl) void deleteStoredFile(preflightSourceUrl);
       } catch (e: any) {
         toast({ title: "Inpainting failed", description: e.message, variant: "destructive" });
       } finally {

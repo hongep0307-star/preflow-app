@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { deleteStoredFile } from "./storageUtils";
 import type { HeroVisual, HookStrategy, ProductInfo, Constraints } from "@/components/agent/agentTypes";
 import { buildHookMoodAddendum } from "./hookLibrary";
 
@@ -850,6 +851,9 @@ export const styleTransfer = async ({
   // 결과가 NB2 비율로 강제 변형되며 찌그러진다. 씬카드 프리뷰에 보이는 영역(=FORMAT_RATIO)을
   // 그대로 잘라서 NB2 에 넘기면 입력/출력 비율이 같아 더 이상 찌그러지지 않는다.
   let preflightSourceUrl = scene.conti_image_url;
+  // preflight crop 으로 업로드한 임시 파일. 스타일 트랜스퍼 완료/실패 후
+  // 디스크에서 지워야 disposable intermediate 가 계속 쌓이지 않는다.
+  let preflightTempUrl: string | null = null;
   try {
     const { publicUrl } = await preflightCropToFormat(
       scene.conti_image_url,
@@ -860,6 +864,7 @@ export const styleTransfer = async ({
       "styletx-src",
     );
     preflightSourceUrl = publicUrl;
+    preflightTempUrl = publicUrl;
     console.log("[StyleTransfer] pre-crop 완료", {
       videoFormat,
       formatRatio: FORMAT_RATIO[videoFormat],
@@ -928,5 +933,8 @@ export const styleTransfer = async ({
     .from("scenes")
     .update({ conti_image_url: publicUrl, conti_image_crop: null })
     .eq("id", scene.id);
+  // 성공적으로 DB 반영됐으니 preflight 임시 파일은 더 이상 필요 없다.
+  // (실패 경로에서는 호출부가 catch 후 재시도할 수도 있어 지우지 않는다.)
+  if (preflightTempUrl) void deleteStoredFile(preflightTempUrl);
   return publicUrl;
 };

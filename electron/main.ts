@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import { initDatabase, closeDb } from "./db";
 import { startLocalServer } from "./local-server";
+import { sweepOrphanFiles } from "./orphanSweep";
 
 // Chromium의 native UI(달력 피커, context menu 등) 언어를 영문으로 강제.
 // app.whenReady() 이전에 호출되어야 적용됨.
@@ -73,6 +74,18 @@ app.whenReady().then(async () => {
   await initDatabase();
   await startLocalServer();
   createWindow();
+
+  // 앱 시작 시 orphan sweep 을 한 번 돌려 DB 에서 더 이상 참조되지 않는
+  // 파일(과거 누수된 에셋 이미지, inpaint 중간 파일 등) 을 청소한다.
+  // 윈도우 뜨는 것보다 나중에 시작해 UI 렌더에 영향을 주지 않도록 지연.
+  // 실패해도 앱 기능에 영향 없음 — 다음 부팅에서 다시 시도.
+  setTimeout(() => {
+    try {
+      sweepOrphanFiles();
+    } catch (err) {
+      console.error("[orphanSweep] unexpected failure:", err);
+    }
+  }, 3000);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
