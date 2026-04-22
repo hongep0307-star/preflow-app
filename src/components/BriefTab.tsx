@@ -2570,7 +2570,7 @@ const NextStepModal = ({
           {
             Icon: Package,
             title: "Set Up Assets First",
-            desc: "Register characters, items, backgrounds then go to Agent",
+            desc: "Register characters, items, backgrounds then go to Ideation",
             onClick: () => {
               onClose();
               onGoAssets();
@@ -2578,7 +2578,7 @@ const NextStepModal = ({
           },
           {
             Icon: MessageSquare,
-            title: "Go to Agent Directly",
+            title: "Go to Ideation Directly",
             desc: "Start building the story without assets",
             onClick: () => {
               onClose();

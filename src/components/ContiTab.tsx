@@ -439,7 +439,7 @@ const NewVersionModal = ({
       id: "fresh" as const,
       Icon: Sparkles,
       title: "Start fresh",
-      desc: "Develop a new scenario from Agent tab",
+      desc: "Develop a new scenario from Ideation tab",
     },
   ];
   return (

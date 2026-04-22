@@ -691,7 +691,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                       }
                 }
               >
-                Go to Agents
+                Go to Ideation
                 <ArrowRight className="w-3 h-3" />
               </Button>
             );

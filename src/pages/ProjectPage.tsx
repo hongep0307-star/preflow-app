@@ -2,8 +2,19 @@ import { useEffect, useState, useRef, useCallback, lazy, Suspense } from "react"
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
-import { Clapperboard, Calendar, X, Check, Loader2, FileDown } from "lucide-react";
-import { ProjectSidebar, TabId } from "@/components/ProjectSidebar";
+import {
+  Clapperboard,
+  Calendar,
+  X,
+  Check,
+  Loader2,
+  FileDown,
+  FileText,
+  Layers,
+  MessageSquare,
+  Film,
+} from "lucide-react";
+import { ProjectSidebar, TabId, TabCompletion } from "@/components/ProjectSidebar";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { VideoFormat } from "@/lib/conti";
@@ -43,10 +54,18 @@ const ProjectPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const initialTab = (searchParams.get("tab") as TabId) || "brief";
+  // URL 에 ?tab=... 이 있으면 그 탭으로 바로 진입. 없으면 null 로 두고
+  // 중앙 4 버튼 선택 화면 (시작점 선택 picker) 을 보여준다.
+  const initialTab = (searchParams.get("tab") as TabId) || null;
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [folderName, setFolderName] = useState<string>("");
-  const [activeTab, setActiveTab] = useState<TabId>(initialTab);
+  const [activeTab, setActiveTab] = useState<TabId | null>(initialTab);
+  const [completion, setCompletion] = useState<TabCompletion>({
+    brief: false,
+    assets: false,
+    agent: false,
+    storyboard: false,
+  });
   const isMobile = useIsMobile();
 
   const [editingField, setEditingField] = useState<"format" | "client" | "deadline" | null>(null);
@@ -82,6 +101,44 @@ const ProjectPage = () => {
     };
     fetchData();
   }, [id]);
+
+  // ── Tab completion 판정 ──────────────────────────────────────────
+  // 사이드바 스테퍼에 넘길 4 개 탭의 완료 여부. DB 에서 각각 최소 존재 여부만
+  // 확인한다 (빈 문자열도 미완료로 취급). activeTab 이 바뀔 때마다 재조회해서
+  // 직전 탭에서 한 작업이 즉시 반영되도록 한다.
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    (async () => {
+      const [briefRes, assetRes, sceneRes, projRes] = await Promise.all([
+        supabase.from("briefs").select("analysis").eq("project_id", id).limit(1),
+        supabase.from("assets").select("id").eq("project_id", id).limit(1),
+        supabase.from("scenes").select("id, conti_image_url").eq("project_id", id),
+        supabase.from("projects").select("status").eq("id", id).limit(1),
+      ]);
+      if (cancelled) return;
+      const briefRow = (briefRes.data as Array<{ analysis: string | null }> | null)?.[0];
+      const briefDone = !!(briefRow?.analysis && String(briefRow.analysis).trim().length > 0);
+      const assetsDone = ((assetRes.data as unknown[] | null)?.length ?? 0) > 0;
+      const sceneRows = (sceneRes.data as Array<{ id: string; conti_image_url: string | null }> | null) ?? [];
+      const ideationDone = sceneRows.length > 0;
+      const projRow = (projRes.data as Array<{ status: string | null }> | null)?.[0];
+      const projectCompleted = (projRow?.status ?? "").toLowerCase() === "completed";
+      // Conti 완료 판정: 씬 이미지가 하나라도 생성되었거나 프로젝트가 Completed 상태일 때.
+      const contiDone =
+        projectCompleted ||
+        sceneRows.some((s) => s.conti_image_url && s.conti_image_url.length > 0);
+      setCompletion({
+        brief: briefDone,
+        assets: assetsDone,
+        agent: ideationDone,
+        storyboard: contiDone,
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, activeTab]);
 
   useEffect(() => {
     if (!editingField) return;
@@ -215,7 +272,7 @@ const ProjectPage = () => {
 
   const TAB_LABEL: Record<TabId, string> = {
     brief: "Brief",
-    agent: "Agents",
+    agent: "Ideation",
     assets: "Assets",
     storyboard: "Conti",
   };
@@ -280,8 +337,12 @@ const ProjectPage = () => {
                 {project?.title || ""}
               </button>
             )}
-            <span className="text-[#f9423a]/50 text-[10px] mx-2">/</span>
-            <span className="text-[15px] text-white/55 flex-shrink-0">{TAB_LABEL[activeTab]}</span>
+            {activeTab && (
+              <>
+                <span className="text-[#f9423a]/50 text-[10px] mx-2">/</span>
+                <span className="text-[15px] text-white/55 flex-shrink-0">{TAB_LABEL[activeTab]}</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -399,12 +460,115 @@ const ProjectPage = () => {
 
       {/* ── Body ── */}
       <div className="flex flex-1 overflow-hidden">
-        <ProjectSidebar activeTab={activeTab} onTabChange={setActiveTab} />
-        <main
-          className={`flex-1 overflow-hidden ${activeTab === "brief" ? "overflow-y-auto p-5 lg:p-6" : ""} ${isMobile ? "pb-14" : ""}`}
+        {activeTab === null ? (
+          // 첫 진입 — 사이드바 없이 시작점 선택.
+          <StartPointPicker
+            completion={completion}
+            onPick={setActiveTab}
+          />
+        ) : (
+          <>
+            <ProjectSidebar activeTab={activeTab} onTabChange={setActiveTab} completion={completion} />
+            <main
+              className={`flex-1 overflow-hidden ${activeTab === "brief" ? "overflow-y-auto p-5 lg:p-6" : ""} ${isMobile ? "pb-14" : ""}`}
+            >
+              {renderContent()}
+            </main>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* ── 시작점 선택 Picker ────────────────────────────────────────────
+ * 프로젝트에 처음 들어왔을 때 어느 단계부터 시작할지 고르는 4-카드 화면.
+ * 사이드바 대신 전체 영역을 차지하며, 카드 클릭 시 해당 탭으로 진입. */
+const PICKER_CARDS: {
+  id: TabId;
+  title: string;
+  icon: typeof FileText;
+  desc: string;
+}[] = [
+  { id: "brief", icon: FileText, title: "Brief", desc: "Analyze the brief to kick off the project" },
+  { id: "assets", icon: Layers, title: "Assets", desc: "Register characters, items and backgrounds" },
+  { id: "agent", icon: MessageSquare, title: "Ideation", desc: "Shape scenes through AI conversation" },
+  { id: "storyboard", icon: Film, title: "Conti", desc: "Generate storyboard images" },
+];
+
+const StartPointPicker = ({
+  completion,
+  onPick,
+}: {
+  completion: TabCompletion;
+  onPick: (tab: TabId) => void;
+}) => {
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center px-6">
+      <div className="text-center mb-12">
+        <h1
+          className="text-[32px] font-extrabold tracking-tight leading-tight"
+          style={{ color: "rgba(255,255,255,0.92)" }}
         >
-          {renderContent()}
-        </main>
+          Where would you like to start?
+        </h1>
+        <p className="mt-3 text-[14px]" style={{ color: "rgba(255,255,255,0.55)" }}>
+          Pick a stage to jump straight into work.
+        </p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 w-full max-w-[1500px]">
+        {PICKER_CARDS.map((card) => {
+          const done = completion[card.id];
+          return (
+            <button
+              key={card.id}
+              onClick={() => onPick(card.id)}
+              className="group relative flex flex-col items-start gap-3 p-6 h-[180px] border bg-white/[0.02] hover:bg-white/[0.05] hover:border-[#f9423a]/40 transition-all duration-150 text-left"
+              style={{ borderColor: "rgba(255,255,255,0.08)", borderRadius: 0 }}
+            >
+              {done && (
+                <span
+                  className="absolute top-3 right-3 inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold tracking-wide"
+                  style={{
+                    background: "rgba(16,185,129,0.12)",
+                    color: "#10b981",
+                    borderRadius: 0,
+                  }}
+                >
+                  <Check className="w-3 h-3" strokeWidth={3} />
+                  DONE
+                </span>
+              )}
+              <div
+                className="w-14 h-14 flex items-center justify-center transition-colors duration-150 group-hover:bg-[#f9423a]/15"
+                style={{ background: "rgba(255,255,255,0.04)", borderRadius: 0 }}
+              >
+                <card.icon className="w-7 h-7 text-white/70 group-hover:text-[#f9423a] transition-colors" />
+              </div>
+              <div className="flex-1 flex flex-col justify-end w-full">
+                <div
+                  className="text-[17px] font-bold tracking-tight"
+                  style={{ color: "rgba(255,255,255,0.92)" }}
+                >
+                  {card.title}
+                </div>
+                {/* 한 줄 고정 — 카드 폭을 넉넉히 줘서 줄바꿈 없음. */}
+                <div
+                  className="mt-1.5 text-[12px] overflow-hidden"
+                  style={{
+                    color: "rgba(255,255,255,0.5)",
+                    lineHeight: "18px",
+                    height: 18,
+                    whiteSpace: "nowrap",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {card.desc}
+                </div>
+              </div>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
