@@ -10,13 +10,29 @@ import {
   RotateCcw,
   Move,
   X,
-  Lightbulb,
   Palette,
+  Check,
+  ChevronDown,
 } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { KR, type Scene, type Asset } from "./contiTypes";
 import { InlineField, MetaRows, DescriptionField, SidePanel, resolveAsset } from "./contiInternals";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import {
+  TRANSITION_CATEGORIES,
+  TRANSITION_MAP,
+  normalizeTransitionKey,
+  type TransitionKey,
+} from "@/lib/transitionGrammar";
 
 // Walks free-form scene text (description / location / etc) and returns the
 // set of canonical asset tag names referenced via `@mention`. Uses
@@ -50,36 +66,28 @@ const collectTagsFromText = (text: string | null | undefined, assets: Asset[]): 
 // just picks bgAssets[0] (often the wide one), which is exactly the
 // "BG_medium 호출했는데 BG가 불러와짐" symptom.
 //
-// Character / item tags keep carry-over to preserve chip-only
-// additions the user might have made via UI without retyping the @.
+// Text is the single source of truth. Previously character/item tags
+// were carried over from `existingTags` even when the user deleted
+// their `@mention` from description/location — justified by "chip-only
+// additions via UI", but the TagChip UI is display-only (no add/remove
+// handler exists in the codebase). That carry-over meant a tag once
+// in `tagged_assets` could never be removed except by direct DB edit,
+// and duplicated scenes kept their ancestor's cast forever. Now we
+// derive tags strictly from what's actually `@mentioned` in the
+// current text. `existingTags` is kept in the signature purely for
+// call-site compatibility.
 const computeTaggedAssets = (
   description: string | null | undefined,
   location: string | null | undefined,
   assets: Asset[],
-  existingTags: string[] = [],
+  _existingTags: string[] = [],
 ): string[] => {
   const fromDesc = collectTagsFromText(description, assets);
   const fromLoc = collectTagsFromText(location, assets);
-  const explicit = new Set([...fromDesc, ...fromLoc]);
-  const findAsset = (name: string) =>
-    assets.find((a) => a.tag_name === name || a.tag_name === `@${name}`);
-  const carryover = existingTags
-    .map((t) => (t.startsWith("@") ? t.slice(1) : t))
-    .filter((name) => {
-      const a = findAsset(name);
-      if (!a) return false;
-      // Drop background carry-over unless the user still mentions it
-      // explicitly somewhere in description / location.
-      if (a.asset_type === "background" && !explicit.has(name)) return false;
-      return true;
-    });
-  // Location tags must come FIRST so fetchTaggedAssets preserves the
-  // scene's primary background as bgAssets[0] downstream. If the user
-  // typed `@BG_close` in Location and `@BG` elsewhere in Description,
-  // the close-up sibling is the one the image pipeline should treat as
-  // the scene's location anchor.
+  // Location tags first so fetchTaggedAssets preserves the scene's
+  // primary background as bgAssets[0] downstream.
   const out: string[] = [];
-  for (const n of [...fromLoc, ...fromDesc, ...carryover]) {
+  for (const n of [...fromLoc, ...fromDesc]) {
     if (!out.includes(n)) out.push(n);
   }
   return out;
@@ -329,7 +337,7 @@ function AdjustImageModal({
       }, "image/png");
     } catch (err) {
       console.error("Capture failed:", err);
-      alert("이미지 캡처에 실패했습니다. CORS 오류일 수 있습니다.");
+      alert("Failed to capture image. This may be a CORS error.");
     } finally {
       setCapturing(false);
     }
@@ -641,6 +649,164 @@ function AdjustImageModal({
 }
 
 // ─────────────────────────────────────────────────────
+// TransitionTechniquePicker
+// ─────────────────────────────────────────────────────
+//
+// Grouped dropdown that drives the TR card's `transition_type` value.
+// Each option shows label + korean tagline inline; hovering an option
+// pops a tooltip with the full English director-guide (the exact text
+// also sent to Claude downstream). This is the single UI surface that
+// keeps the 19-technique grammar discoverable.
+//
+// Why DropdownMenu instead of Select:
+//   Radix Select intercepts hover on its items for keyboard roving,
+//   which fights with Tooltip's hover listeners (tooltip flickers or
+//   never fires). DropdownMenu is built for richer items and lets a
+//   per-item Tooltip sit naturally on the row without conflict.
+//
+// Legacy rows (`transition_type === "TRANSITION"` from before the
+// grammar existed) normalize to null so we can surface a "Select a
+// technique" placeholder rather than silently defaulting to Whip Pan.
+const TransitionTechniquePicker = memo(function TransitionTechniquePicker({
+  rawValue,
+  onChange,
+}: {
+  rawValue: string | null | undefined;
+  onChange: (newKey: TransitionKey) => void;
+}) {
+  const normalized = normalizeTransitionKey(rawValue);
+  const current = normalized ? TRANSITION_MAP[normalized] : null;
+  const [open, setOpen] = useState(false);
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-left transition-colors hover:border-white/20"
+          style={{
+            borderRadius: 0,
+            border: "1px solid rgba(255,255,255,0.1)",
+            background: "rgba(255,255,255,0.02)",
+          }}
+        >
+          <div className="flex flex-col min-w-0">
+            <span
+              className="text-[10px] font-mono tracking-wider"
+              style={{ color: "rgba(255,255,255,0.35)" }}
+            >
+              Transition Technique
+            </span>
+            {current ? (
+              <span
+                className="text-[12px] font-semibold truncate"
+                style={{ color: "#f0f0f0" }}
+              >
+                {current.label}
+                <span
+                  className="ml-1.5 font-normal"
+                  style={{ color: "rgba(255,255,255,0.45)" }}
+                >
+                  {current.tagline}
+                </span>
+              </span>
+            ) : (
+              <span
+                className="text-[12px] font-semibold"
+                style={{ color: "#d97706" }}
+              >
+                Select a technique
+              </span>
+            )}
+          </div>
+          <ChevronDown
+            className="w-3 h-3 shrink-0"
+            style={{ color: "rgba(255,255,255,0.4)" }}
+          />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        side="bottom"
+        sideOffset={4}
+        className="w-[280px] max-h-[420px] overflow-y-auto bg-[#161616] border-white/10 text-white/85 rounded-none"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        {TRANSITION_CATEGORIES.map((group, gi) => (
+          <div key={group.category}>
+            {gi > 0 && <DropdownMenuSeparator className="bg-white/5" />}
+            <DropdownMenuLabel
+              className="text-[9px] font-mono tracking-[0.12em]"
+              style={{ color: "rgba(255,255,255,0.35)" }}
+            >
+              {group.category}
+            </DropdownMenuLabel>
+            {group.items.map((spec) => {
+              const isSelected = normalized === spec.key;
+              return (
+                <Tooltip key={spec.key} delayDuration={250}>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        onChange(spec.key);
+                        setOpen(false);
+                      }}
+                      className="flex flex-col items-start gap-0 py-1.5 cursor-pointer data-[highlighted]:bg-white/5 focus:bg-white/5"
+                      style={{
+                        borderRadius: 0,
+                        background: isSelected ? "rgba(249,66,58,0.08)" : undefined,
+                      }}
+                    >
+                      <span
+                        className="text-[12px] font-semibold leading-tight"
+                        style={{ color: isSelected ? "#f9423a" : "#f0f0f0" }}
+                      >
+                        {spec.label}
+                      </span>
+                      <span
+                        className="text-[10px] leading-tight"
+                        style={{ color: "rgba(255,255,255,0.5)" }}
+                      >
+                        {spec.tagline}
+                      </span>
+                    </DropdownMenuItem>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="right"
+                    sideOffset={12}
+                    align="start"
+                    className="max-w-[340px] bg-[#0e0e0e] border border-white/10 text-white/85 rounded-none shadow-lg"
+                  >
+                    <div className="flex flex-col gap-1.5 p-1">
+                      <div className="text-[11px] font-semibold" style={{ color: "#f0f0f0" }}>
+                        {spec.label}
+                      </div>
+                      <div
+                        className="text-[10px] font-mono"
+                        style={{ color: "rgba(255,255,255,0.5)" }}
+                      >
+                        {spec.tagline}
+                      </div>
+                      <div
+                        className="text-[11px] leading-relaxed mt-0.5"
+                        style={{ color: "rgba(255,255,255,0.8)" }}
+                      >
+                        {spec.guide}
+                      </div>
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
+          </div>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+});
+
+// ─────────────────────────────────────────────────────
 // SortableContiCard
 // ─────────────────────────────────────────────────────
 export const SortableContiCard = memo(
@@ -675,6 +841,7 @@ export const SortableContiCard = memo(
     onRelight,
     onCameraVariations,
     onChangeAngle,
+    onSketches,
     onTransitionTypeChange,
     displayNumber,
     showInfo,
@@ -720,6 +887,10 @@ export const SortableContiCard = memo(
     /** Change Angle 모달을 연다. hasImage 일 때만 제공.
      *  원본 이미지를 그대로 유지한 채 yaw/pitch/zoom 만 자연어로 매핑해 카메라 이동. */
     onChangeAngle?: () => void;
+    /** Open ContiStudio directly on the Sketches tab for this scene.
+     *  Available regardless of hasImage — sketches are composition drafts,
+     *  they're often how you GET to an image in the first place. */
+    onSketches?: () => void;
     onTransitionTypeChange?: (scene: Scene, newType: string) => void;
     displayNumber?: number;
     showInfo?: boolean;
@@ -906,12 +1077,21 @@ export const SortableContiCard = memo(
                 TR
               </span>
             ) : (
-              <span
-                className="font-mono text-[10px] font-bold px-1.5 py-0.5 text-white shrink-0"
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void onSceneUpdate(scene.scene_number, { is_final: !scene.is_final });
+                }}
+                title={scene.is_final ? "Unmark as final" : "Mark as final"}
+                aria-pressed={!!scene.is_final}
+                className="font-mono text-[10px] font-bold px-1.5 py-0.5 text-white shrink-0 inline-flex items-center gap-0.5 cursor-pointer hover:brightness-110 transition-[filter]"
                 style={{ background: KR, borderRadius: 0 }}
               >
-                S{String(displayNumber ?? scene.scene_number).padStart(2, "0")}
-              </span>
+                {scene.is_final && <Check className="w-2.5 h-2.5" strokeWidth={3} />}
+                <span>S{String(displayNumber ?? scene.scene_number).padStart(2, "0")}</span>
+              </button>
             )}
             <div className="flex-1" />
             {historyCount > 0 && (
@@ -1375,13 +1555,17 @@ export const SortableContiCard = memo(
               </button>
             </div>
 
-            {/* Variants quick-access icons (Relight / Use as Style).
+            {/* Variants quick-access icons (Sketches / Use as Style).
+                Relight 는 호버시 바로 노출되지 않도록 제외 — 실수 클릭을
+                유발하기 쉬워 "..." 메뉴의 Variants 서브메뉴에서만 열도록
+                일원화한다 (ChangeAngle 과 동일한 취급).
                 Camera Variations / Change Angle 은 NB2 단일 파이프라인으로
                 원본 유지 + 앵글 변경이 안정적으로 안 되므로(novel-view
-                synthesis 모델 부재) 호버 퀵 아이콘에서 다시 제거. 사이드패널
-                Variants 에는 "Unavailable" 로 노출되어 기능 존재 자체는
-                드러낸다. */}
-            {hasImage && (onRelight || onUseAsStyle) && (
+                synthesis 모델 부재) 호버 퀵 아이콘에서 제외. 사이드패널
+                Variants 에는 노출.
+                Sketches 는 hasImage 여부와 무관하게 노출 — 오히려 콘티 이미지가
+                없을 때가 주 사용 케이스(구도 탐색). */}
+            {(onSketches || (hasImage && onUseAsStyle)) && (
               <div
                 style={{
                   position: "absolute",
@@ -1396,24 +1580,41 @@ export const SortableContiCard = memo(
                 }}
                 onPointerDown={(e) => e.stopPropagation()}
               >
-                {onRelight && (
-                  <button
-                    title="Relight"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRelight();
-                    }}
-                    className="flex items-center justify-center w-7 h-7 rounded-none text-white/90 hover:bg-white/20"
-                    style={{
-                      background: "rgba(0,0,0,0.55)",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <Lightbulb className="w-3.5 h-3.5" />
-                  </button>
-                )}
-                {onUseAsStyle && (
+                {onSketches && (() => {
+                  // Defensive: legacy version JSON may have `sketches` as a
+                  // string `"[]"`. Reading `.length` on the string yields 2
+                  // and showed a phantom "2" badge → users clicked, opened
+                  // StudioSketchesTab, which crashed on `sketches.filter(...)`.
+                  // We hardened the read path in ContiTab.loadVersions, but
+                  // also guard here so any future shape regression doesn't
+                  // produce a misleading badge.
+                  const sketchCount = Array.isArray(scene.sketches) ? scene.sketches.length : 0;
+                  return (
+                    <button
+                      title={
+                        sketchCount > 0
+                          ? `Sketches (${sketchCount})`
+                          : "Sketches — generate composition drafts"
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSketches();
+                      }}
+                      className="flex items-center justify-center gap-1 min-w-[28px] h-7 px-1.5 rounded-none text-white hover:opacity-90"
+                      style={{
+                        background: sketchCount > 0 ? KR : "rgba(0,0,0,0.55)",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      {sketchCount > 0 && (
+                        <span className="text-[10px] font-bold tracking-wide">{sketchCount}</span>
+                      )}
+                    </button>
+                  );
+                })()}
+                {hasImage && onUseAsStyle && (
                   <button
                     title="Use as Style"
                     onClick={(e) => {
@@ -1541,15 +1742,32 @@ export const SortableContiCard = memo(
           {/* ── BODY ── */}
           <div className="px-2.5 py-2 flex-1 flex flex-col gap-2" onPointerDown={(e) => e.stopPropagation()}>
             {scene.is_transition ? (
-              <DescriptionField
-                value={scene.description ?? ""}
-                assets={assets}
-                existingTags={scene.tagged_assets ?? []}
-                onChange={(desc, tags) => {
-                  const nextTags = computeTaggedAssets(desc, scene.location, assets, tags);
-                  saveField({ description: desc, tagged_assets: nextTags });
-                }}
-              />
+              <>
+                {/* Technique picker — controls `transition_type` which drives
+                 *  both the Claude prompt (via KNOWLEDGE_TRANSITION_GRAMMAR)
+                 *  and the fallback template. The `onTransitionTypeChange`
+                 *  prop is threaded down from ContiTab and persists via
+                 *  `handleTransitionTypeChange`. Before this picker existed
+                 *  the prop was declared but never bound to any control, so
+                 *  every TR shipped with the legacy catch-all "TRANSITION"
+                 *  value and the whole technique dispatch in the prompt was
+                 *  dead code. */}
+                {onTransitionTypeChange && (
+                  <TransitionTechniquePicker
+                    rawValue={scene.transition_type}
+                    onChange={(newKey) => onTransitionTypeChange(scene, newKey)}
+                  />
+                )}
+                <DescriptionField
+                  value={scene.description ?? ""}
+                  assets={assets}
+                  existingTags={scene.tagged_assets ?? []}
+                  onChange={(desc, tags) => {
+                    const nextTags = computeTaggedAssets(desc, scene.location, assets, tags);
+                    saveField({ description: desc, tagged_assets: nextTags });
+                  }}
+                />
+              </>
             ) : (
               <>
                 {showInfo !== false && (

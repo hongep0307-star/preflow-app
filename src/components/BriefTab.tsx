@@ -1,6 +1,31 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
-import { callClaude } from "@/lib/claude";
+import { callLLM } from "@/lib/llm";
+import { getModel } from "@/lib/modelPreference";
+import { subscribeModel } from "@/lib/modelPreference";
+import { getModelMeta } from "@/lib/modelCatalog";
+import { ensureSettingsLoaded, getSettingsCached } from "@/lib/settingsCache";
+import ModelPicker from "@/components/common/ModelPicker";
+import {
+  type RefItem,
+  type RefImageItem,
+  type RefYoutubeItem,
+  type RefVideoItem,
+  type RefAnnotation,
+  type SerializableRefItem,
+  toSerializableRefItems,
+  fromSerializableRefItems,
+  recomputeIgnoredByModel,
+  summarize as summarizeRefs,
+  summarizeLabel as summarizeRefsLabel,
+  makeRefId,
+  toDataUrl as refToDataUrl,
+  hasAnnotation,
+  parseTimeRange,
+  formatAnnotationLines,
+} from "@/lib/refItems";
+import { ingestYoutube, isYoutubeUrl, YOUTUBE_URL_REGEX } from "@/lib/youtube";
+import { extractFirstFrame, sampleFrames, validateVideoFile } from "@/lib/videoFrames";
 import type {
   ContentType,
   ProductInfo,
@@ -39,8 +64,17 @@ import {
   Lightbulb,
   Palette,
   Scissors,
+  Link as LinkIcon,
+  Film,
+  Youtube as YoutubeIcon,
+  Loader2,
+  Image as ImageIcon,
+  EyeOff,
+  Pencil,
   type LucideIcon,
 } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Textarea } from "@/components/ui/textarea";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -71,7 +105,10 @@ interface PersistedDraft {
   briefText: string;
   ideaNote: string;
   briefImages: SerializableImage[];
-  refImages: SerializableImage[];
+  /** v2 통합 모델 — image/youtube/video 모두 담음 */
+  refItems: SerializableRefItem[];
+  /** v1 호환 — 옛날 데이터에서만 존재, 로드 후 refItems 로 자동 마이그레이션 */
+  refImages?: SerializableImage[];
   pdfState: "idle" | "extracting" | "ready" | "error";
   pdfExtractedText: string;
   pdfFileName: string;
@@ -83,7 +120,7 @@ const getDefaultPersisted = (): PersistedDraft => ({
   briefText: "",
   ideaNote: "",
   briefImages: [],
-  refImages: [],
+  refItems: [],
   pdfState: "idle",
   pdfExtractedText: "",
   pdfFileName: "",
@@ -91,11 +128,29 @@ const getDefaultPersisted = (): PersistedDraft => ({
   pdfPageInfo: null,
 });
 
+/**
+ * v1 → v2 자동 마이그레이션: 옛 `refImages` 만 있는 드래프트를
+ * 새 `refItems` 로 변환. 한 번 로드하면 다음 save 부터 v2 형식으로 저장됨.
+ */
+const migrateLegacyRefImages = (draft: PersistedDraft): PersistedDraft => {
+  if (draft.refItems && draft.refItems.length > 0) return draft;
+  if (!draft.refImages || draft.refImages.length === 0) return draft;
+  const migrated: SerializableRefItem[] = draft.refImages.map((img) => ({
+    kind: "image",
+    id: makeRefId("image"),
+    addedAt: new Date().toISOString(),
+    base64: img.base64,
+    mediaType: img.mediaType,
+  }));
+  return { ...draft, refItems: migrated, refImages: [] };
+};
+
 const loadFromLS = (pid: string): PersistedDraft => {
   try {
     const raw = localStorage.getItem(LS_KEY(pid));
     if (!raw) return getDefaultPersisted();
-    return { ...getDefaultPersisted(), ...JSON.parse(raw) };
+    const merged = { ...getDefaultPersisted(), ...JSON.parse(raw) } as PersistedDraft;
+    return migrateLegacyRefImages(merged);
   } catch {
     return getDefaultPersisted();
   }
@@ -106,7 +161,8 @@ const saveToLS = (pid: string, draft: PersistedDraft) => {
     localStorage.setItem(LS_KEY(pid), JSON.stringify(draft));
   } catch (e) {
     try {
-      localStorage.setItem(LS_KEY(pid), JSON.stringify({ ...draft, briefImages: [], refImages: [] }));
+      // 용량 초과 시 이미지/레퍼런스 데이터를 비우고 텍스트만 저장
+      localStorage.setItem(LS_KEY(pid), JSON.stringify({ ...draft, briefImages: [], refItems: [] }));
     } catch {}
   }
 };
@@ -116,7 +172,7 @@ interface DraftState {
   briefText: string;
   ideaNote: string;
   briefImages: ImageItem[];
-  refImages: ImageItem[];
+  refItems: RefItem[];
   pdfState: "idle" | "extracting" | "ready" | "error";
   pdfExtractedText: string;
   pdfFileName: string;
@@ -129,7 +185,7 @@ const getDefaultDraft = (): DraftState => ({
   briefText: "",
   ideaNote: "",
   briefImages: [],
-  refImages: [],
+  refItems: [],
   pdfState: "idle",
   pdfExtractedText: "",
   pdfFileName: "",
@@ -205,6 +261,18 @@ interface DeepAnalysis {
   idea_note?: string;
   image_analysis?: string;
   creative_gap?: { synergy: string[]; gap: string[]; recommendation: string };
+
+  // ── reference video insights (GPT-5.x only) ──
+  reference_video_insights?: Array<{
+    source: "youtube" | "upload";
+    title?: string;
+    hook_pattern?: string;
+    pacing_per_scene?: Array<{ t: string; beat: string }>;
+    visual_motifs?: string[];
+    audio_cues?: string[];
+    transferable_techniques?: string[];
+    do_not_copy?: string[];
+  }>;
 
   // ── v2 fields (all optional; populated when classifier runs) ──
   content_type?: ContentType;
@@ -412,40 +480,84 @@ brand_film 인 경우에만 추가:
 const LANG_DIRECTIVE_KO = `CRITICAL LANGUAGE RULE: ALL output fields must be written in Korean (한국어). This includes visual_direction (camera, lighting, color_grade, editing), reference_mood, scene_count_hint descriptions, usp comparisons, and every other text field. Do NOT mix English into Korean analysis. Only use English for proper nouns, technical terms (e.g. POV, HUD, CCTV), or universally understood abbreviations.\n\n`;
 const LANG_DIRECTIVE_EN = `CRITICAL LANGUAGE RULE: ALL output fields must be written in English. Do NOT use Korean in any field.\n\n`;
 
-const analyzeBriefText = async (briefText: string, lang: Lang = "ko"): Promise<DeepAnalysis> => {
+/**
+ * GPT-5.x 전용 추가 directive — JSON 강제 모드 (Chat Completions response_format=json_object)
+ * 와 함께 쓰이지만, 모델이 가끔 빈 객체를 뱉을 위험을 줄이기 위해 시스템 프롬프트에서도
+ * "stick to the schema, no extra keys" 를 명시한다.
+ */
+const GPT_DEEP_ANALYSIS_SUFFIX = `
+
+[OUTPUT DISCIPLINE — GPT-5.x ONLY]
+- Plan internally step by step, then output only valid JSON matching the schema above.
+- No markdown fences. No commentary. No leading/trailing prose.
+- Do NOT invent extra top-level keys. Optional keys may be omitted; required keys must be present.
+- If reference video metadata or transcript is provided in the user message, you MUST also output a top-level "reference_video_insights" array with one object per reference, each shaped:
+  { "source": "youtube"|"upload", "title": "...", "hook_pattern": "...",
+    "pacing_per_scene": [{ "t": "0-3s", "beat": "..." }],
+    "visual_motifs": ["..."], "audio_cues": ["..."],
+    "transferable_techniques": ["..."], "do_not_copy": ["..."] }
+- If no reference video is provided, omit the "reference_video_insights" key entirely.
+`;
+
+/**
+ * 분석 결과 파서.
+ *  - Claude 는 JSON 을 ```json``` 펜스로 감싸서 보낼 때가 있어 strip 처리.
+ *  - GPT-5.x 는 response_format=json_object 가 보장되어 있어 그대로 parse.
+ *  - 두 케이스 모두 안전하게 한 번에 처리.
+ */
+const parseDeepAnalysisJson = (text: string): DeepAnalysis => {
+  const cleaned = text.replace(/```json\n?|\n?```/g, "").trim();
+  return JSON.parse(cleaned);
+};
+
+const analyzeBriefText = async (briefText: string, lang: Lang = "ko", modelId?: string): Promise<DeepAnalysis> => {
   const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
-  const data = await callClaude({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 4500,
-    system: langDirective + DEEP_ANALYSIS_SYSTEM_PROMPT,
+  const resolvedModel = modelId ?? getModel("brief");
+  const meta = getModelMeta(resolvedModel, getSettingsCached());
+  const isOpenAI = meta?.provider === "openai";
+  const system = langDirective + DEEP_ANALYSIS_SYSTEM_PROMPT + (isOpenAI ? GPT_DEEP_ANALYSIS_SUFFIX : "");
+  const result = await callLLM({
+    model: resolvedModel,
+    system,
+    max_tokens: meta?.maxOutputTokens ?? 4500,
+    response_format: isOpenAI ? "json_object" : undefined,
     messages: [{ role: "user", content: `다음 브리프를 분석해주세요:\n\n${briefText}` }],
   });
-  return JSON.parse(data.content[0].text.replace(/```json\n?|\n?```/g, "").trim());
+  return parseDeepAnalysisJson(result.text);
 };
 
 const analyzeBriefWithImages = async (
   images: Array<{ base64: string; mediaType: string }>,
   additionalText: string,
   lang: Lang = "ko",
+  modelId?: string,
 ): Promise<DeepAnalysis> => {
   const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
-  const contentArray: any[] = [];
+  const resolvedModel = modelId ?? getModel("brief");
+  const meta = getModelMeta(resolvedModel, getSettingsCached());
+  const isOpenAI = meta?.provider === "openai";
+  const system =
+    langDirective +
+    DEEP_ANALYSIS_SYSTEM_PROMPT +
+    "\n\n이미지 안의 모든 시각적 정보를 빠짐없이 읽고 분석하세요." +
+    (isOpenAI ? GPT_DEEP_ANALYSIS_SUFFIX : "");
+  const content: Array<{ type: "text"; text: string } | { type: "image"; mediaType: string; dataBase64: string }> = [];
   images.forEach((img, i) => {
-    contentArray.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.base64 } });
-    if (images.length > 1) contentArray.push({ type: "text", text: `위 이미지는 브리프 ${i + 1}번째 장면입니다.` });
+    content.push({ type: "image", mediaType: img.mediaType, dataBase64: img.base64 });
+    if (images.length > 1) content.push({ type: "text", text: `위 이미지는 브리프 ${i + 1}번째 장면입니다.` });
   });
-  contentArray.push({
+  content.push({
     type: "text",
     text: `이 이미지(들)는 광고 브리프입니다.${additionalText ? `\n\n추가 설명: ${additionalText}` : ""}`,
   });
-  const data = await callClaude({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 4500,
-    system:
-      langDirective + DEEP_ANALYSIS_SYSTEM_PROMPT + "\n\n이미지 안의 모든 시각적 정보를 빠짐없이 읽고 분석하세요.",
-    messages: [{ role: "user", content: contentArray }],
+  const result = await callLLM({
+    model: resolvedModel,
+    system,
+    max_tokens: meta?.maxOutputTokens ?? 4500,
+    response_format: isOpenAI ? "json_object" : undefined,
+    messages: [{ role: "user", content }],
   });
-  return JSON.parse(data.content[0].text.replace(/```json\n?|\n?```/g, "").trim());
+  return parseDeepAnalysisJson(result.text);
 };
 
 /* ━━━━━ i18n 라벨 맵 ━━━━━ */
@@ -768,7 +880,7 @@ const EditableText = ({
         onMouseLeave={(e) => {
           (e.currentTarget as HTMLElement).style.background = "transparent";
         }}
-        title="클릭하여 편집"
+        title="Click to edit"
       >
         {displayContent}
         {syncing && (
@@ -792,7 +904,7 @@ const EditableText = ({
     setEditing(false);
     if (draft.trim() !== value) {
       onSave(draft.trim());
-      sonnerToast("저장됨", { duration: 1000 });
+      sonnerToast("Saved", { duration: 1000 });
     }
   };
 
@@ -2644,9 +2756,15 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
 
     const persisted = loadFromLS(projectId);
     const draft: DraftState = {
-      ...persisted,
+      briefText: persisted.briefText,
+      ideaNote: persisted.ideaNote,
+      pdfState: persisted.pdfState,
+      pdfExtractedText: persisted.pdfExtractedText,
+      pdfFileName: persisted.pdfFileName,
+      pdfFileSize: persisted.pdfFileSize,
+      pdfPageInfo: persisted.pdfPageInfo,
       briefImages: fromSerializable(persisted.briefImages),
-      refImages: fromSerializable(persisted.refImages),
+      refItems: fromSerializableRefItems(persisted.refItems),
     };
     _draftByProject.set(projectId, draft);
     return draft;
@@ -2657,7 +2775,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
   const [briefText, setBriefTextState] = useState(initialDraft.briefText);
   const [ideaNote, setIdeaNoteState] = useState(initialDraft.ideaNote);
   const [briefImages, setBriefImagesState] = useState<ImageItem[]>(initialDraft.briefImages);
-  const [refImages, setRefImagesState] = useState<ImageItem[]>(initialDraft.refImages);
+  const [refItems, setRefItemsState] = useState<RefItem[]>(initialDraft.refItems);
   const [pdfState, setPdfStateRaw] = useState<"idle" | "extracting" | "ready" | "error">(initialDraft.pdfState);
   const [pdfExtractedText, setPdfExtractedTextState] = useState(initialDraft.pdfExtractedText);
   const [pdfFileName, setPdfFileNameState] = useState(initialDraft.pdfFileName);
@@ -2674,7 +2792,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
         briefText: next.briefText,
         ideaNote: next.ideaNote,
         briefImages: toSerializable(next.briefImages),
-        refImages: toSerializable(next.refImages),
+        refItems: toSerializableRefItems(next.refItems),
         pdfState: next.pdfState,
         pdfExtractedText: next.pdfExtractedText,
         pdfFileName: next.pdfFileName,
@@ -2702,10 +2820,10 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       return next;
     });
   };
-  const setRefImages = (fn: ImageItem[] | ((p: ImageItem[]) => ImageItem[])) => {
-    setRefImagesState((prev) => {
+  const setRefItems = (fn: RefItem[] | ((p: RefItem[]) => RefItem[])) => {
+    setRefItemsState((prev) => {
       const next = typeof fn === "function" ? fn(prev) : fn;
-      saveDraft({ refImages: next });
+      saveDraft({ refItems: next });
       return next;
     });
   };
@@ -2732,17 +2850,21 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
 
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  // analyzing 이 false 로 내려간 직후 300ms 동안 로더를 유지해 100% 스냅 연출.
+  // AnalysisLoader 가 onHidden 콜백으로 해제.
+  const [loaderLingering, setLoaderLingering] = useState(false);
   const [existingBrief, setExistingBrief] = useState<Brief | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analyzedAt, setAnalyzedAt] = useState<string | null>(null);
   const [sourceType, setSourceType] = useState<"text" | "image" | "pdf">("text");
   const [composerDragOver, setComposerDragOver] = useState(false);
   const [refDragOver, setRefDragOver] = useState(false);
+  const [refUrlInput, setRefUrlInput] = useState("");
   const [showNextStepModal, setShowNextStepModal] = useState(false);
   const [viewMode, setViewMode] = useState<"list" | "slide">("list");
 
   /* ━━━━━ KO/EN — analysis lang + bidirectional sync ━━━━━ */
-  const [analysisLang, setAnalysisLang] = useState<Lang>("ko");
+  const [analysisLang, setAnalysisLang] = useState<Lang>("en");
   const [analysisEn, setAnalysisEn] = useState<Analysis | null>(null);
   const [translating, setTranslating] = useState(false);
   const [fieldSyncing, setFieldSyncing] = useState<string | null>(null);
@@ -2780,7 +2902,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
         toast({
           variant: "destructive",
           title: "Translation failed",
-          description: "영어 번역 중 오류가 발생했습니다.",
+          description: "Something went wrong while translating to English.",
         });
       } finally {
         setTranslating(false);
@@ -2943,29 +3065,203 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
     fetchBrief();
   }, [projectId]);
 
+  /* ━━━━━ Reference 패널 — 모델 가용성 ━━━━━
+   *  projectId 스코프를 명시해 프로젝트 override 가 있으면 그걸,
+   *  없으면 global 디폴트를 따른다. (Settings 에서 디폴트를 바꿔도
+   *  이 프로젝트에 override 가 있다면 유지.) */
+  const [briefModelTick, setBriefModelTick] = useState(0);
+  const briefModelMeta = useMemo(() => {
+    const id = getModel("brief", projectId);
+    return getModelMeta(id, getSettingsCached());
+    // briefModelTick: picker 에서 변경이 발생하면 재계산.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, briefModelTick]);
+  const supportsVideoFrames = !!briefModelMeta?.supportsVideoFrames;
+
+  // 모델/설정이 바뀔 때마다 ignoredByModel 재계산
+  useEffect(() => {
+    setRefItems((prev) => recomputeIgnoredByModel(prev, supportsVideoFrames));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supportsVideoFrames]);
+
+  // brief 모델 변경을 구독해서 리렌더 트리거 — 해당 projectId 스코프만.
+  useEffect(() => {
+    const unsub = subscribeModel("brief", () => setBriefModelTick((t) => t + 1), projectId);
+    return unsub;
+  }, [projectId]);
+
+  const refCounts = useMemo(() => summarizeRefs(refItems), [refItems]);
+  const REF_TOTAL_LIMIT = 8;
+
   const handleRefFileSelect = useCallback(
     async (files: FileList | null) => {
       if (!files) return;
-      for (const file of Array.from(files).slice(0, 5 - refImages.length)) {
-        if (file.size > 10 * 1024 * 1024) {
-          toast({ variant: "destructive", title: "File too large", description: "Max file size is 10MB." });
+      const slots = Math.max(0, REF_TOTAL_LIMIT - refItems.length);
+      const arr = Array.from(files).slice(0, slots);
+      for (const file of arr) {
+        const isImage = ["image/jpeg", "image/png", "image/webp"].includes(file.type);
+        const isVideo = ["video/mp4", "video/quicktime", "video/webm"].includes(file.type);
+
+        if (isImage) {
+          if (file.size > 10 * 1024 * 1024) {
+            toast({ variant: "destructive", title: "File too large", description: "Max image size is 10MB." });
+            continue;
+          }
+          const base64 = await fileToBase64(file);
+          const item: RefImageItem = {
+            kind: "image",
+            id: makeRefId("image"),
+            addedAt: new Date().toISOString(),
+            base64,
+            mediaType: file.type,
+            preview: toDataUrl(base64, file.type),
+            file,
+            ignoredByModel: false,
+          };
+          setRefItems((prev) => [...prev, item]);
           continue;
         }
-        if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-          toast({ variant: "destructive", title: "Unsupported format", description: "JPG, PNG, WEBP만 지원합니다." });
+
+        if (isVideo) {
+          if (!supportsVideoFrames) {
+            toast({
+              variant: "destructive",
+              title: "Video not supported by current model",
+              description: "Switch to GPT-5.x in the Creative Input header to add videos.",
+            });
+            continue;
+          }
+          const v = validateVideoFile(file);
+          if (!v.ok) {
+            const reason = "reason" in v ? v.reason : "video rejected";
+            toast({ variant: "destructive", title: "Video rejected", description: reason });
+            continue;
+          }
+          const id = makeRefId("video");
+          // Provisional entry — 메타/포스터 추출 중
+          const provisional: RefVideoItem = {
+            kind: "video",
+            id,
+            addedAt: new Date().toISOString(),
+            fileName: file.name,
+            fileSize: file.size,
+            durationSec: 0,
+            posterBase64: "",
+            file,
+            status: "sampling",
+            ignoredByModel: !supportsVideoFrames,
+          };
+          setRefItems((prev) => [...prev, provisional]);
+          try {
+            const { meta, poster } = await extractFirstFrame(file);
+            setRefItems((prev) =>
+              prev.map((it) =>
+                it.id === id && it.kind === "video"
+                  ? {
+                      ...it,
+                      durationSec: meta.durationSec,
+                      posterBase64: poster.base64,
+                      status: "ready" as const,
+                    }
+                  : it,
+              ),
+            );
+          } catch (err: any) {
+            setRefItems((prev) =>
+              prev.map((it) =>
+                it.id === id && it.kind === "video"
+                  ? { ...it, status: "error" as const, errorMsg: err?.message || "video probe failed" }
+                  : it,
+              ),
+            );
+          }
           continue;
         }
-        const base64 = await fileToBase64(file);
-        setRefImages((prev) => [
-          ...prev,
-          { file, base64, mediaType: file.type, preview: toDataUrl(base64, file.type) },
-        ]);
+
+        toast({
+          variant: "destructive",
+          title: "Unsupported format",
+          description: "JPG/PNG/WEBP images, or MP4/MOV/WEBM videos only.",
+        });
       }
     },
-    [refImages.length, toast],
+    [refItems.length, supportsVideoFrames, toast],
   );
 
-  const removeRefImage = (i: number) => setRefImages((prev) => prev.filter((_, j) => j !== i));
+  const addYoutubeRef = useCallback(
+    async (rawUrl: string) => {
+      const url = rawUrl.trim();
+      if (!url) return;
+      if (!isYoutubeUrl(url)) {
+        toast({ variant: "destructive", title: "Invalid URL", description: "Only YouTube links are supported." });
+        return;
+      }
+      if (!supportsVideoFrames) {
+        toast({
+          variant: "destructive",
+          title: "YouTube not supported by current model",
+          description: "Switch to GPT-5.x in the Creative Input header to add links.",
+        });
+        return;
+      }
+      if (refItems.length >= REF_TOTAL_LIMIT) {
+        toast({ variant: "destructive", title: "Limit reached", description: `Max ${REF_TOTAL_LIMIT} reference items.` });
+        return;
+      }
+      const m = url.match(YOUTUBE_URL_REGEX);
+      const videoId = m?.[1] ?? "";
+      const id = makeRefId("youtube");
+      const provisional: RefYoutubeItem = {
+        kind: "youtube",
+        id,
+        addedAt: new Date().toISOString(),
+        url,
+        videoId,
+        status: "loading",
+        ignoredByModel: !supportsVideoFrames,
+      };
+      setRefItems((prev) => [...prev, provisional]);
+      try {
+        const ingested = await ingestYoutube(url);
+        setRefItems((prev) =>
+          prev.map((it) =>
+            it.id === id && it.kind === "youtube"
+              ? {
+                  ...it,
+                  videoId: ingested.videoId,
+                  title: ingested.title,
+                  channel: ingested.channel,
+                  thumbnailUrl: ingested.thumbnailUrl,
+                  transcript: ingested.transcript,
+                  durationSec: ingested.durationSec,
+                  status: "ready" as const,
+                }
+              : it,
+          ),
+        );
+      } catch (err: any) {
+        setRefItems((prev) =>
+          prev.map((it) =>
+            it.id === id && it.kind === "youtube"
+              ? { ...it, status: "error" as const, errorMsg: err?.message || "ingest failed" }
+              : it,
+          ),
+        );
+      }
+    },
+    [refItems.length, supportsVideoFrames, toast],
+  );
+
+  const removeRefItem = (id: string) => setRefItems((prev) => prev.filter((it) => it.id !== id));
+  const setRefItemAnnotation = (id: string, annotation: RefAnnotation | undefined) =>
+    setRefItems((prev) =>
+      prev.map((it) => {
+        if (it.id !== id) return it;
+        // hasAnnotation 기준으로 비어있으면 아얘 필드 제거해서 저장 용량/노이즈 최소화.
+        const next = hasAnnotation(annotation) ? annotation : undefined;
+        return { ...it, annotation: next } as typeof it;
+      }),
+    );
   const removeBriefImage = (i: number) => setBriefImages((prev) => prev.filter((_, j) => j !== i));
 
   const extractTextFromPDF = async (file: File) => {
@@ -2977,8 +3273,8 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       pages.push(`[${i}페이지]\n${(tc.items as any[]).map((it) => it.str).join(" ")}`);
     }
     const full = pages.join("\n\n");
-    if (full.trim().length < 50) throw new Error("텍스트가 너무 적습니다");
-    return { text: full.length > 8000 ? full.slice(0, 8000) + "\n\n[이하 생략됨]" : full, pages: pdf.numPages };
+    if (full.trim().length < 50) throw new Error("Not enough text extracted");
+    return { text: full.length > 8000 ? full.slice(0, 8000) + "\n\n[truncated]" : full, pages: pdf.numPages };
   };
 
   const handlePDFUpload = useCallback(
@@ -3044,44 +3340,164 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
     if (!canAnalyze) return;
     setAnalyzing(true);
     try {
+      // settings 캐시를 미리 로드해서 ModelMeta 가용성/maxTokens 가 정확히 결정되도록
+      await ensureSettingsLoaded();
+      const briefModelId = getModel("brief", projectId);
+      const briefMeta = getModelMeta(briefModelId, getSettingsCached());
+      const modelSupportsVideo = !!briefMeta?.supportsVideoFrames;
+
       let result: DeepAnalysis;
       let currentSourceType: "text" | "pdf" | "image";
       let imageAnalysis = "";
+      let videoInsightsBlock = "";
 
-      if (refImages.length > 0) {
+      // ── 1) 이미지 레퍼런스: 종래 Gemini 기반 스타일 분석 호출 ──
+      const refImagesUsable = refItems.filter(
+        (it): it is RefImageItem => it.kind === "image" && !it.ignoredByModel,
+      );
+      if (refImagesUsable.length > 0) {
         try {
           const { data: rd, error: re } = await supabase.functions.invoke("analyze-reference-images", {
-            body: { images: refImages.map((i) => ({ base64: i.base64, mediaType: i.mediaType })) },
+            body: { images: refImagesUsable.map((i) => ({ base64: i.base64, mediaType: i.mediaType })) },
           });
           if (!re && rd?.analysis) imageAnalysis = rd.analysis;
         } catch {}
       }
 
-      if (briefImages.length > 0) {
+      // ── 2) YouTube/Video 레퍼런스: GPT-5.x 일 때만 텍스트 + 프레임 첨부 ──
+      const youtubesUsable = refItems.filter(
+        (it): it is RefYoutubeItem => it.kind === "youtube" && !it.ignoredByModel && it.status === "ready",
+      );
+      const videosUsable = refItems.filter(
+        (it): it is RefVideoItem => it.kind === "video" && !it.ignoredByModel && it.status === "ready",
+      );
+      // 비디오 프레임을 in-place 로 샘플링 (분석 직전에만)
+      const sampledVideos: Array<{ item: RefVideoItem; frames: { base64: string; mediaType: string; t: number }[] }> = [];
+      if (modelSupportsVideo) {
+        for (const v of videosUsable) {
+          if (!v.file) {
+            // 파일 핸들이 사라진 경우 — poster 만이라도 사용
+            sampledVideos.push({ item: v, frames: v.posterBase64 ? [{ base64: v.posterBase64, mediaType: "image/png", t: 0 }] : [] });
+            continue;
+          }
+          try {
+            const targetCount = v.durationSec > 60 ? 12 : 8;
+            // 사용자가 관심 구간을 지정했다면 그 구간 안에서 dense 샘플링.
+            // parseTimeRange 가 성공한 경우에만 startSec/endSec 가 채워져 있음.
+            const ann = v.annotation;
+            const range =
+              ann && typeof ann.startSec === "number" && typeof ann.endSec === "number"
+                ? { startSec: ann.startSec, endSec: ann.endSec }
+                : undefined;
+            const { frames } = await sampleFrames(v.file, targetCount, range);
+            sampledVideos.push({ item: v, frames: frames.map((f) => ({ base64: f.base64, mediaType: f.mediaType, t: f.t })) });
+          } catch {
+            sampledVideos.push({ item: v, frames: v.posterBase64 ? [{ base64: v.posterBase64, mediaType: "image/png", t: 0 }] : [] });
+          }
+        }
+      }
+
+      // 텍스트 인서트: youtube 메타/자막 + video 메타 + 사용자 부연설명
+      const ytLines: string[] = [];
+      for (const yt of youtubesUsable) {
+        const head = `- [YouTube] ${yt.title || yt.url} ${yt.channel ? `· ${yt.channel}` : ""} (${yt.videoId})`;
+        const annLines = formatAnnotationLines(yt.annotation, { includeRange: true }); // YT 는 샘플링 없이 텍스트 힌트로만 반영
+        const transcript = yt.transcript ? `\n  Transcript (excerpt): ${yt.transcript.slice(0, 1500)}${yt.transcript.length > 1500 ? "…" : ""}` : "";
+        ytLines.push([head, ...annLines].join("\n") + transcript);
+      }
+      const vidLines: string[] = sampledVideos.map(({ item, frames }) => {
+        const ann = item.annotation;
+        const rangeApplied =
+          ann && typeof ann.startSec === "number" && typeof ann.endSec === "number";
+        const head = `- [Video] ${item.fileName} · ${Math.round(item.durationSec)}s · ${frames.length} frames sampled${rangeApplied ? ` (dense-sampled within ${ann!.rangeText})` : ""}`;
+        // 구간은 head 에 이미 반영했으니 본문에는 포인트만.
+        const annLines = formatAnnotationLines(ann, { includeRange: !rangeApplied });
+        return [head, ...annLines].join("\n");
+      });
+      // 이미지 레퍼런스 부연설명 — 이미지 자체는 별도 분석 파이프라인으로 넘기지만,
+      // 사용자가 적은 포인트는 메인 분석 프롬프트에 텍스트로 합류시켜 가중치를 높인다.
+      const imgNoteLines: string[] = [];
+      const imageIdxMap = new Map<string, number>();
+      {
+        let idx = 1;
+        for (const it of refItems) {
+          if (it.kind === "image") {
+            imageIdxMap.set(it.id, idx);
+            idx++;
+          }
+        }
+      }
+      for (const [id, n] of imageIdxMap) {
+        const img = refItems.find((it) => it.id === id) as RefImageItem | undefined;
+        if (!img || !hasAnnotation(img.annotation)) continue;
+        const annLines = formatAnnotationLines(img.annotation, { includeRange: false });
+        if (annLines.length === 0) continue;
+        imgNoteLines.push([`- Image ${n}`, ...annLines].join("\n"));
+      }
+      if (ytLines.length || vidLines.length || imgNoteLines.length) {
+        // 사용자가 어느 레퍼런스 하나에라도 부연설명을 달았으면, 분석기가 이를
+        // 강한 힌트로 반영하도록 상단에 지시문 한 줄을 붙인다. 부연설명이 전혀
+        // 없는 일반 케이스에서는 지시문을 생략해 불필요한 톤 변경을 피함.
+        const hasAnyUserNotes = refItems.some((it) => hasAnnotation(it.annotation));
+        const directive = hasAnyUserNotes
+          ? "Each reference below may carry a 'Time range' and 'Focus points' — these are explicit, user-highlighted learning points. Prioritize extracting the technique, timing and staging from those sections over other elements.\n\n"
+          : "";
+        videoInsightsBlock = directive + [
+          ytLines.length ? `### YouTube References\n${ytLines.join("\n")}` : "",
+          vidLines.length ? `### Video References\n${vidLines.join("\n")}` : "",
+          imgNoteLines.length ? `### Image Reference Notes\n${imgNoteLines.join("\n")}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+      }
+
+      // 모델이 video 를 지원 안 하는데 사용자가 (모델 변경 전) 등록만 해둔 경우
+      const ignoredVideoCount = refItems.filter((it) => it.ignoredByModel).length;
+      if (ignoredVideoCount > 0) {
+        toast({
+          title: "Some references skipped",
+          description: `${ignoredVideoCount} non-image reference(s) were ignored — the current model does not support them.`,
+        });
+      }
+
+      // ── 3) 모델 호출: image-frame 첨부는 GPT-5.x 일 때만 ──
+      const extraFrameImages: Array<{ base64: string; mediaType: string }> = modelSupportsVideo
+        ? sampledVideos.flatMap(({ frames }) => frames).slice(0, 16) // 안전 상한
+        : [];
+
+      if (briefImages.length > 0 || extraFrameImages.length > 0) {
+        const allImages = [
+          ...briefImages.map((i) => ({ base64: i.base64, mediaType: i.mediaType })),
+          ...extraFrameImages,
+        ];
         result = await analyzeBriefWithImages(
-          briefImages.map((i) => ({ base64: i.base64, mediaType: i.mediaType })),
+          allImages,
           [
             briefText.trim(),
             imageAnalysis ? `스타일 레퍼런스 분석: ${imageAnalysis}` : "",
+            videoInsightsBlock ? `영상 레퍼런스 인사이트:\n${videoInsightsBlock}` : "",
             ideaNote.trim() ? `크리에이터 아이디어 메모: ${ideaNote.trim()}` : "",
           ]
             .filter(Boolean)
             .join("\n\n"),
           analysisLang,
+          briefModelId,
         );
         currentSourceType = "image";
       } else if (pdfState === "ready") {
         let txt = `[PDF 브리프: ${pdfFileName}]\n\n${pdfExtractedText}`;
         if (briefText.trim()) txt += `\n\n## 추가 텍스트\n${briefText.trim()}`;
         if (imageAnalysis) txt += `\n\n## 첨부 이미지 스타일 분석\n${imageAnalysis}`;
+        if (videoInsightsBlock) txt += `\n\n## 영상 레퍼런스 인사이트\n${videoInsightsBlock}`;
         if (ideaNote.trim()) txt += `\n\n## 크리에이터 아이디어 메모\n${ideaNote.trim()}`;
-        result = await analyzeBriefText(txt, analysisLang);
+        result = await analyzeBriefText(txt, analysisLang, briefModelId);
         currentSourceType = "pdf";
       } else {
         let txt = briefText.trim();
         if (imageAnalysis) txt += `\n\n## 첨부 이미지 스타일 분석\n${imageAnalysis}`;
+        if (videoInsightsBlock) txt += `\n\n## 영상 레퍼런스 인사이트\n${videoInsightsBlock}`;
         if (ideaNote.trim()) txt += `\n\n## 크리에이터 아이디어 메모\n${ideaNote.trim()}`;
-        result = await analyzeBriefText(txt, analysisLang);
+        result = await analyzeBriefText(txt, analysisLang, briefModelId);
         currentSourceType = "text";
       }
 
@@ -3116,10 +3532,13 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
     } catch {
       toast({
         variant: "destructive",
-        title: "분석 오류",
-        description: "분석 중 오류가 발생했습니다. 다시 시도해주세요.",
+        title: "Analysis error",
+        description: "Something went wrong while analyzing the brief. Please try again.",
       });
     } finally {
+      // loader 가 100% 스냅 연출 후 사라지도록 lingering 플래그 on —
+      // AnalysisLoader onHidden 에서 off.
+      setLoaderLingering(true);
       setAnalyzing(false);
     }
   };
@@ -3160,8 +3579,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
   const briefTextPreview = briefText.trim()
     ? briefText.trim().slice(0, 60) + (briefText.trim().length > 60 ? "…" : "")
     : "Empty";
-  const moodboardPreview =
-    refImages.length > 0 ? `${refImages.length} image${refImages.length > 1 ? "s" : ""}` : "No images";
+  const moodboardPreview = refItems.length > 0 ? summarizeRefsLabel(refCounts) || `${refItems.length} item${refItems.length > 1 ? "s" : ""}` : "Empty";
   const ideaNotePreview = ideaNote.trim()
     ? ideaNote.trim().slice(0, 60) + (ideaNote.trim().length > 60 ? "…" : "")
     : "Empty";
@@ -3270,93 +3688,281 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
     </>
   );
 
-  const renderMoodboardContent = () => (
-    <>
-      <input
-        ref={refFileInputRef}
-        type="file"
-        accept="image/jpeg,image/png,image/webp"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          handleRefFileSelect(e.target.files);
-          e.target.value = "";
-        }}
-      />
-      {refImages.length === 0 ? (
-        <div
-          onClick={() => refFileInputRef.current?.click()}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setRefDragOver(true);
-          }}
-          onDragLeave={() => setRefDragOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setRefDragOver(false);
-            handleRefFileSelect(e.dataTransfer.files);
-          }}
-          className="h-[60px] border border-dashed flex items-center justify-center gap-2 cursor-pointer transition-colors"
-          style={{
-            borderRadius: 0,
-            borderColor: refDragOver ? "rgba(249,66,58,0.5)" : "rgba(255,255,255,0.1)",
-            background: refDragOver ? "rgba(249,66,58,0.04)" : "transparent",
-          }}
-        >
-          <ImagePlus className="w-4 h-4 text-muted-foreground/30" />
-          <p className="font-mono text-[10px] text-muted-foreground/40">DRAG OR CLICK · MAX 5</p>
+  const renderMoodboardContent = () => {
+    const acceptAttr = supportsVideoFrames
+      ? "image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm"
+      : "image/jpeg,image/png,image/webp";
+    const dropHintLabel = supportsVideoFrames
+      ? "DRAG OR CLICK · IMG / VIDEO · MAX 8"
+      : "DRAG OR CLICK · IMG ONLY · MAX 8";
+    const slotsLeft = REF_TOTAL_LIMIT - refItems.length;
+
+    const renderTile = (item: RefItem) => {
+      const ignored = !!item.ignoredByModel;
+      const tileBaseStyle: React.CSSProperties = {
+        borderRadius: 0,
+        opacity: ignored ? 0.4 : 1,
+        filter: ignored ? "grayscale(100%)" : undefined,
+      };
+      const annotated = hasAnnotation(item.annotation);
+      const includeRange = item.kind !== "image";
+      // 공통 오버레이: 주석 인디케이터(좌하단 점) + 연필 아이콘(우하단 hover)
+      const overlayControls = (
+        <>
+          {annotated && !ignored && (
+            <span
+              className="pointer-events-none absolute bottom-0.5 left-0.5 w-1.5 h-1.5 bg-primary"
+              style={{ borderRadius: "9999px" }}
+              aria-hidden
+            />
+          )}
+          <RefNoteEditor
+            item={item}
+            includeRange={includeRange}
+            onSave={(ann) => setRefItemAnnotation(item.id, ann)}
+            disabled={ignored}
+          />
+        </>
+      );
+      if (item.kind === "image") {
+        return (
+          <div key={item.id} className="relative group">
+            <img
+              src={item.preview}
+              alt=""
+              onClick={() => !ignored && setLightboxSrc(item.preview)}
+              className="h-[54px] w-[54px] object-cover border border-border cursor-zoom-in"
+              style={tileBaseStyle}
+              loading="lazy"
+              decoding="async"
+            />
+            {ignored && (
+              <span className="absolute bottom-0 left-0 right-0 text-center font-mono text-[8px] text-white bg-black/60">
+                IGNORED
+              </span>
+            )}
+            {overlayControls}
+            <button
+              onClick={() => removeRefItem(item.id)}
+              className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ borderRadius: 0 }}
+            >
+              <X className="w-2.5 h-2.5" />
+            </button>
+          </div>
+        );
+      }
+      if (item.kind === "youtube") {
+        const thumb = item.thumbnailUrl;
+        return (
+          <div key={item.id} className="relative group">
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="block h-[54px] w-[54px] border border-border bg-black flex items-center justify-center"
+              style={tileBaseStyle}
+              title={item.title || item.url}
+            >
+              {thumb ? (
+                // eslint-disable-next-line jsx-a11y/alt-text
+                <img src={thumb} className="h-full w-full object-cover" loading="lazy" decoding="async" />
+              ) : item.status === "loading" ? (
+                <Loader2 className="w-4 h-4 text-muted-foreground animate-spin" />
+              ) : item.status === "error" ? (
+                <AlertCircle className="w-4 h-4 text-primary" />
+              ) : (
+                <YoutubeIcon className="w-4 h-4 text-muted-foreground" />
+              )}
+              <span className="absolute top-0 left-0 px-1 py-[1px] font-mono text-[8px] text-white bg-red-600/90">YT</span>
+              {ignored && (
+                <span className="absolute bottom-0 left-0 right-0 text-center font-mono text-[8px] text-white bg-black/60">
+                  IGNORED
+                </span>
+              )}
+            </a>
+            {overlayControls}
+            <button
+              onClick={() => removeRefItem(item.id)}
+              className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ borderRadius: 0 }}
+            >
+              <X className="w-2.5 h-2.5" />
+            </button>
+          </div>
+        );
+      }
+      // video
+      const posterSrc = item.posterBase64 ? refToDataUrl(item.posterBase64, "image/png") : null;
+      return (
+        <div key={item.id} className="relative group">
+          <div
+            className="h-[54px] w-[54px] border border-border bg-black overflow-hidden flex items-center justify-center"
+            style={tileBaseStyle}
+            title={`${item.fileName} · ${Math.round(item.durationSec)}s`}
+          >
+            {posterSrc ? (
+              // eslint-disable-next-line jsx-a11y/alt-text
+              <img src={posterSrc} className="h-full w-full object-cover" loading="lazy" decoding="async" />
+            ) : item.status === "sampling" ? (
+              <Loader2 className="w-4 h-4 text-muted-foreground animate-spin" />
+            ) : item.status === "error" ? (
+              <AlertCircle className="w-4 h-4 text-primary" />
+            ) : (
+              <Film className="w-4 h-4 text-muted-foreground" />
+            )}
+            <span className="absolute top-0 left-0 px-1 py-[1px] font-mono text-[8px] text-white bg-blue-600/90">VID</span>
+            {ignored && (
+              <span className="absolute bottom-0 left-0 right-0 text-center font-mono text-[8px] text-white bg-black/60">
+                IGNORED
+              </span>
+            )}
+          </div>
+          {overlayControls}
+          <button
+            onClick={() => removeRefItem(item.id)}
+            className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+            style={{ borderRadius: 0 }}
+          >
+            <X className="w-2.5 h-2.5" />
+          </button>
         </div>
-      ) : (
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setRefDragOver(true);
+      );
+    };
+
+    return (
+      <>
+        <input
+          ref={refFileInputRef}
+          type="file"
+          accept={acceptAttr}
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            handleRefFileSelect(e.target.files);
+            e.target.value = "";
           }}
-          onDragLeave={() => setRefDragOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setRefDragOver(false);
-            handleRefFileSelect(e.dataTransfer.files);
-          }}
-          className="border p-2 transition-colors"
-          style={{
-            borderRadius: 0,
-            borderColor: refDragOver ? "rgba(249,66,58,0.5)" : "rgba(255,255,255,0.07)",
-            background: refDragOver ? "rgba(249,66,58,0.04)" : "transparent",
-          }}
-        >
-          <div className="flex gap-2 flex-wrap">
-            {refImages.map((img, i) => (
-              <div key={i} className="relative group">
-                <img
-                  src={img.preview}
-                  alt=""
-                  onClick={() => setLightboxSrc(img.preview)}
-                  className="h-[54px] w-[54px] object-cover border border-border cursor-zoom-in"
-                  style={{ borderRadius: 0 }} loading="lazy" decoding="async" />
-                <button
-                  onClick={() => removeRefImage(i)}
-                  className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                  style={{ borderRadius: 0 }}
-                >
-                  <X className="w-2.5 h-2.5" />
-                </button>
-              </div>
-            ))}
-            {refImages.length < 5 && (
+        />
+
+        {/* ── URL 인풋 (모델이 video frames 지원할 때만) ── */}
+        {supportsVideoFrames ? (
+          <div
+            className="flex items-center gap-1.5 px-2 py-1 mb-2 border bg-input"
+            style={{ borderRadius: 0, borderColor: "rgba(255,255,255,0.07)" }}
+          >
+            <LinkIcon className="w-3 h-3 text-muted-foreground/40 shrink-0" />
+            <input
+              type="url"
+              value={refUrlInput}
+              onChange={(e) => setRefUrlInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  if (refUrlInput.trim()) {
+                    addYoutubeRef(refUrlInput);
+                    setRefUrlInput("");
+                  }
+                }
+              }}
+              placeholder="Paste YouTube URL & press Enter"
+              className="flex-1 min-w-0 bg-transparent border-none outline-none text-[11px] text-foreground placeholder:text-muted-foreground/30"
+            />
+            {refUrlInput.trim() && (
               <button
-                onClick={() => refFileInputRef.current?.click()}
-                className="h-[54px] w-[54px] border border-dashed border-border hover:border-primary/40 flex flex-col items-center justify-center gap-0.5 transition-colors"
-                style={{ borderRadius: 0 }}
+                onClick={() => {
+                  if (refUrlInput.trim()) {
+                    addYoutubeRef(refUrlInput);
+                    setRefUrlInput("");
+                  }
+                }}
+                className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
               >
-                <Plus className="w-3.5 h-3.5 text-muted-foreground/30" />
+                ADD
               </button>
             )}
           </div>
-        </div>
-      )}
-    </>
-  );
+        ) : (
+          <div
+            className="flex items-center gap-1.5 px-2 py-1 mb-2 border border-dashed overflow-hidden"
+            style={{ borderRadius: 0, borderColor: "rgba(255,255,255,0.07)" }}
+            title="Switch to GPT-5.x in the header to enable links & video uploads"
+          >
+            <EyeOff className="w-3 h-3 text-muted-foreground/30 shrink-0" />
+            {/* 컨테이너가 좁으면 2줄로 깨지던 문구. whitespace-nowrap + truncate
+             *  로 항상 한 줄에 유지하고, 폭이 부족하면 말줄임표로 축약.
+             *  원문 title 로 전체 문구는 hover 툴팁에서 읽을 수 있음. */}
+            <span className="font-mono text-[10px] text-muted-foreground/40 whitespace-nowrap truncate min-w-0">
+              IMG-ONLY MODE · CHANGE MODEL FOR LINK / VIDEO
+            </span>
+          </div>
+        )}
+
+        {/* ── 드롭존 / 타일 ── */}
+        {refItems.length === 0 ? (
+          <div
+            onClick={() => refFileInputRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setRefDragOver(true);
+            }}
+            onDragLeave={() => setRefDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setRefDragOver(false);
+              handleRefFileSelect(e.dataTransfer.files);
+            }}
+            className="h-[60px] border border-dashed flex items-center justify-center gap-2 cursor-pointer transition-colors"
+            style={{
+              borderRadius: 0,
+              borderColor: refDragOver ? "rgba(249,66,58,0.5)" : "rgba(255,255,255,0.1)",
+              background: refDragOver ? "rgba(249,66,58,0.04)" : "transparent",
+            }}
+          >
+            <ImagePlus className="w-4 h-4 text-muted-foreground/30" />
+            <p className="font-mono text-[10px] text-muted-foreground/40">{dropHintLabel}</p>
+          </div>
+        ) : (
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setRefDragOver(true);
+            }}
+            onDragLeave={() => setRefDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setRefDragOver(false);
+              handleRefFileSelect(e.dataTransfer.files);
+            }}
+            className="border p-2 transition-colors"
+            style={{
+              borderRadius: 0,
+              borderColor: refDragOver ? "rgba(249,66,58,0.5)" : "rgba(255,255,255,0.07)",
+              background: refDragOver ? "rgba(249,66,58,0.04)" : "transparent",
+            }}
+          >
+            <div className="flex gap-2 flex-wrap">
+              {refItems.map(renderTile)}
+              {slotsLeft > 0 && (
+                <button
+                  onClick={() => refFileInputRef.current?.click()}
+                  className="h-[54px] w-[54px] border border-dashed border-border hover:border-primary/40 flex flex-col items-center justify-center gap-0.5 transition-colors"
+                  style={{ borderRadius: 0 }}
+                  title="Add more references"
+                >
+                  <Plus className="w-3.5 h-3.5 text-muted-foreground/30" />
+                </button>
+              )}
+            </div>
+            {refCounts.ignored > 0 && (
+              <p className="font-mono text-[9px] text-muted-foreground/50 mt-1.5">
+                {refCounts.ignored} ITEM(S) IGNORED — UNSUPPORTED BY CURRENT MODEL
+              </p>
+            )}
+          </div>
+        )}
+      </>
+    );
+  };
 
   const renderIdeaNoteContent = () => (
     <div
@@ -3389,10 +3995,30 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
         }
       >
         <div className="bg-card/80 border border-border flex flex-col h-full" style={{ borderRadius: 0 }}>
-          {/* ★ Header — Creative Input + KO/EN toggle */}
-          <div className="px-4 pt-4 pb-3 border-b border-border flex items-center justify-between">
-            <h2 className="text-[13px] font-bold tracking-wider text-foreground">Creative Input</h2>
-            <LangToggle lang={analysisLang} onChange={(l) => { if (hasAnalysis) handleLangToggle(l); else setAnalysisLang(l); }} loading={translating} />
+          {/* ★ Header — Creative Input + Model picker + KO/EN toggle
+           *  컨테이너 너비가 좁아지면 ModelPicker 의 모델 라벨은 truncate
+           *  되도록 `min-w-0 flex-1` 로 공간을 양보하고, LangToggle 은 항상
+           *  `shrink-0` 으로 온전히 보이게 고정. `Creative Input` 타이틀 역시
+           *  min-w-0 + truncate 로 필요하면 줄여서 토글 잘림을 방지. */}
+          <div className="px-4 pt-4 pb-3 border-b border-border flex items-center gap-2">
+            <h2 className="text-[13px] font-bold tracking-wider text-foreground min-w-0 truncate">
+              Creative Input
+            </h2>
+            <div className="flex items-center gap-2 min-w-0 flex-1 justify-end">
+              <div className="min-w-0 flex-shrink">
+                <ModelPicker stage="brief" projectId={projectId} variant="compact" className="max-w-full" />
+              </div>
+              <div className="shrink-0">
+                <LangToggle
+                  lang={analysisLang}
+                  onChange={(l) => {
+                    if (hasAnalysis) handleLangToggle(l);
+                    else setAnalysisLang(l);
+                  }}
+                  loading={translating}
+                />
+              </div>
+            </div>
           </div>
 
           <div className="flex flex-col flex-1 px-5 pt-3 pb-4 gap-4 overflow-y-auto">
@@ -3401,7 +4027,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                 <CollapsibleSection title="Brief Text" preview={briefTextPreview}>
                   {renderBriefTextContent()}
                 </CollapsibleSection>
-                <CollapsibleSection title="Moodboard" preview={moodboardPreview}>
+                <CollapsibleSection title="Reference" preview={moodboardPreview}>
                   {renderMoodboardContent()}
                 </CollapsibleSection>
                 <CollapsibleSection title="Idea Note" preview={ideaNotePreview}>
@@ -3424,7 +4050,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                   {renderBriefTextContent()}
                 </div>
                 <div>
-                  <p className="label-meta text-primary mb-1">Moodboard</p>
+                  <p className="label-meta text-primary mb-1">Reference</p>
                   {renderMoodboardContent()}
                 </div>
                 <div>
@@ -3457,7 +4083,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       </div>
 
       {/* ── CENTER: Strategy Manifesto ── */}
-      {(hasAnalysis || analyzing) && (
+      {(hasAnalysis || analyzing || loaderLingering) && (
         <div className="flex-1 min-w-0 flex flex-col">
           <div className="border border-border overflow-hidden flex flex-col h-full" style={{ borderRadius: 0 }}>
             <div
@@ -3517,25 +4143,13 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             </div>
 
             <div className="flex-1 overflow-y-auto bg-background/60 p-4">
-              {analyzing ? (
-                <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-5">
-                  <div className="relative w-10 h-10">
-                    <span className="absolute inset-0 border-2 border-primary/20 rounded-full" />
-                    <span className="absolute inset-0 border-2 border-transparent border-t-primary rounded-full animate-spin" />
-                  </div>
-                  <div className="text-center space-y-1.5">
-                    <p className="text-[13px] font-semibold text-foreground">
-                      {pdfState === "ready" ? "Processing PDF Brief…" : "Generating Strategy Report…"}
-                    </p>
-                    <p className="font-mono text-[10px] text-muted-foreground/50">Deep analysis · ~10-20s</p>
-                  </div>
-                  <div
-                    className="w-48 h-1 rounded-full overflow-hidden"
-                    style={{ background: "rgba(255,255,255,0.06)" }}
-                  >
-                    <div className="h-full bg-primary/60 rounded-full animate-pulse" style={{ width: "60%" }} />
-                  </div>
-                </div>
+              {analyzing || loaderLingering ? (
+                <AnalysisLoader
+                  active={analyzing}
+                  mode={pdfState === "ready" ? "pdf" : "default"}
+                  variant="full"
+                  onHidden={() => setLoaderLingering(false)}
+                />
               ) : analysis ? (
                 (() => {
                   const displayAnalysis = analysisLang === "en" && analysisEn ? analysisEn : analysis;
@@ -3655,11 +4269,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             </div>
             <div className="flex flex-col flex-1 px-3 pt-4 pb-4 gap-4">
               {analyzing ? (
-                <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center">
-                  <span className="font-mono text-[10px] text-muted-foreground/30 uppercase leading-relaxed">
-                    Analysis in progress…
-                  </span>
-                </div>
+                <AnalysisLoader active={analyzing} variant="compact" />
               ) : (
                 <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center">
                   <span className="font-mono text-[10px] text-muted-foreground/30 uppercase leading-relaxed">
@@ -3701,6 +4311,273 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             style={{ borderRadius: 0 }} loading="lazy" decoding="async" />
         </div>
       )}
+    </div>
+  );
+};
+
+/* ━━━━━ Reference 부연설명 에디터 ━━━━━
+ *
+ * 각 RefItem 타일 우하단에 연필 아이콘을 띄우고, 클릭 시 Popover 로
+ * 관심 구간 + 보고 싶은 포인트를 편집한다. 이미지 타일에서는 구간 입력 숨김.
+ * `onSave` 는 빈 값으로 호출되면 상위에서 annotation 필드 자체를 제거. */
+interface RefNoteEditorProps {
+  item: RefItem;
+  includeRange: boolean;
+  disabled?: boolean;
+  onSave: (next: RefAnnotation | undefined) => void;
+}
+const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorProps) => {
+  const [open, setOpen] = useState(false);
+  const [rangeText, setRangeText] = useState(item.annotation?.rangeText ?? "");
+  const [notes, setNotes] = useState(item.annotation?.notes ?? "");
+  const [rangeError, setRangeError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setRangeText(item.annotation?.rangeText ?? "");
+      setNotes(item.annotation?.notes ?? "");
+      setRangeError(null);
+    }
+  }, [open, item.annotation?.rangeText, item.annotation?.notes]);
+
+  const handleSave = () => {
+    const trimmedRange = rangeText.trim();
+    const trimmedNotes = notes.trim();
+    let startSec: number | undefined;
+    let endSec: number | undefined;
+    if (includeRange && trimmedRange) {
+      const parsed = parseTimeRange(trimmedRange);
+      if (parsed) {
+        startSec = parsed.startSec;
+        endSec = parsed.endSec;
+      } else if (!rangeError) {
+        setRangeError("Invalid format — frame sampling will stay on the full clip (expected e.g. 00:12~00:15). Click Save again to keep text only.");
+        return;
+      }
+    }
+    const next: RefAnnotation = {
+      rangeText: trimmedRange && includeRange ? trimmedRange : undefined,
+      startSec,
+      endSec,
+      notes: trimmedNotes || undefined,
+    };
+    onSave(next);
+    setOpen(false);
+  };
+
+  const handleClear = () => {
+    setRangeText("");
+    setNotes("");
+    onSave(undefined);
+    setOpen(false);
+  };
+
+  if (disabled) return null;
+
+  const hasExisting = hasAnnotation(item.annotation);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen((v) => !v);
+          }}
+          aria-label={hasExisting ? "Edit reference note" : "Add reference note"}
+          className={
+            "absolute -bottom-1.5 -right-1.5 w-4 h-4 bg-foreground text-background flex items-center justify-center " +
+            (hasExisting ? "opacity-100" : "opacity-0 group-hover:opacity-100") +
+            " transition-opacity"
+          }
+          style={{ borderRadius: 0 }}
+        >
+          <Pencil className="w-2.5 h-2.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={6}
+        className="w-80 p-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex flex-col gap-3">
+          <div className="text-[11px] font-medium tracking-wide text-primary">
+            Reference Note
+          </div>
+          {includeRange && (
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-muted-foreground">Time range</span>
+              <input
+                type="text"
+                value={rangeText}
+                onChange={(e) => {
+                  setRangeText(e.target.value);
+                  setRangeError(null);
+                }}
+                placeholder="00:12~00:15"
+                className="h-8 px-2 text-[12px] border border-input bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                style={{ borderRadius: 0 }}
+              />
+              {rangeError && (
+                <span className="text-[10px] text-primary">{rangeError}</span>
+              )}
+            </label>
+          )}
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-muted-foreground">Points to focus on</span>
+            <Textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder={"- How the weapon enters via the scan line\n- Timing of the UI overlay"}
+              className="min-h-[90px] text-[12px]"
+            />
+          </label>
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <button
+              type="button"
+              onClick={handleClear}
+              className="h-8 px-2 text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              Clear
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="h-8 px-3 text-[12px] border border-border hover:bg-secondary"
+                style={{ borderRadius: 0 }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSave}
+                className="h-8 px-3 text-[12px] bg-primary text-primary-foreground hover:bg-primary/85"
+                style={{ borderRadius: 0 }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+};
+
+/* ━━━━━ Execute Analysis 로딩 체감 개선 ━━━━━
+ *
+ * LLM 분석은 Promise 단일 resolve 라 중간 진행 이벤트가 없다. 실제 진행률을
+ * 모르면서도 "멈춘 듯한" 인상을 줄이기 위해 두 축을 도입:
+ *   A. asymptotic 진행률 바 (0 → 95% log 곡선) — 완료 시 100% 스냅 + 300ms fade
+ *   B. 실제 파이프라인 단계를 반영한 5개 스테이지 메시지 로테이션
+ * 둘 다 "거짓말" 아님 — 분석 시 실제로 저 단계들이 (순차적으로) 일어남. */
+const ANALYSIS_STAGES = [
+  "Parsing brief...",
+  "Extracting hooks & story beats...",
+  "Scoring ABCD metrics...",
+  "Mapping audience insights...",
+  "Finalizing strategy...",
+];
+
+function useFakeAnalysisProgress(active: boolean) {
+  const [pct, setPct] = useState(0);
+  const [stageIdx, setStageIdx] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      setPct(0);
+      setStageIdx(0);
+      return;
+    }
+    const started = Date.now();
+    // 1 - e^(-t/tau), tau=8s → 10s 지점 ~71%, 20s 지점 ~92%, 상한 95%.
+    // tick 120ms 면 바의 transition-[width] duration-500 과 어우러져 부드럽게 차오름.
+    const tick = setInterval(() => {
+      const t = (Date.now() - started) / 1000;
+      const eased = 1 - Math.exp(-t / 8);
+      setPct(Math.min(95, eased * 100));
+    }, 120);
+    const rotate = setInterval(() => {
+      setStageIdx((i) => Math.min(i + 1, ANALYSIS_STAGES.length - 1));
+    }, 3500);
+    return () => {
+      clearInterval(tick);
+      clearInterval(rotate);
+    };
+  }, [active]);
+  return { pct, stage: ANALYSIS_STAGES[stageIdx] };
+}
+
+/* 메인 결과 영역용 풀 로더 (spinner + 타이틀 + 스테이지 + 바 + 퍼센트).
+ * compact variant 는 좁은 Next Step 사이드바 카드 안에서 쓰이며 스피너 생략. */
+interface AnalysisLoaderProps {
+  active: boolean;
+  mode?: "default" | "pdf";
+  variant?: "full" | "compact";
+  onHidden?: () => void;
+}
+const AnalysisLoader = ({ active, mode = "default", variant = "full", onHidden }: AnalysisLoaderProps) => {
+  const { pct, stage } = useFakeAnalysisProgress(active);
+  const [displayPct, setDisplayPct] = useState(0);
+  useEffect(() => {
+    if (active) {
+      setDisplayPct(pct);
+      return;
+    }
+    // active=false 로 내려오는 순간: 100% 스냅 유지 후 300ms 뒤 onHidden.
+    setDisplayPct(100);
+    if (!onHidden) return;
+    const t = setTimeout(onHidden, 300);
+    return () => clearTimeout(t);
+  }, [active, pct, onHidden]);
+
+  if (variant === "compact") {
+    return (
+      <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center w-full">
+        <span className="font-mono text-[10px] text-muted-foreground/50 leading-relaxed">
+          {stage}
+        </span>
+        <div
+          className="w-full h-1 rounded-full overflow-hidden"
+          style={{ background: "rgba(255,255,255,0.06)" }}
+        >
+          <div
+            className="h-full bg-primary/60 rounded-full transition-[width] duration-500 ease-out"
+            style={{ width: `${displayPct}%` }}
+          />
+        </div>
+        <span className="font-mono text-[9px] text-muted-foreground/30">
+          {Math.round(displayPct)}%
+        </span>
+      </div>
+    );
+  }
+
+  const headline = mode === "pdf" ? "Processing PDF Brief…" : "Generating Strategy Report…";
+  return (
+    <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-5">
+      <div className="relative w-10 h-10">
+        <span className="absolute inset-0 border-2 border-primary/20 rounded-full" />
+        <span className="absolute inset-0 border-2 border-transparent border-t-primary rounded-full animate-spin" />
+      </div>
+      <div className="text-center space-y-1.5">
+        <p className="text-[13px] font-semibold text-foreground">{headline}</p>
+        <p className="font-mono text-[10px] text-muted-foreground/60 min-h-[14px] transition-opacity">
+          {stage}
+        </p>
+      </div>
+      <div className="w-48 h-1 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
+        <div
+          className="h-full bg-primary/70 rounded-full transition-[width] duration-500 ease-out"
+          style={{ width: `${displayPct}%` }}
+        />
+      </div>
+      <p className="font-mono text-[10px] text-muted-foreground/30">
+        {Math.round(displayPct)}%
+      </p>
     </div>
   );
 };

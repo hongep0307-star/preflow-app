@@ -16,10 +16,12 @@ import {
   KR_BORDER,
   KR_BORDER2,
   FORMAT_DEFAULT_COLS,
-  _moodGeneratingByProject,
-  getMoodGen,
-  setMoodGen,
-  patchMoodGen,
+  getMoodGenBatches,
+  isAnyMoodGenInFlight,
+  addMoodGenBatch,
+  patchMoodGenBatch,
+  removeMoodGenBatch,
+  subscribeMoodGen,
   toMoodImages,
   genMoodId,
   type Asset,
@@ -83,6 +85,7 @@ const MoodCard = ({
   onSendToChat,
   onLightbox,
   onAttach,
+  onBroken,
 }: {
   img: MoodImage;
   selected: boolean;
@@ -96,6 +99,11 @@ const MoodCard = ({
   onSendToChat: () => void;
   onLightbox: () => void;
   onAttach: (e: React.MouseEvent) => void;
+  /** Fired when the <img> fails to load (404/network). The parent uses this
+   *  to self-heal legacy rows that pointed at disk files that never existed
+   *  (e.g. the old GPT suffix embedded `:` in filenames, which Windows NTFS
+   *  refused to write, so the URL went to DB but no file was ever saved). */
+  onBroken?: () => void;
 }) => {
   const [hovered, setHovered] = useState(false);
   const showOverlay = hovered || selected;
@@ -191,7 +199,9 @@ const MoodCard = ({
         loading="lazy"
         onLoad={(e) => {
           (e.currentTarget as HTMLImageElement).style.opacity = "1";
-        }} decoding="async" />
+        }}
+        onError={() => onBroken?.()}
+        decoding="async" />
       <div
         style={{
           position: "absolute",
@@ -283,7 +293,7 @@ const MoodCard = ({
               e.stopPropagation();
               onAttach(e);
             }}
-            title={img.sceneRef != null ? `Linked to S${img.sceneRef}` : "Attach to scene"}
+            title={img.sceneRef != null ? `Linked to S${String(img.sceneRef).padStart(2, "0")}` : "Attach to scene"}
             style={{
               position: "absolute",
               bottom: 7,
@@ -326,7 +336,7 @@ const MoodCard = ({
                   lineHeight: 1,
                 }}
               >
-                S{img.sceneRef}
+                S{String(img.sceneRef).padStart(2, "0")}
               </span>
             )}
           </button>
@@ -347,7 +357,7 @@ const MoodCard = ({
                 alignItems: "center",
                 justifyContent: "center",
               }}
-              title="채팅에 보내기"
+              title="Send to chat"
             >
               <ExternalLink style={{ width: 12, height: 12, color: "rgba(255,255,255,.85)" }} />
             </button>
@@ -386,7 +396,7 @@ const MoodCard = ({
               color: "#fff",
             }}
           >
-            S{img.sceneRef}
+            S{String(img.sceneRef).padStart(2, "0")}
           </span>
         </div>
       )}
@@ -441,8 +451,12 @@ export const MoodIdeationPanel = ({
     };
   }, []);
   const { toast } = useToast();
-  const existingGen = getMoodGen(projectId);
-  const [isGenerating, setIsGenerating] = useState(!!existingGen?.promise);
+  // 진행중 배치 카운트. 1개 이상이면 스피너/카운터 표시, 그러나 generate 버튼 자체는
+  // 배치 동시 진행을 허용하므로 disable 시키지 않는다 (이전 동작과 다름).
+  const [inFlightCount, setInFlightCount] = useState<number>(
+    () => getMoodGenBatches(projectId).filter((b) => b.promise !== null).length,
+  );
+  const isGenerating = inFlightCount > 0;
   const [showLikedOnly, setShowLikedOnly] = useState(false);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [targetSceneNum, setTargetSceneNum] = useState<number | null>(null);
@@ -539,14 +553,14 @@ export const MoodIdeationPanel = ({
     return () => document.removeEventListener("mousedown", fn);
   }, [attachMenu]);
 
+  // 진행중 배치 수를 모듈 store 변화에 맞춰 항상 동기화.
+  // 컴포넌트 마운트 시점에도 (탭 이동 후 복귀) 정확한 카운터로 시작하도록
+  // subscribe 콜백을 즉시 한 번 호출한다.
   useEffect(() => {
-    const gen = getMoodGen(projectId);
-    if (gen?.promise) {
-      setIsGenerating(true);
-      gen.promise.then(() => {
-        setIsGenerating(false);
-      });
-    }
+    const sync = () =>
+      setInFlightCount(getMoodGenBatches(projectId).filter((b) => b.promise !== null).length);
+    sync();
+    return subscribeMoodGen(projectId, sync);
   }, [projectId]);
 
   const contextLabel = (() => {
@@ -558,12 +572,19 @@ export const MoodIdeationPanel = ({
   })();
 
   const handleGenerate = async () => {
-    setIsGenerating(true);
+    // ─── 다중 배치 동시 진행 ───
+    // 이전에는 _moodGeneratingByProject 가 프로젝트당 단일 슬롯이라 두 번째 generate 호출이
+    // 첫 배치의 skeletonIds/arrivedUrls 를 덮어쓰는 한계가 있었음.
+    // 이제 batchId 로 식별되는 배치 단위로 보관하므로, 사용자가 첫 배치 진행 중에 추가
+    // generate 를 눌러도 두 배치가 독립적으로 살아남는다.
+    const batchId = genMoodId();
+    const batchCount = generateCount;
+    const batchModel = moodModel;
+    const batchTargetSceneNum = targetSceneNum;
 
-    // Insert skeleton placeholders (url: null) at the front.
-    // skeletonIds 와 arrivedUrls 를 모듈 store(_moodGeneratingByProject) 에도 보관해서
-    // 탭 이동으로 AgentTab 이 언마운트→리마운트 되어도 스켈레톤이 살아있도록 한다.
-    const skeletonIds = Array.from({ length: generateCount }, () => genMoodId());
+    // skeleton placeholder (url: null) 삽입.
+    // skeletonIds 는 모듈 store 에도 보관해서 탭 이동 → 재마운트 시에도 살아있게 한다.
+    const skeletonIds = Array.from({ length: batchCount }, () => genMoodId());
     const skeletons: MoodImage[] = skeletonIds.map((id) => ({
       id,
       url: null,
@@ -574,9 +595,10 @@ export const MoodIdeationPanel = ({
     }));
     setMoodImages((prev) => [...skeletons, ...prev]);
 
-    // 모듈 store 등록 (promise 는 아래에서 채움)
-    setMoodGen(projectId, {
-      count: generateCount,
+    // 배치를 모듈 store 에 등록 (promise 는 아래에서 채움)
+    addMoodGenBatch(projectId, {
+      batchId,
+      count: batchCount,
       skeletonIds,
       arrivedUrls: [],
       promise: null,
@@ -584,7 +606,8 @@ export const MoodIdeationPanel = ({
 
     const genPromise = (async () => {
       try {
-        const targetScenes = targetSceneNum !== null ? scenes.filter((s) => s.scene_number === targetSceneNum) : scenes;
+        const targetScenes =
+          batchTargetSceneNum !== null ? scenes.filter((s) => s.scene_number === batchTargetSceneNum) : scenes;
         await generateMoodImages(
           {
             projectId,
@@ -608,46 +631,47 @@ export const MoodIdeationPanel = ({
               space_description: a.space_description,
             })),
             videoFormat,
-            count: generateCount,
-            targetSceneNumber: targetSceneNum,
-            model: moodModel,
+            count: batchCount,
+            targetSceneNumber: batchTargetSceneNum,
+            model: batchModel,
           },
           (batchUrls) => {
-            // 모듈 store 의 arrivedUrls 갱신 + listener 통지.
-            // AgentTab 의 mood gen 구독 effect(subscribeMoodGen) 가 이 patch 를 받아
-            // skeletonIds + arrivedUrls 를 기준으로 moodImages 를 일관되게 재구성한다.
+            // 이 배치의 arrivedUrls 만 갱신 — 다른 in-flight 배치에 영향 없음.
+            // AgentTab 의 mood gen 구독 effect 가 이 patch 를 받아 모든 배치의
+            // skeletonIds + arrivedUrls 를 합쳐 moodImages 를 일관되게 재구성한다.
             //
-            // NOTE: 로컬에서 setMoodImages 로 null 을 url 로 바꾸는 추가 작업은
-            //       일부러 하지 않는다. 구독자와 로컬 setter 가 동시에 업데이트하면
-            //       batch 2+ 시점에 "첫 번째 null 슬롯"을 서로 다르게 해석해서
-            //       같은 URL 이 두 슬롯에 중복 기록되는 버그가 있었음.
-            const cur = getMoodGen(projectId);
+            // NOTE: 로컬 setMoodImages 로 null 을 url 로 바꾸는 추가 작업은 하지 않는다.
+            //       구독자(AgentTab.sync) 가 단일 진실 공급원으로 동작해야
+            //       동시 배치에서 "첫 번째 null 슬롯" 을 잘못 해석해 URL 중복 기록되는 일이 없다.
+            const batches = getMoodGenBatches(projectId);
+            const cur = batches.find((b) => b.batchId === batchId);
             if (cur) {
-              patchMoodGen(projectId, { arrivedUrls: [...cur.arrivedUrls, ...batchUrls] });
+              patchMoodGenBatch(projectId, batchId, {
+                arrivedUrls: [...cur.arrivedUrls, ...batchUrls],
+              });
             }
           },
         );
-        toast({ title: `${generateCount} mood images generated` });
+        toast({ title: `${batchCount} mood images generated` });
       } catch (err: any) {
         toast({ title: "Mood generation failed", description: err.message, variant: "destructive" });
       } finally {
         // ─── 언마운트-세이프 완료 처리 ───
         // 탭 전환으로 AgentTab 이 unmount 된 상태에서도 DB 에 반드시 저장되어야 하므로,
         // setMoodImages (React state) 가 아닌 모듈 store + supabase 를 직접 사용한다.
-        // 1) 모듈 store 의 arrivedUrls 기준으로 DB persist
-        const finalGen = getMoodGen(projectId);
-        await persistMoodGenResultToDB(projectId, finalGen);
-        // 2) mount 된 경우에만 로컬 state 정리 (null placeholder 제거).
-        //    unmount 상태면 no-op 이고, 재마운트 시 fetchBrief 가 DB 에서 새로 로드.
-        setMoodImages((prev) => prev.filter((img) => img.url !== null));
-        // 3) 모듈 store 정리 — 이 호출이 subscribeMoodGen listener 를 트리거하므로
-        //    위 setMoodImages 뒤에서 호출해 UI 가 최종 상태로 안정화되게 한다.
-        setMoodGen(projectId, null);
-        setIsGenerating(false);
+        // 1) 이 배치의 arrivedUrls 기준으로 DB persist (다른 배치 영향 X — 자기 skeletonIds 만 머지)
+        const finalBatch = getMoodGenBatches(projectId).find((b) => b.batchId === batchId);
+        await persistMoodGenResultToDB(projectId, finalBatch);
+        // 2) mount 된 경우에만 로컬 state 정리 — 이 배치의 skeleton 중 url 이 null 로 남은 것만 제거.
+        //    다른 in-flight 배치의 null skeleton 은 보존해야 하므로 "이 배치 소속 + null" 만 필터아웃.
+        const skelSet = new Set(skeletonIds);
+        setMoodImages((prev) => prev.filter((img) => !(skelSet.has(img.id) && img.url === null)));
+        // 3) 모듈 store 에서 이 배치 제거 — subscribeMoodGen listener 트리거.
+        removeMoodGenBatch(projectId, batchId);
       }
     })();
-    // promise 핸들 모듈 store 에 기록
-    patchMoodGen(projectId, { promise: genPromise });
+    // promise 핸들을 이 배치에 기록
+    patchMoodGenBatch(projectId, batchId, { promise: genPromise });
   };
 
   const handleToggleLike = (id: string) =>
@@ -844,6 +868,27 @@ export const MoodIdeationPanel = ({
                     onSendToChat={() => onSendToChat(img.url!)}
                     onLightbox={() => setLightboxUrl(img.url!)}
                     onAttach={(e) => openAttachMenu(e, img.id)}
+                    onBroken={() => {
+                      // Self-heal: the img 404'd. Most likely this is a
+                      // legacy row written before the filename-sanitize fix
+                      // (colons in GPT-path suffixes never actually wrote
+                      // to disk on Windows). Drop it from state + DB so
+                      // the empty card disappears and Lightbox doesn't
+                      // resurrect it. Skeletons have url === null and
+                      // don't render the <img> we bound this to, so this
+                      // only fires for real broken URLs.
+                      setMoodImages((prev) => {
+                        const next = prev.filter((m) => m.id !== img.id);
+                        void saveMoodImagesToDB(next);
+                        return next;
+                      });
+                      setSelectedIds((prev) => {
+                        if (!prev.has(img.id)) return prev;
+                        const copy = new Set(prev);
+                        copy.delete(img.id);
+                        return copy;
+                      });
+                    }}
                   />
                 );
               })}
@@ -1092,10 +1137,10 @@ export const MoodIdeationPanel = ({
               {thumbCols} cols
             </span>
           </div>
-          {/* Generate button */}
+          {/* Generate button — 진행중 배치가 있어도 계속 클릭 가능 (다중 배치 동시 진행 허용).
+              진행중일 때는 in-flight 카운터를 우측에 작은 배지로 노출. */}
           <button
             onClick={handleGenerate}
-            disabled={isGenerating}
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -1108,13 +1153,32 @@ export const MoodIdeationPanel = ({
               background: KR,
               color: "#fff",
               border: "none",
-              cursor: isGenerating ? "not-allowed" : "pointer",
-              opacity: isGenerating ? 0.7 : 1,
+              cursor: "pointer",
               flexShrink: 0,
             }}
+            title={isGenerating ? `${inFlightCount} batch in progress · click to start another` : undefined}
           >
             {isGenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}{" "}
             Generate
+            {inFlightCount > 0 && (
+              <span
+                style={{
+                  marginLeft: 4,
+                  padding: "0 5px",
+                  height: 16,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: 8,
+                  background: "rgba(255,255,255,0.22)",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  lineHeight: 1,
+                }}
+              >
+                {inFlightCount}
+              </span>
+            )}
           </button>
         </div>
       </div>
@@ -1266,7 +1330,7 @@ export const MoodIdeationPanel = ({
                 onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
               >
                 <X style={{ width: 11, height: 11 }} />
-                Detach S{attachImg.sceneRef}
+                Detach S{String(attachImg.sceneRef).padStart(2, "0")}
               </button>
               <div style={{ height: 1, background: "hsl(var(--border))", margin: "2px 0" }} />
             </>
@@ -1311,12 +1375,12 @@ export const MoodIdeationPanel = ({
                     color: "#fff",
                   }}
                 >
-                  S{s.scene_number}
+                  S{String(s.scene_number).padStart(2, "0")}
                 </span>
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {s.title || `Scene ${s.scene_number}`}
                 </span>
-                {alreadyTaken && <span style={{ fontSize: 9, color: "hsl(var(--muted-foreground))" }}>연결됨</span>}
+                {alreadyTaken && <span style={{ fontSize: 9, color: "hsl(var(--muted-foreground))" }}>linked</span>}
                 {isCurrentlyAttached && !alreadyTaken && (
                   <svg
                     width={10}
@@ -1341,18 +1405,18 @@ export const MoodIdeationPanel = ({
         <Dialog open onOpenChange={() => setDeleteConfirm(null)}>
           <DialogContent className="max-w-[380px] bg-card border-border">
             <DialogHeader>
-              <DialogTitle>Delete image 확인</DialogTitle>
+              <DialogTitle>Delete images?</DialogTitle>
             </DialogHeader>
             <p className="text-[13px] text-muted-foreground leading-relaxed">
-              선택한 이미지 중 <strong className="text-foreground">{deleteConfirm.connectedScenes.length}개</strong>가
-              씬({deleteConfirm.connectedScenes.map((n) => `씬 ${n}`).join(", ")})에 연결되어 있습니다.
+              <strong className="text-foreground">{deleteConfirm.connectedScenes.length}</strong> of the selected images
+              {" "}are linked to scenes ({deleteConfirm.connectedScenes.map((n) => `Scene ${n}`).join(", ")}).
               <br />
               <br />
-              삭제하면 씬에서도 이미지가 제거됩니다. 계속할까요?
+              Deleting them will also remove the images from those scenes. Continue?
             </p>
             <DialogFooter>
               <Button variant="ghost" onClick={() => setDeleteConfirm(null)}>
-                취소
+                Cancel
               </Button>
               <Button
                 onClick={async () => {
@@ -1363,7 +1427,7 @@ export const MoodIdeationPanel = ({
                 className="gap-1.5"
                 style={{ background: "#dc2626", color: "#fff" }}
               >
-                삭제
+                Delete
               </Button>
             </DialogFooter>
           </DialogContent>

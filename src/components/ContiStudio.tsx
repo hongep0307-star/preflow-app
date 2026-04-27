@@ -29,8 +29,11 @@ import {
   Plus,
   PenLine,
   Undo2,
+  Sparkles,
 } from "lucide-react";
 import { AnnotationEditor } from "@/components/conti/AnnotationEditor";
+import { StudioSketchesTab } from "@/components/conti/StudioSketchesTab";
+import type { Sketch } from "@/components/conti/contiTypes";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import MentionInput from "@/components/MentionInput";
@@ -50,6 +53,9 @@ interface Scene {
   duration_sec: number | null;
   conti_image_url: string | null;
   conti_image_crop?: unknown;
+  /** Per-scene composition candidates generated in the Sketches tab.
+   *  Lives on the scene row so deleting the scene cascades the sketches. */
+  sketches?: Sketch[];
 }
 interface Asset {
   id?: string;
@@ -93,17 +99,28 @@ export interface ContiStudioProps {
   onDeleteHistory?: (url: string) => Promise<void> | void;
   onEditGeneratingChange?: (sceneId: string, generating: boolean) => void;
   onStageChange?: (sceneId: string, stage: GeneratingStage | null) => void;
+  /** Notified by StudioSketchesTab whenever the persisted sketch list for
+   *  the current scene changes. ContiTab uses this to keep `activeScenes`
+   *  (and therefore the SortableContiCard sketch-count badge + the next
+   *  Studio-open's `scene.sketches` prop) in sync with the DB.
+   *
+   *  Receives a functional updater (not a final array) so the parent can
+   *  apply it against the freshest snapshot in its own state — see the
+   *  long comment in StudioSketchesTab for the concurrent-batch race this
+   *  shape avoids. */
+  onSketchesUpdated?: (sceneId: string, updater: (current: Sketch[]) => Sketch[]) => void;
   isRegenerating?: boolean;
 }
 
 /* ━━━━━ 상수 ━━━━━ */
 const KR = "#f9423a";
 const TYPE_LABEL: Record<string, string> = { character: "Character", item: "Item", background: "Background" };
-type TabId = "view" | "editor" | "edit" | "history" | "compare";
+export type TabId = "view" | "editor" | "edit" | "sketches" | "history" | "compare";
 const TABS: { id: TabId; label: string; icon: typeof Eye }[] = [
   { id: "view", label: "View", icon: Eye },
   { id: "editor", label: "Editor", icon: PenLine },
   { id: "edit", label: "Inpaint", icon: Paintbrush },
+  { id: "sketches", label: "Sketches", icon: Sparkles },
   { id: "history", label: "History", icon: History },
   { id: "compare", label: "Compare", icon: Columns2 },
 ];
@@ -111,6 +128,15 @@ const ASPECT_CLASS: Record<VideoFormat, string> = {
   vertical: "aspect-[9/16]",
   horizontal: "aspect-video",
   square: "aspect-square",
+};
+// Numeric counterpart of ASPECT_CLASS for imperative sizing of the image
+// stage. Must stay 1:1 with SortableContiCard's FORMAT_RATIO so a scene
+// "looks the same size" whether the user is staring at the Conti grid
+// card or at the Studio viewport.
+const FORMAT_RATIO: Record<VideoFormat, number> = {
+  horizontal: 16 / 9,
+  vertical: 9 / 16,
+  square: 1,
 };
 const MAX_INPAINT_UNDO = 20;
 
@@ -146,6 +172,7 @@ export const ContiStudio = ({
   onRollback,
   onDeleteHistory,
   onEditGeneratingChange,
+  onSketchesUpdated,
   onStageChange,
   isRegenerating: externalRegenerating,
 }: ContiStudioProps) => {
@@ -403,20 +430,43 @@ export const ContiStudio = ({
 
   const isFileDrag = (dt: DataTransfer | null) => !!dt && Array.from(dt.types).includes("Files");
 
-  /* ━━━ 이미지 크기 계산 ━━━ */
+  /* ━━━ 이미지 stage 크기 계산 ━━━
+   *
+   * 핵심: stage 크기는 (container 크기 × 프로젝트 videoFormat 비율) 의 함수다.
+   * 이미지의 naturalSize 나 activeTab 에 의존하지 않는다. 예전에는 매 탭 전환마다
+   * 이미지의 natural aspect 로 scale 을 다시 계산했기 때문에:
+   *   · 16:9 프로젝트에서 natural aspect 가 format 과 0.5% 만 달라도
+   *     탭 이동마다 캔버스가 미세하게 흔들렸고
+   *   · Inpaint 탭은 preflightCrop 으로 format-ratio 로 맞춰진 이미지를 쓰고
+   *     View 탭은 원본을 쓰는 탓에 두 탭의 stage 크기가 서로 달라 보였다.
+   * ResizeObserver 로 container 크기 변화만 따라가면 탭 전환과 무관하게
+   * stage 크기가 고정된다. */
   useEffect(() => {
-    const url = previewUrl || currentScene.conti_image_url;
-    if (!url || !containerRef.current) return;
-    const img = new Image();
-    img.onload = () => {
-      if (!containerRef.current) return;
-      const cw = containerRef.current.clientWidth;
-      const ch = containerRef.current.clientHeight;
-      const scale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight);
-      setCanvasSize({ w: img.naturalWidth * scale, h: img.naturalHeight * scale });
+    const el = containerRef.current;
+    if (!el) return;
+    const ratio = FORMAT_RATIO[videoFormat] ?? 16 / 9;
+    const recompute = () => {
+      // p-6 (24px) 패딩은 content box 밖. 실제 그림이 차지할 수 있는 영역은
+      // clientWidth/Height 에서 패딩을 빼야 맞다. 예전 로직은 이 뺄셈이 없어서
+      // stage 가 미세하게 padding 위로 번졌다.
+      const cw = Math.max(0, el.clientWidth - 48);
+      const ch = Math.max(0, el.clientHeight - 48);
+      if (cw <= 0 || ch <= 0) return;
+      let w = cw;
+      let h = cw / ratio;
+      if (h > ch) {
+        h = ch;
+        w = ch * ratio;
+      }
+      setCanvasSize((prev) =>
+        Math.abs(prev.w - w) < 0.5 && Math.abs(prev.h - h) < 0.5 ? prev : { w, h },
+      );
     };
-    img.src = url;
-  }, [currentScene.conti_image_url, previewUrl, activeTab]);
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [videoFormat]);
 
   /* ━━━ 이미지 로드 (Inpaint 탭) ━━━
    * style transfer 와 동일하게, 인페인트도 씬 이미지를 프리뷰 비율로 사전-크롭한
@@ -496,12 +546,9 @@ export const ContiStudio = ({
           ic.getContext("2d")!.drawImage(img, 0, 0);
           mc.getContext("2d")!.clearRect(0, 0, mc.width, mc.height);
           if (oc) oc.getContext("2d")!.clearRect(0, 0, oc.width, oc.height);
-          if (containerRef.current) {
-            const cw = containerRef.current.clientWidth;
-            const ch = containerRef.current.clientHeight;
-            const scale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight);
-            setCanvasSize({ w: img.naturalWidth * scale, h: img.naturalHeight * scale });
-          }
+          // canvasSize 는 format-ratio 기반 ResizeObserver 훅에서 전역적으로
+          // 관리한다. 예전엔 이미지 naturalSize 로 다시 계산해서 탭마다 값이
+          // 튀었는데, 지금은 이곳이 stage 크기를 건드리지 않게 비워둔다.
           setImageLoaded(true);
           if (objectUrl) URL.revokeObjectURL(objectUrl);
         };
@@ -2218,6 +2265,16 @@ Edit instruction:
             {TABS.map((tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
+              // Small badge for the Sketches tab so users see at-a-glance
+              // how many drafts they already have on this scene without
+              // opening the tab first.
+              // Defensive `Array.isArray` — legacy version JSON could deliver
+              // `sketches` as the string `"[]"` (length 2) and surface a
+              // misleading "2" badge.
+              const sketchCount = Array.isArray(currentScene.sketches)
+                ? currentScene.sketches.length
+                : 0;
+              const badge = tab.id === "sketches" && sketchCount > 0 ? sketchCount : null;
               return (
                 <button
                   key={tab.id}
@@ -2230,6 +2287,17 @@ Edit instruction:
                 >
                   <Icon className="w-3.5 h-3.5" />
                   {tab.label}
+                  {badge !== null && (
+                    <span
+                      className="ml-0.5 text-[9.5px] font-bold px-1 rounded-sm tracking-wide"
+                      style={{
+                        background: isActive ? KR : "hsl(var(--muted))",
+                        color: isActive ? "#fff" : "hsl(var(--muted-foreground))",
+                      }}
+                    >
+                      {badge}
+                    </span>
+                  )}
                   {isActive && (
                     <div className="absolute bottom-0 left-2 right-2 h-[2px] rounded-none" style={{ background: KR }} />
                   )}
@@ -2460,6 +2528,26 @@ Edit instruction:
                   )}
                 </div>
               </div>
+            )}
+
+            {/* ━━━ Sketches ━━━ */}
+            {activeTab === "sketches" && (
+              <StudioSketchesTab
+                projectId={currentScene.project_id}
+                scene={currentScene}
+                assets={assets}
+                videoFormat={videoFormat}
+                briefAnalysis={briefAnalysis ?? null}
+                onSetAsSceneImage={(url) => onSaveInpaint(url)}
+                // Reuse the same previewUrl state the History tab drives.
+                // `displayUrl` (line ~1926) already prefers `previewUrl` over
+                // `currentScene.conti_image_url`, so passing the setter
+                // through here gives Sketches History-tab parity for free
+                // — no new canvas-render branch needed.
+                previewUrl={previewUrl}
+                onPreview={setPreviewUrl}
+                onSketchesUpdated={(updater) => onSketchesUpdated?.(currentScene.id, updater)}
+              />
             )}
 
             {/* ━━━ History ━━━ */}

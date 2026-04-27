@@ -97,8 +97,8 @@ export const LoadVersionModal = ({ versions, onClose, onLoad }: {
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-[360px] bg-card border-border">
         <DialogHeader><DialogTitle className="text-[15px] font-semibold">Load conti version</DialogTitle></DialogHeader>
-        <p className="text-[13px] text-muted-foreground">저장된 콘티 버전이 없습니다.<br />콘티 탭에서 안을 먼저 만들어주세요.</p>
-        <DialogFooter><Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>닫기</Button></DialogFooter>
+        <p className="text-[13px] text-muted-foreground">No saved conti versions yet.<br />Create a conti draft in the Conti tab first.</p>
+        <DialogFooter><Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>Close</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );

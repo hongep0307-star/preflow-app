@@ -39,6 +39,112 @@ export const MessageContent = ({ content, assets, onSend, segments: preSegments 
         if (seg.type === "storylines")
           return <StorylinesCard key={i} options={seg.options} onSelect={(t) => onSend?.(t)} />;
         if (seg.type === "scene") return null;
+        if (seg.type === "scene_alt") {
+          const d = seg.data;
+          if (!d) return null;
+          return (
+            <div
+              key={i}
+              className="my-2 px-3 py-2 border bg-card/40"
+              style={{ borderRadius: 0, borderColor: "rgba(96,165,250,0.25)" }}
+            >
+              <div className="flex items-baseline gap-2 mb-0.5">
+                <span className="font-mono text-[10px] text-blue-300">SCENE {d.scene_number} · ALT {d.variant || "B"}</span>
+                {d.title && <span className="text-[12px] font-semibold text-foreground/90">{d.title}</span>}
+              </div>
+              {d.description && <p className="text-[12px] leading-relaxed text-foreground/80">{d.description}</p>}
+              {d.rationale && (
+                <p className="mt-1 font-mono text-[10px] text-muted-foreground">RATIONALE: {d.rationale}</p>
+              )}
+            </div>
+          );
+        }
+        if (seg.type === "scene_audit") {
+          const d = seg.data;
+          if (!d) return null;
+          const score = (k: "A" | "B" | "C" | "D") => {
+            const v = d.abcd?.[k];
+            return typeof v === "number" ? Math.round(v * 100) : null;
+          };
+          return (
+            <div
+              key={i}
+              className="my-2 px-3 py-2 border bg-card/40"
+              style={{ borderRadius: 0, borderColor: "rgba(34,197,94,0.22)" }}
+            >
+              <div className="font-mono text-[10px] text-emerald-400 mb-1">SCENE AUDIT · ABCD</div>
+              <div className="flex flex-wrap gap-2 mb-1.5">
+                {(["A", "B", "C", "D"] as const).map((k) => {
+                  const s = score(k);
+                  return (
+                    <span
+                      key={k}
+                      className="font-mono text-[10px] px-1.5 py-0.5 border"
+                      style={{ borderRadius: 0, borderColor: "rgba(255,255,255,0.1)" }}
+                    >
+                      {k}: {s == null ? "—" : `${s}`}
+                    </span>
+                  );
+                })}
+              </div>
+              {!!d.issues?.length && (
+                <ul className="list-disc pl-4 mb-1">
+                  {d.issues.map((it, j) => (
+                    <li key={j} className="text-[12px] text-foreground/80 leading-snug">{it}</li>
+                  ))}
+                </ul>
+              )}
+              {!!d.suggested_fixes?.length && (
+                <ul className="list-disc pl-4">
+                  {d.suggested_fixes.map((it, j) => (
+                    <li key={j} className="text-[12px] text-emerald-300/85 leading-snug">{it}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+        }
+        if (seg.type === "reference_decomposition") {
+          const d = seg.data;
+          if (!d) return null;
+          return (
+            <div
+              key={i}
+              className="my-2 px-3 py-2 border bg-card/40"
+              style={{ borderRadius: 0, borderColor: "rgba(244,114,182,0.25)" }}
+            >
+              <div className="font-mono text-[10px] text-pink-300 mb-1">REFERENCE DECOMPOSITION</div>
+              {d.hook && (
+                <p className="text-[12px] mb-1 text-foreground/85">
+                  <span className="font-mono text-[10px] text-muted-foreground mr-1">HOOK</span>
+                  {d.hook}
+                </p>
+              )}
+              {!!d.scenes?.length && (
+                <div className="space-y-0.5 mb-1">
+                  {d.scenes.map((s, j) => (
+                    <p key={j} className="text-[11.5px] text-foreground/80 leading-snug">
+                      <span className="font-mono text-[10px] text-muted-foreground mr-1">{s.t || `#${j + 1}`}</span>
+                      {s.beat || s.visual || s.audio || ""}
+                    </p>
+                  ))}
+                </div>
+              )}
+              {!!d.motifs?.length && (
+                <p className="text-[11.5px] text-foreground/75">
+                  <span className="font-mono text-[10px] text-muted-foreground mr-1">MOTIFS</span>
+                  {d.motifs.join(" · ")}
+                </p>
+              )}
+              {!!d.do_not_copy?.length && (
+                <p className="text-[11.5px] text-pink-300/80 mt-0.5">
+                  <span className="font-mono text-[10px] mr-1">AVOID</span>
+                  {d.do_not_copy.join(" · ")}
+                </p>
+              )}
+            </div>
+          );
+        }
         return (
           <ReactMarkdown
             key={i}

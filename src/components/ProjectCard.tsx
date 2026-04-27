@@ -92,9 +92,11 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
 
   return (
     <>
-      {/* ━━━ B안: 한 줄 가로 배치 ━━━
-          [썸네일] [● 상태] | [제목 flex-1] [포맷] [owner] | [deadline] [···] [›]
-      */}
+      {/* ━━━ 2열 그리드용 카드 — 썸네일(좌) + 수직 스택(우) ━━━
+       *  [썸네일 180x스트레치]
+       *  [● 제목 ........................... ]
+       *  [진척 바 ........................ n/m]
+       *  [포맷 · owner · deadline ···  →]  */}
       <div
         onClick={() => {
           // 라우팅 우선순위:
@@ -109,20 +111,22 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
           }
           navigate(target);
         }}
-        className="group flex items-stretch bg-card border border-border hover:border-primary/25 hover:bg-surface-elevated cursor-pointer transition-all duration-150"
+        className="group flex items-stretch bg-card border border-border hover:border-primary/25 hover:bg-surface-elevated cursor-pointer transition-all duration-150 min-h-[124px]"
         style={{ borderRadius: 0 }}
       >
-        {/* ── 썸네일 — 16:9, crop 지원 ── */}
+        {/* ── 썸네일 — 프로젝트 video_format 과 무관하게 16:9 고정.
+         *  explicit height 를 주면 flex items-stretch 가 무시되므로 카드
+         *  우측 패널이 길어져도 썸네일은 늘어나지 않음. */}
         <div
-          className="flex-shrink-0 bg-background border-r border-border flex items-center justify-center overflow-hidden relative group/thumb"
-          style={{ width: 160, height: 90, borderRadius: 0 }}
+          className="flex-shrink-0 self-start bg-background border-r border-border flex items-center justify-center overflow-hidden relative group/thumb"
+          style={{ width: 220, height: 124, borderRadius: 0 }}
           onClick={(e) => {
             if (project.thumbnail_url) {
               e.stopPropagation();
               setShowCropModal(true);
             }
           }}
-          title={project.thumbnail_url ? "클릭하여 썸네일 위치 조정" : undefined}
+          title={project.thumbnail_url ? "Click to adjust thumbnail position" : undefined}
         >
           {project.thumbnail_url ? (
             <>
@@ -141,104 +145,107 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
               </div>
             </>
           ) : (
-            <ImageIcon className="w-5 h-5 text-muted-foreground/15" />
+            <ImageIcon className="w-6 h-6 text-muted-foreground/15" />
           )}
         </div>
 
-        {/* ── 나머지 콘텐츠 한 줄 ── */}
-        <div className="flex items-center gap-4 flex-1 min-w-0 px-4 overflow-hidden">
-          {/* 상태 — dot + 텍스트 (B안) */}
-          <div className="flex items-center gap-1.5 flex-shrink-0">
+        {/* ── 우측: 3 행 수직 스택 (제목 / 진척 / 메타) ── */}
+        <div className="flex-1 min-w-0 flex flex-col justify-center gap-2 px-4 py-3">
+          {/* Row 1: dot + 제목 */}
+          <div className="flex items-center gap-2 min-w-0">
             <span
-              className="w-[6px] h-[6px] rounded-full flex-shrink-0"
-              style={{ background: isCompleted ? "rgba(255,255,255,0.2)" : "#f9423a" }}
+              className="w-[7px] h-[7px] rounded-full flex-shrink-0"
+              style={{ background: isCompleted ? "rgba(52,211,153,0.9)" : "#f9423a" }}
             />
-            <span
-              className="text-[13px] font-medium whitespace-nowrap"
-              style={{
-                color: isCompleted ? "rgba(255,255,255,0.28)" : "rgba(255,255,255,0.5)",
-              }}
-            >
-              {isCompleted ? "Completed" : "In Progress"}
-            </span>
-          </div>
-
-          {/* 구분선 */}
-          <div className="w-px h-5 bg-white/[0.08] flex-shrink-0" />
-
-          {/* 중앙 그룹: 제목 + 진척 바 — flex-1로 공간 흡수 */}
-          <div className="flex items-center gap-4 flex-1 min-w-0">
-            {/* 제목 */}
             <h3
-              className="text-[13px] font-bold flex-1 min-w-0 truncate tracking-wide group-hover:text-primary transition-colors"
-              style={{ color: isCompleted ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.85)" }}
+              className="text-[14px] font-bold truncate tracking-wide group-hover:text-primary transition-colors"
+              style={{ color: isCompleted ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.9)" }}
             >
               {project.title}
             </h3>
-
-            {/* 씬 콘티 진척 바 */}
-            {sceneStats && sceneStats.total > 0 && (
-              <div className="flex items-center gap-3 flex-shrink-0" style={{ width: 180 }}>
-                <div
-                  className="flex-1 h-[2px] overflow-hidden"
-                  style={{ background: "rgba(255,255,255,0.07)", borderRadius: 1 }}
-                >
-                  <div
-                    className="h-full transition-all duration-300"
-                    style={{
-                      width: `${Math.round((sceneStats.withConti / sceneStats.total) * 100)}%`,
-                      background: isCompleted ? "rgba(255,255,255,0.2)" : "#f9423a",
-                      borderRadius: 1,
-                    }}
-                  />
-                </div>
-                <span className="text-[10px] font-mono text-white/30 flex-shrink-0 whitespace-nowrap">
-                  {sceneStats.withConti} / {sceneStats.total}
-                </span>
-              </div>
-            )}
           </div>
 
-          {/* 우측 메타 그룹 — flex-shrink-0으로 항상 고정 */}
-          <div className="flex items-center gap-2 flex-shrink-0">
-            {/* 포맷 태그 */}
+          {/* Row 2: 진척 바 + ratio — sceneStats 가 없어도 자리 유지.
+           *  진행도는 유저가 수동으로 final 처리한 씬 수(sceneStats.finalCount) 기준.
+           *  이미지 유무(conti_image_url)는 더 이상 진행도에 반영되지 않음 — 유저가
+           *  "이 컷 최종" 이라고 명시 체크해야 카운트됨. */}
+          <div
+            className="flex items-center gap-3 min-w-0"
+            title={
+              sceneStats && sceneStats.total > 0
+                ? `${sceneStats.finalCount} of ${sceneStats.total} scenes finalized`
+                : undefined
+            }
+          >
+            <div
+              className="flex-1 h-[2px] overflow-hidden"
+              style={{ background: "rgba(255,255,255,0.07)", borderRadius: 0 }}
+            >
+              {sceneStats && sceneStats.total > 0 && (
+                <div
+                  className="h-full transition-all duration-300"
+                  style={{
+                    width: `${Math.round((sceneStats.finalCount / sceneStats.total) * 100)}%`,
+                    background: isCompleted ? "rgba(52,211,153,0.9)" : "#f9423a",
+                    borderRadius: 0,
+                  }}
+                />
+              )}
+            </div>
+            <span className="text-[10px] font-mono text-white/30 flex-shrink-0 whitespace-nowrap">
+              {sceneStats && sceneStats.total > 0
+                ? `${sceneStats.finalCount} / ${sceneStats.total}`
+                : "0 / 0"}
+            </span>
+          </div>
+
+          {/* Row 3: 메타 배지 + ··· + 화살표 */}
+          <div className="flex items-center gap-1.5 min-w-0">
             {project.video_format && (
               <span
-                className="text-[12px] font-mono tracking-wide px-2 py-0.5 border border-white/[0.1] text-white/35"
+                className="text-[11px] font-mono tracking-wide px-1.5 py-0.5 border border-white/[0.1] text-white/35 shrink-0 whitespace-nowrap"
                 style={{ borderRadius: 0 }}
               >
                 {formatLabel}
               </span>
             )}
 
-            {/* Owner */}
             {project.client && (
               <span
-                className="text-[12px] font-mono tracking-wide px-2 py-0.5 border border-white/[0.1] text-white/35 max-w-[90px] truncate"
+                className="text-[11px] font-mono tracking-wide px-1.5 py-0.5 border border-white/[0.1] text-white/35 truncate min-w-0 max-w-[110px]"
                 style={{ borderRadius: 0 }}
               >
                 {project.client}
               </span>
             )}
 
-            {/* Deadline */}
             <span
-              className="text-[12px] font-mono tracking-wide px-2 py-0.5 border"
+              className="text-[11px] font-mono tracking-wide px-1.5 py-0.5 border shrink-0 whitespace-nowrap"
               style={{
                 borderRadius: 0,
-                borderColor: isUrgent ? "rgba(249,66,58,0.5)" : "rgba(255,255,255,0.1)",
-                color: isUrgent ? "#f9423a" : "rgba(255,255,255,0.35)",
+                borderColor: project.deadline
+                  ? isUrgent
+                    ? "rgba(249,66,58,0.5)"
+                    : "rgba(255,255,255,0.1)"
+                  : "rgba(255,255,255,0.06)",
+                color: project.deadline
+                  ? isUrgent
+                    ? "#f9423a"
+                    : "rgba(255,255,255,0.35)"
+                  : "rgba(255,255,255,0.22)",
               }}
             >
-              {deadlineStr}
+              {project.deadline ? deadlineStr : "No Deadline"}
             </span>
+
+            <div className="flex-1" />
 
             {/* ··· 드롭다운 */}
             <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-150">
               <DropdownMenu>
                 <DropdownMenuTrigger
                   onClick={(e) => e.stopPropagation()}
-                  className="p-1.5 hover:bg-secondary transition-colors"
+                  className="p-1 hover:bg-secondary transition-colors"
                   style={{ borderRadius: 0 }}
                 >
                   <MoreHorizontal className="w-3.5 h-3.5 text-muted-foreground/50 hover:text-muted-foreground transition-colors" />
@@ -266,7 +273,6 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
               </DropdownMenu>
             </div>
 
-            {/* 화살표 */}
             <ChevronRight className="w-4 h-4 text-muted-foreground/15 group-hover:text-muted-foreground/40 transition-colors duration-150 flex-shrink-0" />
           </div>
         </div>

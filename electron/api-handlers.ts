@@ -28,6 +28,53 @@ export async function handleClaudeProxy(body: any) {
   return await response.json();
 }
 
+/**
+ * OpenAI Chat Completions 프록시. GPT-5.x 텍스트/멀티모달 호출의 단일 입구.
+ *
+ * Responses API 가 아닌 Chat Completions 를 쓰는 이유:
+ *   - 5.4 / 5.5 / 5.5-pro 모두 chat/completions 엔드포인트로 호출 가능
+ *   - Anthropic messages 스키마와 1:1 매핑이 쉬워 디스패처 (src/lib/llm.ts)
+ *     의 정규화 로직이 간결해짐
+ *   - vision/멀티모달 파트 (image_url + base64 data URI) 가 표준 chat 메시지
+ *     content 배열로 그대로 들어감
+ *
+ * body 형식 (디스패처가 Chat Completions 표준에 맞춰 보냄):
+ *   { model, messages, max_completion_tokens, response_format?, temperature? }
+ *
+ * 응답은 OpenAI 가 반환하는 그대로 (choices[0].message.content) 평탄화는 호출 측에서.
+ */
+export async function handleOpenAIResponses(body: any) {
+  const settings = getSettings();
+  const apiKey = settings.openai_api_key;
+  if (!apiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다.");
+  if (apiKey.startsWith("sk-ant-")) {
+    throw new Error("OpenAI 필드에 Anthropic 키가 입력되어 있습니다. Settings에서 올바른 OpenAI API Key를 입력하세요.");
+  }
+  const response = await fetchWithRetry(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    },
+    { label: "openai-chat", timeoutMs: 180_000, retries: 1 },
+  );
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error(`[openai-chat] HTTP ${response.status}:`, errText.slice(0, 500));
+    let errMsg = `OpenAI HTTP ${response.status}`;
+    try {
+      const parsed = JSON.parse(errText);
+      errMsg = parsed?.error?.message ?? errMsg;
+    } catch {}
+    throw new Error(errMsg);
+  }
+  return await response.json();
+}
+
 export async function handleEnhanceInpaintPrompt(body: any) {
   const settings = getSettings();
   ensureGoogleCredentials(settings);
@@ -266,8 +313,82 @@ export async function handleOpenaiImage(body: any) {
   const gptModel: string = body.gptModel ?? "gpt-image-2";
 
   if (body.mode === "style_transfer") {
-    const { sourceImageUrl, styleImageUrl, prompt, gptPrompt, imageSize, projectId, sceneNumber } = body;
+    // `model` mirrors ContiTab's top-bar `contiModel` selector so Style
+    // Transfer honours the same model knob as Generate / Regenerate / TR.
+    // When omitted or "nano-banana-2" we keep the legacy behaviour
+    // (NB2 first, GPT edits as silent fallback on NB2 outage). When
+    // "gpt" we skip NB2 entirely and run GPT as the primary generator.
+    const { sourceImageUrl, styleImageUrl, prompt, gptPrompt, imageSize, projectId, sceneNumber, model: stModel } = body;
     if (!sourceImageUrl || !prompt || !projectId || sceneNumber === undefined) return { error: "Missing required fields" };
+    // 아래 로그는 "GPT 선택했는데 NB2 로 도는 것 같다" 류 체감 버그의 교차확인용.
+    // 평소에도 매우 저렴하게 한 줄이라 유지한다. 아래 route 결정 로그 ([StyleTransfer] route)
+    // 와 함께 보면, 어떤 모델 값이 body 에 실려왔고 실제로 어떤 경로로 처리됐는지
+    // 1-스캔에 판별할 수 있다.
+    console.log("[StyleTransfer] stModel=", stModel, "imageSize=", imageSize, "scene=", sceneNumber);
+
+    // Shared GPT path — used as primary when stModel === "gpt", and as
+    // the fallback when NB2 (the default primary) fails.
+    //
+    // We route through `callGptVisionGenerate` (the proven `gpt-image-2`
+    // multi-image vision compose path used by Mood Ideation / ChangeAngle /
+    // regular Generate-with-GPT) instead of `callGptInpaint`. Reasons:
+    //
+    //   1. gpt-image-2 composes via `image[]` with NO mask. callGptInpaint
+    //      was built for gpt-image-1.5 inpaint (mask + `input_fidelity:high`)
+    //      and just happened to also work for image-1.5 reference edits.
+    //      With gpt-image-2 + null mask the edits endpoint rejects or
+    //      silently no-ops the request, which is the user-visible
+    //      "GPT image 2 로 스타일 변형이 안된다" symptom.
+    //   2. Mood Ideation already proves this exact shape works for
+    //      gpt-image-2: `image[0]` = canvas, `image[1..]` = references,
+    //      no mask, `input_fidelity` omitted. Reusing it keeps the two
+    //      gpt-image-2 paths in lockstep so a fix in one helper benefits
+    //      both.
+    //
+    // Source is placed at refUrls[0] so it acts as the canvas; the style
+    // ref follows at index 1 — the prompt explicitly addresses image[0]
+    // as "SOURCE SCENE" and image[1] as "STYLE REFERENCE" so order matters.
+    const runGpt = async (isFallback: boolean) => {
+      if (!openaiKey) throw new Error("OPENAI_API_KEY not set");
+      const refUrls = [sourceImageUrl, ...(styleImageUrl ? [styleImageUrl] : [])];
+      const imgBytes = await callGptVisionGenerate(
+        openaiKey,
+        gptPrompt ?? prompt,
+        imageSize ?? "1024x1536",
+        refUrls,
+        gptModel,
+      );
+      const suffix = isFallback ? "style-gpt-fallback" : "style-gpt";
+      const usedModel = isFallback ? `style-gpt-fallback:${gptModel}` : gptModel;
+      const filePath = await saveToStorage(
+        storagePath,
+        "contis",
+        projectId,
+        `scene_${sceneNumber}_${suffix}_${Date.now()}.png`,
+        imgBytes,
+      );
+      return { publicUrl: storageFileUrl(filePath), usedModel };
+    };
+
+    // GPT primary — user picked GPT explicitly. No NB2 attempt.
+    if (stModel === "gpt") {
+      console.log("[StyleTransfer] route=gpt-primary (NB2 skipped)", { gptModel });
+      try {
+        return await runGpt(false);
+      } catch (e) {
+        // Surface the underlying OpenAI error string (size mismatch,
+        // invalid_input_fidelity_model, key tier, etc.) so the renderer
+        // toast actually tells the user what to fix instead of just
+        // "Style transfer failed".
+        const detail = (e as Error)?.message ?? String(e);
+        console.error("[StyleTransfer] GPT primary failed:", detail);
+        return { error: `GPT style transfer failed: ${detail}` };
+      }
+    }
+
+    // NB2 primary (default / "nano-banana-2") — try Vertex first,
+    // fall back to GPT vision-generate on Vertex outage.
+    console.log("[StyleTransfer] route=nb2-primary", stModel === null || stModel === undefined ? "(stModel unset)" : `(stModel=${stModel})`);
     try {
       const imageUrls = [sourceImageUrl, ...(styleImageUrl ? [styleImageUrl] : [])];
       const aspect = sizeToNB2Aspect(imageSize ?? "1024x1536");
@@ -275,16 +396,41 @@ export async function handleOpenaiImage(body: any) {
       const filePath = await saveToStorage(storagePath, "contis", projectId, `scene_${sceneNumber}_style-nb2_${Date.now()}.png`, imgBuf);
       return { publicUrl: storageFileUrl(filePath), usedModel: "nano-banana-2" };
     } catch (e) { console.error("[StyleTransfer] NB2 failed:", (e as Error).message); }
+    console.log("[StyleTransfer] route=gpt-fallback (NB2 failed, trying GPT vision-generate)");
     try {
-      if (!openaiKey) throw new Error("OPENAI_API_KEY not set");
-      const srcBuf = await downloadImage(sourceImageUrl);
-      const imgBytes = await callGptInpaint(openaiKey, srcBuf.toString("base64"), null, gptPrompt ?? prompt, imageSize ?? "1024x1536", styleImageUrl ? [styleImageUrl] : [], gptModel);
-      const filePath = await saveToStorage(storagePath, "contis", projectId, `scene_${sceneNumber}_style-gpt_${Date.now()}.png`, imgBytes);
-      return { publicUrl: storageFileUrl(filePath), usedModel: `style-gpt-fallback:${gptModel}` };
-    } catch (e) { return { error: "NB2 및 GPT 폴백 모두 실패", detail: String(e) }; }
+      return await runGpt(true);
+    } catch (e) {
+      const detail = (e as Error)?.message ?? String(e);
+      console.error("[StyleTransfer] NB2+GPT both failed:", detail);
+      return { error: `Style transfer failed (NB2 and GPT both errored): ${detail}` };
+    }
   }
 
-  const { mode, prompt, imageBase64, maskBase64, sourceImageUrl, referenceImageUrls = [], projectId, sceneNumber, imageSize, size: sizeAlias, assetImageUrls = [], forceGpt = false, model, useNanoBanana = false, folder, nb2ImageSize } = body;
+  const { mode, prompt, imageBase64, maskBase64, sourceImageUrl, referenceImageUrls = [], projectId, sceneNumber, imageSize, size: sizeAlias, assetImageUrls = [], forceGpt = false, model, useNanoBanana = false, folder, nb2ImageSize, preferredAngleModel } = body as {
+    mode?: string;
+    prompt?: string;
+    imageBase64?: string;
+    maskBase64?: string;
+    sourceImageUrl?: string;
+    referenceImageUrls?: string[];
+    projectId?: string;
+    sceneNumber?: number;
+    imageSize?: string;
+    size?: string;
+    assetImageUrls?: string[];
+    forceGpt?: boolean;
+    model?: string;
+    useNanoBanana?: boolean;
+    folder?: string;
+    nb2ImageSize?: string;
+    /** ChangeAngle experiment toggle. When set to "gpt-image-2" the inpaint
+     *  route skips NB2 and asks OpenAI's vision-aware image model to render
+     *  a new angle while keeping the source as a reference. Default ("nb2"
+     *  or undefined) keeps the current NB2-primary behaviour. Kept off the
+     *  generic `model` param so it's opt-in and does not affect Inpaint /
+     *  Style Transfer / other flows that happen to hit the same handler. */
+    preferredAngleModel?: "nb2" | "gpt-image-2";
+  };
   // nb2ImageSize is the Vertex-side rendering resolution override ("1K" | "2K").
   // Defaults to "1K" inside callVertexNB2; the Contact Sheet path bumps it to
   // "2K" so each of the 9 post-split tiles has enough pixels to survive
@@ -325,11 +471,32 @@ export async function handleOpenaiImage(body: any) {
   // ── Inpaint 라우팅 ──
   //   · NB2 primary (마스크 유무 무관). 브러시 영역은 클라이언트에서 만든 "마스크 오버레이" 레퍼런스로 NB2 에 지시.
   //   · NB2 실패 or sourceImageUrl 없음 → GPT edits 폴백 (이때만 maskBase64 를 실제 인페인팅 마스크로 사용).
+  //   · preferredAngleModel === "gpt-image-2" (ChangeAngle A/B) → NB2 bypass,
+  //     직접 OpenAI vision-edits 로 라우트. 실패 시 폴백 없이 에러를 surface —
+  //     A/B 데이터가 NB2 에 자동으로 reserve 되지 않도록.
   if (mode === "inpaint") {
     const hasMask = !!maskBase64;
-    console.log("[inpaint] routing:", { hasMask, useNanoBanana, forceGpt, refCount: referenceImageUrls.length });
+    console.log("[inpaint] routing:", { hasMask, useNanoBanana, forceGpt, preferredAngleModel, refCount: referenceImageUrls.length });
 
-    if (useNanoBanana && sourceImageUrl) {
+    if (preferredAngleModel === "gpt-image-2" && sourceImageUrl) {
+      // ChangeAngle dedicated path: source image stays the primary reference,
+      // tagged assets and mask overlay come after. gpt-image-2 sees all of
+      // them via /v1/images/edits; the prompt (built client-side from
+      // yaw/pitch/zoom + NL hint) is what drives the actual angle change.
+      if (!openaiKey) {
+        return { error: "OPENAI_API_KEY is required for gpt-image-2 ChangeAngle", usedModel: "inpaint-failed" };
+      }
+      const refs = [sourceImageUrl, ...referenceImageUrls].filter(Boolean);
+      try {
+        imageBytes = await callGptVisionGenerate(openaiKey, prompt, size, refs, "gpt-image-2");
+        suffix = hasMask ? "angle-gpt2-masked" : "angle-gpt2";
+      } catch (e) {
+        // Intentionally no NB2 fallback here — we want the error to be
+        // loud so the A/B sample isn't silently backfilled by NB2.
+        console.error("[inpaint] gpt-image-2 ChangeAngle failed:", (e as Error).message);
+        return { error: `gpt-image-2 ChangeAngle failed: ${(e as Error).message}`, usedModel: "angle-gpt2-failed" };
+      }
+    } else if (useNanoBanana && sourceImageUrl) {
       // NB2 primary — 원본 + (브러시 있으면) 마스크 오버레이 + 태그 에셋 refs
       try {
         const nbUrls = [sourceImageUrl, ...referenceImageUrls].filter(Boolean);
@@ -591,7 +758,13 @@ async function callGptGenerations(
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
     },
-    { label: `openai-generations:${model}`, timeoutMs: 180_000, retries: 1 },
+    // gpt-image-2 generations are 1–2min per call and OpenAI returns
+    // transient 500/503 (with a `req_*` id) often enough that 1 retry
+    // wasn't enough — users were seeing the raw OpenAI 500 toast on
+    // single-scene Generate. 3 attempts with a longer base backoff
+    // covers the typical recovery window without ballooning total
+    // wall-clock for terminal failures.
+    { label: `openai-generations:${model}`, timeoutMs: 180_000, retries: 3, backoffMs: 2000 },
   );
   if (!res.ok) {
     const errBody = (await res.json().catch(() => ({}))) as any;
@@ -680,7 +853,9 @@ async function callGptVisionGenerate(
   const res = await fetchWithRetry(
     "https://api.openai.com/v1/images/edits",
     { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: formData },
-    { label: `openai-vision-generate:${model}`, timeoutMs: 180_000, retries: 1 },
+    // See callGptGenerations comment — same long-tail 500/503 behavior
+    // on /v1/images/edits with gpt-image-2 multi-image vision compose.
+    { label: `openai-vision-generate:${model}`, timeoutMs: 180_000, retries: 3, backoffMs: 2000 },
   );
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as any;
@@ -713,7 +888,9 @@ async function callGptInpaint(
   const res = await fetchWithRetry(
     "https://api.openai.com/v1/images/edits",
     { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: formData },
-    { label: `openai-edits:${model}`, timeoutMs: 180_000, retries: 1 },
+    // See callGptGenerations comment — gpt-image-2 inpaint shares the
+    // same /v1/images/edits backend that returns flaky 500/503s.
+    { label: `openai-edits:${model}`, timeoutMs: 180_000, retries: 3, backoffMs: 2000 },
   );
   if (!res.ok) {
     const err = (await res.json()) as any;
@@ -747,10 +924,32 @@ function sizeToNB2Aspect(size: string): string {
   return "9:16";
 }
 
+/** Strip characters Windows forbids in filenames.
+ *
+ *  Why this exists:
+ *    Our GPT-path suffix is built as `gen-gpt:${gptModel}` → colons end up
+ *    in filenames like `scene-1-gen-gpt:gpt-image-1.5-1776828531162.png`.
+ *    On Windows NTFS, `:` is the Alternate-Data-Stream delimiter, so
+ *    `fs.writeFile` either silently writes the stream (no primary file on
+ *    disk) or throws EINVAL depending on the node build. Either way the
+ *    later GET `/storage/file/...png` 404s and the UI shows empty cards
+ *    (Mood Ideation, Sketches, etc.).
+ *
+ *  Forbidden on Windows: < > : " / \ | ? *  plus the control range 0x00-0x1F.
+ *  We normalize them all to `-` so existing suffix semantics stay readable
+ *  (`gen-gpt-gpt-image-1.5` instead of `gen-gpt:gpt-image-1.5`). Callers
+ *  that build filenames with purposely meaningful colons should migrate to
+ *  a different separator if they want the info preserved. */
+function sanitizeFilename(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-");
+}
+
 async function saveToStorage(basePath: string, bucket: string, projectId: string, fileName: string, data: Buffer): Promise<string> {
   const dir = path.join(basePath, bucket, projectId);
   await fs.promises.mkdir(dir, { recursive: true });
-  const fullPath = path.join(dir, fileName);
+  const safeName = sanitizeFilename(fileName);
+  const fullPath = path.join(dir, safeName);
   await fs.promises.writeFile(fullPath, data);
   return fullPath;
 }

@@ -1,8 +1,12 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import type { VideoFormat } from "@/lib/conti";
 import { supabase } from "@/lib/supabase";
-import { deleteStoredFiles } from "@/lib/storageUtils";
-import { callClaude } from "@/lib/claude";
+import { deleteStoredFileIfUnreferenced } from "@/lib/storageUtils";
+import { callLLM } from "@/lib/llm";
+import { getModel } from "@/lib/modelPreference";
+import { getModelMeta } from "@/lib/modelCatalog";
+import { getSettingsCached, ensureSettingsLoaded } from "@/lib/settingsCache";
+import { pruneHistoryForBudget } from "@/lib/historyBudget";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
@@ -60,7 +64,9 @@ import {
   _pendingScenesByProject,
   loadPendingFromLS,
   savePendingToLS,
-  getMoodGen,
+  getMoodGenBatches,
+  collectAllInFlightSkeletonIds,
+  lookupArrivedUrlForSkeleton,
   subscribeMoodGen,
   getChatGen,
   setChatGen,
@@ -101,7 +107,7 @@ interface Props {
   onSwitchToContiTab?: () => void;
 }
 
-export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onSwitchToContiTab }: Props) => {
+export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onSwitchToContiTab }: Props) => {
   const { toast } = useToast();
   const isMobile = useIsMobile();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -186,36 +192,41 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
     moodImagesRef.current = moodImages;
   }, [moodImages]);
 
-  // ─── In-flight mood generation 동기화 ───
-  // 탭 이동으로 AgentTab 이 unmount 된 동안 진행되던 generation 의 스켈레톤 + 도착한 URL 을
-  // 모듈 store 에서 읽어와 moodImages 에 항상 반영해 둔다.
+  // ─── In-flight mood generation 동기화 (다중 배치 대응) ───
+  // 탭 이동으로 AgentTab 이 unmount → remount 된 동안 진행되던 모든 배치의
+  // 스켈레톤 + 도착 URL 을 모듈 store 에서 읽어와 moodImages 에 반영한다.
+  //
+  // 한 프로젝트에 여러 배치가 동시에 떠 있을 수 있으므로:
+  //   1) 모든 배치의 skeleton ID 합집합을 구해 placeholder 가 누락된 게 있으면 앞에 끼워넣고,
+  //   2) 각 skeleton ID 의 url 을 해당 배치의 arrivedUrls 에서 룩업해 in-place 갱신한다.
+  // 위치(앞쪽) 는 이미 handleGenerate 의 prepend 로 결정되므로 여기서는 재정렬하지 않는다.
   useEffect(() => {
     const sync = () => {
-      const gen = getMoodGen(projectId);
-      if (!gen?.promise || gen.skeletonIds.length === 0) return;
-      const skelSet = new Set(gen.skeletonIds);
+      const allSkelIds = collectAllInFlightSkeletonIds(projectId);
+      if (allSkelIds.size === 0) return;
       setMoodImages((prev) => {
-        const existingNonSkel = prev.filter((img) => !skelSet.has(img.id));
-        const existingSkelById = new Map(prev.filter((img) => skelSet.has(img.id)).map((img) => [img.id, img]));
-        // skeletonIds 순서대로 placeholder 재구성, 도착한 URL 적용
-        const reconstructed: MoodImage[] = gen.skeletonIds.map((id, i) => {
-          const arrived = gen.arrivedUrls[i] ?? null;
-          const exist = existingSkelById.get(id);
-          if (exist && exist.url === arrived) return exist;
-          return (
-            exist
-              ? { ...exist, url: arrived }
-              : {
-                  id,
-                  url: arrived,
-                  liked: false,
-                  sceneRef: null,
-                  comment: "",
-                  createdAt: new Date().toISOString(),
-                }
-          );
+        const presentIds = new Set(prev.map((img) => img.id));
+        // 1) 누락된 skeleton placeholder 를 앞에 보충 (배치 시작 직후 remount 된 경우 대비).
+        const missingSkeletons: MoodImage[] = [];
+        for (const id of allSkelIds) {
+          if (presentIds.has(id)) continue;
+          missingSkeletons.push({
+            id,
+            url: lookupArrivedUrlForSkeleton(projectId, id),
+            liked: false,
+            sceneRef: null,
+            comment: "",
+            createdAt: new Date().toISOString(),
+          });
+        }
+        // 2) 기존 항목 중 skeleton 인 것은 arrivedUrl 로 in-place 갱신.
+        const updated = prev.map((img) => {
+          if (!allSkelIds.has(img.id)) return img;
+          const arrived = lookupArrivedUrlForSkeleton(projectId, img.id);
+          if (img.url === arrived) return img;
+          return { ...img, url: arrived };
         });
-        return [...reconstructed, ...existingNonSkel];
+        return missingSkeletons.length > 0 ? [...missingSkeletons, ...updated] : updated;
       });
     };
     sync();
@@ -374,19 +385,29 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
     if ((data as any)?.lang) setBriefLang((data as any).lang as "ko" | "en");
     if ((data as any)?.mood_image_urls) {
       const dbImages = toMoodImages((data as any).mood_image_urls as (string | MoodImage)[]);
-      // In-flight generation 의 skeleton placeholder 가 있으면 앞에 보존
-      const gen = getMoodGen(projectId);
-      if (gen?.promise && gen.skeletonIds.length > 0) {
-        const skelIdSet = new Set(gen.skeletonIds);
-        const dbWithoutSkel = dbImages.filter((img) => !skelIdSet.has(img.id));
-        const skeletons: MoodImage[] = gen.skeletonIds.map((id, i) => ({
-          id,
-          url: gen.arrivedUrls[i] ?? null,
-          liked: false,
-          sceneRef: null,
-          comment: "",
-          createdAt: new Date().toISOString(),
-        }));
+      // In-flight generation 의 skeleton placeholder 가 있으면 모두 앞에 보존 (다중 배치 대응).
+      // 각 배치의 skeleton 순서를 유지하되, 배치 자체는 시작 순서대로(오래된 → 최신) 나열한다.
+      // handleGenerate 가 새 배치를 prepend 하므로 시각적으로는 최신 배치가 위쪽이지만,
+      // remount 시 한 번에 재구성할 때는 시작 순서를 그대로 따라도 사용자 경험상 큰 차이가 없다.
+      const batches = getMoodGenBatches(projectId).filter((b) => b.promise !== null);
+      if (batches.length > 0) {
+        const allSkelIdSet = new Set<string>();
+        const skeletons: MoodImage[] = [];
+        for (const b of batches) {
+          for (let i = 0; i < b.skeletonIds.length; i++) {
+            const id = b.skeletonIds[i];
+            allSkelIdSet.add(id);
+            skeletons.push({
+              id,
+              url: b.arrivedUrls[i] ?? null,
+              liked: false,
+              sceneRef: null,
+              comment: "",
+              createdAt: new Date().toISOString(),
+            });
+          }
+        }
+        const dbWithoutSkel = dbImages.filter((img) => !allSkelIdSet.has(img.id));
         setMoodImages([...skeletons, ...dbWithoutSkel]);
       } else {
         setMoodImages(dbImages);
@@ -463,23 +484,23 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
     async (ids: string[]) => {
       const idsSet = new Set(ids);
       const connectedSceneIds: string[] = [];
-      // 삭제 대상의 파일 URL 을 수집 (씬에 현재 등록된 상태면 그 URL 은
-      // 씬 conti 이미지로 재사용되는 중이므로 파일은 남겨둔다).
-      const urlsToDelete: string[] = [];
+      // 삭제 대상의 파일 URL 후보 — 실제 디스크 삭제는 뒤에서 프로젝트
+      // 전반(`scene.conti_image_url`, `conti_image_history`, `sketches`,
+      // `scene_versions.scenes` 스냅샷 등) 을 훑는 중앙 가드로 한번 더 검사한다.
+      // 기존 코드는 "현재 live `conti_image_url` 과 매치되면 씬 쪽이 처리"
+      // 로만 가정했는데, Mood → 씬으로 올린 이미지를 씬에서 Regenerate 하면
+      // 그 URL 은 live 에서 빠지고 `conti_image_history` 로 이동한다. 그
+      // 상태에서 Mood 쪽 삭제를 하면 history 에 남은 URL 의 파일이 지워져
+      // HistorySheet 엑박이 되는 회귀를 유발했다 → 중앙 가드로 차단.
+      const candidateUrls: string[] = [];
       for (const id of ids) {
         const img = moodImages.find((i) => i.id === id);
         if (!img) continue;
-        let connectedToScene = false;
         if (img.sceneRef !== null && img.sceneRef !== undefined) {
           const scene = scenes.find((s) => s.scene_number === img.sceneRef && s.conti_image_url === img.url);
-          if (scene) {
-            connectedSceneIds.push(scene.id);
-            connectedToScene = true;
-          }
+          if (scene) connectedSceneIds.push(scene.id);
         }
-        // Mood 배열에서만 빠지는 경우 (씬에도 없는 고아 mood 파일) 만
-        // 디스크 삭제. 씬이 아직 참조중이면 씬 쪽 삭제 경로에서 처리.
-        if (!connectedToScene && img.url) urlsToDelete.push(img.url);
+        if (img.url) candidateUrls.push(img.url);
       }
       if (connectedSceneIds.length > 0) {
         await Promise.all(
@@ -489,28 +510,33 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
         );
         setScenes((prev) => prev.map((s) => (connectedSceneIds.includes(s.id) ? { ...s, conti_image_url: null } : s)));
       }
-      setMoodImages((prev) => {
-        const next = prev.filter((i) => !idsSet.has(i.id));
-        saveMoodImagesToDB(next);
-        return next;
-      });
-      // DB 반영 후 실제 파일 삭제. 실패해도 orphan sweep 이 수거함.
-      if (urlsToDelete.length > 0) await deleteStoredFiles(urlsToDelete);
+      const nextMood = moodImages.filter((i) => !idsSet.has(i.id));
+      setMoodImages(nextMood);
+      // DB (briefs.mood_image_urls) 업데이트를 먼저 await 한 뒤 참조 검사를
+      // 돌려야 "방금 뺀 자기 자신" 이 false-positive 로 잡혀 파일이
+      // orphan 으로 남는 걸 피할 수 있다.
+      await saveMoodImagesToDB(nextMood);
+      await Promise.all(
+        candidateUrls.map((u) => deleteStoredFileIfUnreferenced(projectId, u)),
+      );
     },
-    [moodImages, scenes, saveMoodImagesToDB],
+    [moodImages, scenes, saveMoodImagesToDB, projectId],
   );
 
   const clearScenesAfterSend = useCallback(async () => {
     await supabase.from("scenes").delete().eq("project_id", projectId).eq("source", "agent");
     setScenes([]);
     setPendingScenes([]);
-    const latest = moodImagesRef.current;
-    if (latest.some((img) => img.sceneRef !== null)) {
-      const cleared = latest.map((img) => ({ ...img, sceneRef: null }));
-      setMoodImages(cleared);
-      await saveMoodImagesToDB(cleared);
-    }
-  }, [projectId, setPendingScenes, saveMoodImagesToDB]);
+    // ── Preserve mood ↔ scene links ──
+    // `sceneRef` on a MoodImage is a **scene_number**, not a scene row id
+    // (see handleAttachMoodToScene). When we Send to Conti, the receiving
+    // end re-inserts scenes with the same `scene_number` ordering, so the
+    // number-based link stays meaningful. Previously this function nulled
+    // out every `sceneRef`, which meant that coming back to Ideation after
+    // sending (even via `Load Version`) showed mood images unattached to
+    // any scene card — the user had to manually drop them onto scenes
+    // again. Leaving `sceneRef` as-is keeps that UX intact.
+  }, [projectId, setPendingScenes]);
 
   const fetchVersions = useCallback(async () => {
     const { data } = await supabase
@@ -524,7 +550,12 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
 
   const handleLoadVersion = useCallback(
     async (versionScenes: any[]) => {
-      await supabase.from("scenes").delete().eq("project_id", projectId);
+      // Only wipe agent-sourced scenes. Conti-sourced rows (the ones shown in
+      // the Conti tab) must survive because the user is re-populating the
+      // Ideation tab with a snapshot, not replacing the whole project.
+      // Without the `source=agent` filter, loading a version here used to
+      // delete every scene the Conti tab was actively editing.
+      await supabase.from("scenes").delete().eq("project_id", projectId).eq("source", "agent");
       const storyScenes = versionScenes.filter((s: any) => s.is_transition !== true && !s.transition_type);
       const toInsert = storyScenes.map((s: any, i: number) => ({
         project_id: projectId,
@@ -662,9 +693,6 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
         setIsLoading(true);
         setChatGen(projectId, { inFlight: true, startedAt: Date.now() });
         try {
-          const briefCtx = buildBriefContextString(analysis);
-          const autoPrompt = `[브리프 분석 결과]\n${briefCtx}\n\n이 브리프를 바탕으로 방향성이 다른 시놉시스 2~3안을 storylines 블록으로 제안해주세요. 아직 씬은 짜지 마세요.`;
-          await supabase.from("chat_logs").insert({ project_id: projectId, role: "user", content: autoPrompt });
           const { data: briefRow } = await supabase
             .from("briefs")
             .select("lang")
@@ -673,13 +701,26 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
             .limit(1)
             .single();
           const initLang = ((briefRow as any)?.lang ?? "ko") as "ko" | "en";
-          const data = await callClaude({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 4096,
-            system: buildSystemPrompt(videoFormat, assets ?? undefined, analysis, initLang),
+          const briefCtx = buildBriefContextString(analysis, initLang);
+          const prefix = initLang === "en" ? "[Brief Analysis]" : "[브리프 분석 결과]";
+          const tail =
+            initLang === "en"
+              ? "\n\nBased on this brief, propose 2–3 synopsis directions in a storylines block. Do not write scenes yet."
+              : "\n\n이 브리프를 바탕으로 방향성이 다른 시놉시스 2~3안을 storylines 블록으로 제안해주세요. 아직 씬은 짜지 마세요.";
+          const autoPrompt = `${prefix}\n${briefCtx}${tail}`;
+          await supabase.from("chat_logs").insert({ project_id: projectId, role: "user", content: autoPrompt });
+          await ensureSettingsLoaded();
+          const agentModelId = getModel("agent");
+          const agentMeta = getModelMeta(agentModelId, getSettingsCached());
+          const llmResult = await callLLM({
+            model: agentModelId,
+            // OpenAI 1M ctx 모델 등 메타가 있으면 카탈로그 기준 max_tokens 사용,
+            // 없으면 callLLM 이 카탈로그 디폴트로 폴백.
+            max_tokens: agentMeta?.maxOutputTokens ?? 4096,
+            system: buildSystemPrompt(videoFormat, assets ?? undefined, analysis, initLang, agentMeta?.provider),
             messages: [{ role: "user", content: autoPrompt }],
           });
-          const msg = data.content[0].text;
+          const msg = llmResult.text;
           await supabase.from("chat_logs").insert({ project_id: projectId, role: "assistant", content: msg });
           const extracted = extractScenesFromText(msg);
           if (extracted.length > 0) {
@@ -896,20 +937,39 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
         }
         return { role: c.role, content: c.content };
       });
-      if (!history.length && (latestAnalysis ?? briefAnalysis))
+      if (!history.length && (latestAnalysis ?? briefAnalysis)) {
+        const seedPrefix = briefLang === "en" ? "[Brief Analysis]" : "[브리프 분석 결과]";
         history.push({
           role: "user" as const,
-          content: `[브리프 분석 결과]\n${buildBriefContextString(latestAnalysis ?? briefAnalysis!)}`,
+          content: `${seedPrefix}\n${buildBriefContextString(latestAnalysis ?? briefAnalysis!, briefLang)}`,
         });
+      }
       history.push({ role: "user" as const, content: userApiContent });
-      const data = await callClaude({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 4096,
-        // ✅ 최신 briefAnalysis 사용, 없으면 state 값 폴백
-        system: buildSystemPrompt(videoFormat, latestAssets ?? undefined, latestAnalysis ?? briefAnalysis, briefLang),
-        messages: history,
+      await ensureSettingsLoaded();
+      const agentModelId = getModel("agent");
+      const agentMeta = getModelMeta(agentModelId, getSettingsCached());
+      const systemPrompt = buildSystemPrompt(
+        videoFormat,
+        latestAssets ?? undefined,
+        latestAnalysis ?? briefAnalysis,
+        briefLang,
+        agentMeta?.provider,
+      );
+      // ★ 모델 컨텍스트 윈도우에 맞춰 히스토리 소프트 트림.
+      //   Claude Sonnet 4=200k, GPT-5.4=400k, GPT-5.5=1M. 작은 모델일수록
+      //   오래된 메시지가 먼저 잘려 나가고, 큰 모델은 사실상 트림 없이 통과.
+      const prunedHistory = pruneHistoryForBudget(history, {
+        contextWindowTokens: agentMeta?.contextWindow ?? 200_000,
+        reserveOutputTokens: agentMeta?.maxOutputTokens ?? 4096,
+        systemPromptChars: systemPrompt.length,
       });
-      const assistantContent = data.content[0].text;
+      const llmResult = await callLLM({
+        model: agentModelId,
+        max_tokens: agentMeta?.maxOutputTokens ?? 4096,
+        system: systemPrompt,
+        messages: prunedHistory,
+      });
+      const assistantContent = llmResult.text;
       await supabase.from("chat_logs").insert({ project_id: projectId, role: "assistant", content: assistantContent });
       if (mountedRef.current) {
         setChatHistory((prev) => [
@@ -1157,7 +1217,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
         {!isMobile && (
           <button
             onClick={() => setChatCollapsed(true)}
-            title="채팅 접기"
+            title="Collapse chat"
             style={{
               width: 24,
               height: 24,
@@ -1397,7 +1457,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
         {!isMobile && (
           <button
             onClick={() => setSplitView((v) => !v)}
-            title={splitView ? "단일 보기로 전환" : "Scene + Mood 동시 보기"}
+            title={splitView ? "Switch to single view" : "Show Scene + Mood side by side"}
             aria-pressed={splitView}
             style={{
               display: "inline-flex",
@@ -1469,7 +1529,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
                 onClick={() => setShowImages((v) => !v)}
                 title={
                   panelTooNarrowForImage
-                    ? "패널 폭이 좁아 이미지 컬럼이 자동으로 접혀 있습니다"
+                    ? "Image column is auto-collapsed because the panel is too narrow"
                     : showImages
                       ? "Hide images"
                       : "Show images"
@@ -1614,7 +1674,40 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
               <EmptyState
                 icon={<Clapperboard className="w-10 h-10" />}
                 title="No scenes yet"
-                description="Chat with Agent to start building scenes"
+                // Empty-state copy after the plan's Phase 3 Send-to-Conti fix:
+                //   · Users arriving here a second time (after Send to Conti
+                //     cleared the drafts) should know that their story is
+                //     still retrievable via Load Version.
+                //   · Sketches now live in Conti per-scene, so we explicitly
+                //     redirect users who came looking for mood/composition
+                //     iteration to the Conti tab instead of telling them to
+                //     re-chat with Agent from scratch.
+                description="Chat with Agent to start building scenes. If you already sent a version to Conti, use Load Version to bring it back. Scene sketches live per-scene inside the Conti tab now."
+                action={
+                  versions.length > 0 ? (
+                    <button
+                      onClick={async () => {
+                        await fetchVersions();
+                        setShowLoadModal(true);
+                      }}
+                      className="inline-flex items-center gap-1.5 h-8 px-3 rounded-none text-[11px] font-semibold transition-colors"
+                      style={{
+                        border: `0.5px solid ${KR}`,
+                        background: "transparent",
+                        color: KR,
+                      }}
+                      onMouseEnter={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = "rgba(249,66,58,0.08)";
+                      }}
+                      onMouseLeave={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = "transparent";
+                      }}
+                    >
+                      <RotateCcw style={{ width: 12, height: 12 }} />
+                      Load Version
+                    </button>
+                  ) : undefined
+                }
                 className="h-full"
               />
             ) : scenes.length > 0 ? (
@@ -1921,7 +2014,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       {/* 상단: 우측 패널 탭 바(60px) 와 높이 정렬 */}
       <button
         onClick={() => setChatCollapsed(false)}
-        title="채팅 펼치기"
+        title="Expand chat"
         style={{
           width: "100%",
           height: 60,
@@ -1949,7 +2042,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "ko", onS
       {/* 중단: 채팅 히스토리 인디케이터 — 클릭 시 채팅 펼치기 */}
       <button
         onClick={() => setChatCollapsed(false)}
-        title="채팅 펼치기"
+        title="Expand chat"
         style={{
           flex: 1,
           width: "100%",

@@ -18,7 +18,13 @@ import {
   ASSET_ICON,
 } from "./agentTypes";
 
-/* ━━━━━ TagChip ━━━━━ */
+/* ━━━━━ TagChip ━━━━━
+ * 콘티탭 씬카드(`contiInternals.TagChip`)와 동일 스타일로 통일:
+ *   · 대문자 강제(textTransform: uppercase) 제거 — 에셋 등록 시 대소문자
+ *     가 리졸버에 의미를 가지므로(@BG_medium ≠ @BG_MEDIUM) 그대로 노출.
+ *   · fontWeight 600, 0.5px border, borderRadius 2, 좁은 padding 등
+ *     씬카드 칩과 동일한 타이포/테두리/간격을 맞춤.
+ *   · monospace 폰트 스택도 씬카드와 동일하게 사용. */
 export const TagChip = React.memo(({ name, assetType }: { name: string; assetType: string }) => {
   const cfg = ACFG[assetType] || ACFG.character;
   const ico = ASSET_ICON[assetType] || ASSET_ICON.character;
@@ -29,15 +35,14 @@ export const TagChip = React.memo(({ name, assetType }: { name: string; assetTyp
         alignItems: "center",
         gap: 3,
         fontSize: 9,
-        fontWeight: 700,
-        fontFamily: "monospace",
-        textTransform: "uppercase" as const,
+        fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontWeight: 600,
         letterSpacing: "0.04em",
-        padding: "1px 6px 1px 5px",
-        borderRadius: 0,
+        padding: "1px 6px 1px 4px",
+        borderRadius: 2,
         background: cfg.bg,
         color: cfg.color,
-        border: `1px solid ${cfg.bd}`,
+        border: `0.5px solid ${cfg.bd}`,
         verticalAlign: "middle",
         lineHeight: 1,
         position: "relative",
@@ -45,6 +50,19 @@ export const TagChip = React.memo(({ name, assetType }: { name: string; assetTyp
         margin: "0 1px",
       }}
     >
+      <span
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          width: 0,
+          height: 0,
+          overflow: "hidden",
+          opacity: 0,
+          pointerEvents: "none",
+        }}
+      >
+        @
+      </span>
       <svg
         width={9}
         height={9}

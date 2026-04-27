@@ -1,43 +1,28 @@
 /**
  * ChangeAngleModal — Interactive camera-angle change controls.
  *
- * 기술적 제약:
- *   NB2(Vertex gemini-3.1-flash-image-preview) 는 숫자 파라미터(pitch/yaw/zoom) 를 직접 받지 못하고
- *   텍스트 프롬프트만 받는다. 그래서 구면 좌표와 슬라이더 값들을 자연어 서술자로 매핑(yaw/pitch/zoom
- *   descriptors)해서 프롬프트에 주입하는 방식으로 카메라 각도/거리를 제어한다.
+ * Backend model is fixed to GPT Image 2 (OpenAI vision-edits route, see
+ * `[electron/api-handlers.ts](preflow-app/electron/api-handlers.ts)`
+ * `preferredAngleModel === "gpt-image-2"` branch). GPT Image 2 reconstructs
+ * full 3D camera moves from a single reference well enough that we expose
+ * the entire orbit — including back, profile, top-down and worm's-eye —
+ * via the sphere/sliders/preset chips below.
  *
- *   중요: 극단 각도(뒤통수/바닥/천장)는 원본에 없는 영역을 모델이 상상해 채우므로 정체성이 흔들릴 수 있다.
- *         → 재롤(Apply 를 다시 눌러 새 이미지 얻기) 을 전제로 UX 를 설계.
- *
- * 컨트롤:
- *   - Sphere pad (yaw + pitch): 구면 위 점을 드래그로 돌림.
- *       • yaw:   -180 ~ +180 (좌/우, ±180 = 뒤)
- *       • pitch: -90  ~ +90  (−: low-angle 올려다봄 / +: high-angle 내려다봄)
- *       • 점이 앞 반구(z≥0) 면 solid, 뒤 반구(z<0) 면 점선 링.
- *   - Zoom 슬라이더: -100 ~ +100. 음수 = pull back(dolly-out), 양수 = push in(dolly-in).
- *       프롬프트는 "crop zoom" 이 아니라 "physical camera dolly" 로 명시해 배경까지 함께 reframe 되게 한다.
- *   - Additional notes: 자유 텍스트.
- *
- * 파이프라인: RelightModal 과 동일한 NB2 경로 재사용 (mask 없음).
- *   supabase.functions.invoke("openai-image", {
- *     mode: "inpaint",
- *     useNanoBanana: true,
- *     sourceImageUrl, referenceImageUrls: [],
- *     prompt, projectId, sceneNumber, imageSize,
- *   })
+ * Controls:
+ *   - Sphere pad (yaw + pitch): drag a dot around a unit sphere.
+ *       • yaw   -180 ~ +180  (±180 = directly behind subject)
+ *       • pitch -90  ~ +90   (−: low-angle / +: high-angle)
+ *       • Front hemisphere = solid dot, back hemisphere = dashed ring.
+ *   - Zoom slider: -100 ~ +100, prompt-rendered as a physical camera dolly
+ *     so the whole frame reframes (not a crop).
+ *   - Additional notes: free text appended verbatim.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Move3d, RotateCcw, X } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { Move3d, RotateCcw, X } from "lucide-react";
 import type { Scene, Asset } from "./contiTypes";
 import { IMAGE_SIZE_MAP } from "@/lib/conti";
-import {
-  buildAdvancedChainPrompt,
-  EMOTION_CHIPS,
-  getEmotion,
-  type EmotionChip,
-} from "@/lib/cameraLibrary";
+import { buildAdvancedChainPrompt } from "@/lib/cameraLibrary";
 import { buildSubjectDescriptor } from "@/lib/subjectDescriptor";
 
 type VideoFormat = keyof typeof IMAGE_SIZE_MAP;
@@ -61,29 +46,17 @@ const DEFAULT_CONFIG: ChangeAngleConfig = {
   customText: "",
 };
 
-/* ━━━ Safe range ━━━
- *
- * NB2(Gemini 3.1 Flash Image)는 reference 이미지로부터 진짜 3D 카메라 이동을 재구성하는
- * 능력이 없다. 극단 각도(±90° yaw, ±90° pitch, 대형 dolly)에서는 배경은 그대로 둔 채
- * 피사체만 2D 회전시키는 safe-fallback 으로 빠지는 빈도가 압도적으로 높다.
- *
- * 그래서 UI 레벨에서 "이 모델이 실제로 잘 해내는 범위" 로 clamp 한다. 이 범위 내에서는
- * NB2 가 꽤 납득할 만한 reframing 을 해준다:
- *   - yaw:    ±60°  (front, slight off, three-quarter 까지)
- *   - pitch:  ±45°  (slight ~ moderate high/low angle)
- *   - zoom:   ±60%  (moderate push-in / pull-back)
- *
- * Back / Top / Bottom / 극단 orbit 은 fal.ai Qwen Multi-Angle LoRA 경로가 붙기 전까지
- * 숨긴다. 플랜 문서의 P1-C fallback 경로.
- */
-const YAW_MAX = 60;
-const PITCH_MAX = 45;
-const ZOOM_MAX = 60;
+/* Full orbit range. GPT Image 2 handles back / overhead / worm's-eye
+ * acceptably from a single reference, so the modal opens up the whole
+ * sphere and lets users go anywhere with one drag or one preset click. */
+const YAW_MAX = 180;
+const PITCH_MAX = 90;
+const ZOOM_MAX = 100;
 const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 
-/* Orbit preset chips — sphere 드래그로 가기 번거로운 각도를 원클릭 스냅.
- * 클릭 시 yaw, pitch 를 한 번에 설정(zoom 은 건드리지 않음).
- * 모든 preset 은 위 safe range 안쪽. */
+/* Orbit preset chips — one-click snaps for the angles that are awkward to
+ * land precisely with sphere drag (profiles, full back, overhead, etc.).
+ * Click sets yaw + pitch only; zoom stays where the user left it. */
 interface OrbitPreset {
   id: string;
   label: string;
@@ -91,42 +64,30 @@ interface OrbitPreset {
   pitch: number;
 }
 const ORBIT_PRESETS: OrbitPreset[] = [
-  { id: "front", label: "Front", yaw: 0, pitch: 0 },
-  { id: "l45", label: "L 45°", yaw: -45, pitch: 0 },
-  { id: "r45", label: "R 45°", yaw: 45, pitch: 0 },
-  { id: "slight_high", label: "Slight High", yaw: 0, pitch: 25 },
-  { id: "slight_low", label: "Slight Low", yaw: 0, pitch: -25 },
-  { id: "high_3q_l", label: "L 3/4 High", yaw: -35, pitch: 20 },
-  { id: "high_3q_r", label: "R 3/4 High", yaw: 35, pitch: 20 },
+  { id: "front",     label: "Front",     yaw: 0,    pitch: 0   },
+  { id: "l45",       label: "L 3/4",     yaw: -45,  pitch: 0   },
+  { id: "r45",       label: "R 3/4",     yaw: 45,   pitch: 0   },
+  { id: "profile_l", label: "L Profile", yaw: -90,  pitch: 0   },
+  { id: "profile_r", label: "R Profile", yaw: 90,   pitch: 0   },
+  { id: "back",      label: "Back",      yaw: 180,  pitch: 0   },
+  { id: "high",      label: "High",      yaw: 0,    pitch: 30  },
+  { id: "low",       label: "Low",       yaw: 0,    pitch: -30 },
+  { id: "overhead",  label: "Overhead",  yaw: 0,    pitch: 85  },
 ];
 
 /* ━━━ Prompt Construction ━━━
  *
- * 전략 (Gemini 3.1 Flash Image / NB2 기준, v3):
+ * GPT Image 2 takes a single declarative camera-position phrase and a
+ * preserve list. We map the (yaw, pitch, zoom) sliders to short natural
+ * language clauses and hand them to `buildAdvancedChainPrompt`, which
+ * leads with "Re-photograph the EXACT SAME scene…" and appends a strict
+ * preservation block so identity / costume / set / lighting hold.
  *
- *   1) NB2 는 Gemini 계열이라 Stable Diffusion 식 (keyword:weight) 문법을 네이티브로 인식하지
- *      않는다. 잘못된 정보였고 앞 버전에서 빼버린다.
- *
- *   2) Gemini 는 "명령문이 맨 앞" + "짧고 구조적" 일 때 가장 안정적. RelightModal 이 잘 되는 이유도
- *      첫 문장이 "Re-light the input image while strictly preserving ..." 처럼 동사+대상+제약 순
- *      이기 때문. Change Angle 도 동일 패턴을 따르자:
- *
- *          "Re-photograph the EXACT SAME scene as the reference image from a different
- *           camera position. <한 줄 camera position 설명>. Do not regenerate the background,
- *           do not change clothing or identity — only the camera has moved."
- *
- *   3) 사용자가 피드백한 실패 모드 두 가지를 동시에 방어:
- *        (a) "앵글이 반영 안됨" → camera position 문장을 짧고 선명하게, 한 줄에 모아서 맨 앞에.
- *        (b) "원본이 유지되지 않음(배경 재창작)" → 지난 버전의 "invent newly visible details",
- *            "extend environment outward" 같은 creative instruction 제거. 대신
- *            "same subject / same location / same lighting" 을 짧은 불릿으로 명시.
- *
- *   4) "Back view" 같은 극단 각도만 별도 문장으로 명시적 시각 지시 추가 (모델이 얼굴을 자꾸
- *      보여주려고 하는 보정 bias 를 누르기 위함).
+ * Each phrase function returns null for a near-zero slider value, so the
+ * builder can omit unused axes instead of writing "orbited 0° around…".
  */
 
-/** yaw → 짧고 선명한 camera position 구절. null = "변화 없음".
- *  Safe range 로 clamp 되므로 |yaw| <= 60° 범위만 커버. */
+/** yaw → camera position clause. Covers the full ±180° orbit. */
 const yawPhrase = (yaw: number): string | null => {
   const a = Math.round(clamp(yaw, -YAW_MAX, YAW_MAX));
   if (Math.abs(a) < 8) return null;
@@ -137,33 +98,45 @@ const yawPhrase = (yaw: number): string | null => {
     return `orbited ${abs}° to the ${dir} around the subject — subject seen slightly from the ${dir} of center, still mostly facing the camera`;
   if (abs <= 45)
     return `orbited ${abs}° to the ${dir} around the subject — three-quarter view, the subject's ${dir} side is clearly more visible, the ${mirror} side is partly hidden`;
-  return `orbited ${abs}° to the ${dir} around the subject — strong three-quarter-to-side view, most of the subject's ${dir} side is visible, only a sliver of the ${mirror} side shows`;
+  if (abs <= 80)
+    return `orbited ${abs}° to the ${dir} around the subject — strong three-quarter-to-side view, most of the subject's ${dir} side is visible, only a sliver of the ${mirror} side shows`;
+  if (abs <= 110)
+    return `placed at the subject's ${dir} side — pure profile view, the silhouette of the nose, lips and jaw reads cleanly against the background`;
+  if (abs <= 150)
+    return `orbited ${abs}° around to behind the subject's ${dir} shoulder — the subject is seen mostly from behind, only a sliver of the ${dir} cheek is visible past the ear`;
+  return "placed directly behind the subject — full BACK VIEW, the camera frames the subject from behind as they face into the scene; we see the back of the head, neck and shoulders, no face is visible";
 };
 
-/** pitch → camera position 구절. |pitch| <= 45° 범위만 커버. */
+/** pitch → camera position clause. Covers the full ±90° tilt. */
 const pitchPhrase = (pitch: number): string | null => {
   const a = Math.round(clamp(pitch, -PITCH_MAX, PITCH_MAX));
   if (Math.abs(a) < 6) return null;
   if (a > 0) {
     if (a <= 20) return "slightly above eye level (mild high-angle shot, camera tilted slightly down at the subject)";
-    return "clearly above the subject (moderate high-angle shot, camera tilted down at the subject)";
+    if (a <= 45) return "clearly above the subject (moderate high-angle shot, camera tilted down at the subject)";
+    if (a <= 75) return "well above the subject (strong high-angle shot from above, looking down steeply at the subject)";
+    return "directly overhead, lens pointed straight down — OVERHEAD TOP-DOWN / BIRD'S-EYE shot, the subject and the floor around them laid out as a flat composition";
   }
   const abs = -a;
   if (abs <= 20) return "slightly below eye level (mild low-angle shot, camera tilted slightly up at the subject)";
-  return "clearly below the subject (moderate low-angle shot, camera tilted up at the subject)";
+  if (abs <= 45) return "clearly below the subject (moderate low-angle shot, camera tilted up at the subject)";
+  if (abs <= 75) return "well below the subject (strong low-angle heroic shot, looking up steeply, the subject towers in the frame)";
+  return "at ground level looking almost straight up — WORM'S-EYE VIEW, the subject looms enormous overhead, sky or ceiling dominates the top of the frame";
 };
 
-/** zoom → camera position 구절. |zoom| <= 60 범위만 커버. */
+/** zoom → camera position clause. Covers ±100% physical dolly. */
 const zoomPhrase = (zoom: number): string | null => {
   const a = Math.round(clamp(zoom, -ZOOM_MAX, ZOOM_MAX));
   if (Math.abs(a) < 6) return null;
   if (a > 0) {
     if (a <= 25) return "dollied slightly closer to the subject (push-in, medium-close framing)";
-    return "dollied noticeably closer to the subject (close-up framing, subject takes up more of the frame)";
+    if (a <= 60) return "dollied noticeably closer to the subject (close-up framing, subject takes up more of the frame)";
+    return "dollied all the way in to the subject (tight close-up, the subject's face and upper body fill the frame, background reduced to soft bokeh)";
   }
   const abs = -a;
   if (abs <= 25) return "dollied slightly back from the subject (pull-back, slightly wider framing)";
-  return "dollied noticeably back from the subject (wide shot, subject is smaller in frame and more of the surrounding environment is visible)";
+  if (abs <= 60) return "dollied noticeably back from the subject (wide shot, subject is smaller in frame and more of the surrounding environment is visible)";
+  return "dollied far back from the subject (extreme wide shot, the subject is small within the full environment, clear foreground / midground / background layers)";
 };
 
 /** 슬라이더 옆 요약 라벨(짧게). */
@@ -202,14 +175,11 @@ const summarizeZoom = (zoom: number): string => {
 const buildChangeAnglePrompt = (
   cfg: ChangeAngleConfig,
   subject: string,
-  emotion: EmotionChip | null,
 ): string => {
   const y = yawPhrase(cfg.yaw);
   const p = pitchPhrase(cfg.pitch);
   const z = zoomPhrase(cfg.zoom);
 
-  // Combine zoom + yaw into a single distance/framing sentence. If only
-  // one of them is set, use that; if both, join with "and". Empty = no move.
   const distanceParts = [z, y].filter((s): s is string => !!s);
   const distanceClause = distanceParts.length > 0 ? distanceParts.join(" and ") : null;
   const angleClause = p ?? null;
@@ -218,7 +188,6 @@ const buildChangeAnglePrompt = (
     subject,
     distanceClause,
     angleClause,
-    emotion,
     extraNotes: cfg.customText,
   });
 };
@@ -431,26 +400,6 @@ const SphereControl = ({ yaw, pitch, onChange, disabled }: SphereControlProps) =
         stroke="rgba(255,255,255,0.12)"
         strokeWidth={1}
       />
-      {/* safe-zone boundary — rectangle showing the reachable (yaw, pitch) range
-           on the projected sphere surface. Dashed amber tint to read as "soft limit". */}
-      {(() => {
-        const rx = Math.sin((YAW_MAX * Math.PI) / 180) * SPHERE_RADIUS;
-        const ry = Math.sin((PITCH_MAX * Math.PI) / 180) * SPHERE_RADIUS;
-        return (
-          <rect
-            x={cx - rx}
-            y={cy - ry}
-            width={rx * 2}
-            height={ry * 2}
-            fill="rgba(249, 194, 90, 0.03)"
-            stroke="rgba(249, 194, 90, 0.35)"
-            strokeWidth={1}
-            strokeDasharray="3 3"
-            rx={4}
-            ry={4}
-          />
-        );
-      })()}
       {/* center marker: original viewpoint */}
       <circle cx={cx} cy={cy} r={2} fill="rgba(255,255,255,0.38)" />
       {/* cardinal labels */}
@@ -601,6 +550,26 @@ const Section = ({ label, meta, icon, first, children }: SectionProps) => (
 );
 
 /* ━━━ Main modal ━━━ */
+
+/** Self-contained spec the parent needs to fire the actual generation in
+ *  the background. The modal builds this from its UI state and hands it
+ *  off via `onSubmit` — it does NOT call the network itself anymore.
+ *
+ *  Promoting the request to the parent lets ContiTab drive the same
+ *  `editGeneratingIds` + `sceneStages` channels that inpaint already
+ *  uses, so the user sees the standard `1/1 Generating…` spinner on the
+ *  scene card with the modal out of the way. */
+export interface ChangeAngleSubmit {
+  sceneId: string;
+  sceneNumber: number;
+  /** Source image at submit time — the parent uses this to push history
+   *  before overwriting `conti_image_url`. */
+  sourceImageUrl: string;
+  /** Ready-to-invoke body for `supabase.functions.invoke("openai-image", ...)`.
+   *  Always carries `preferredAngleModel: "gpt-image-2"`. */
+  body: Record<string, unknown>;
+}
+
 export interface ChangeAngleModalProps {
   scene: Scene;
   /** Asset library — threaded into the subject descriptor so NB2 gets
@@ -609,7 +578,10 @@ export interface ChangeAngleModalProps {
   projectId: string;
   videoFormat: VideoFormat;
   onClose: () => void;
-  onApplied: (newUrl: string, previousUrl: string | null) => void | Promise<void>;
+  /** Hand off the built request to the parent. The modal closes itself
+   *  right after; the parent runs the generation and drives the
+   *  scene-card spinner. */
+  onSubmit: (req: ChangeAngleSubmit) => void;
 }
 
 const BACKDROP_STYLE: React.CSSProperties = {
@@ -639,77 +611,63 @@ export function ChangeAngleModal({
   projectId,
   videoFormat,
   onClose,
-  onApplied,
+  onSubmit,
 }: ChangeAngleModalProps) {
   const sourceUrl = scene.conti_image_url;
   const [cfg, setCfg] = useState<ChangeAngleConfig>(DEFAULT_CONFIG);
-  const [applying, setApplying] = useState(false);
+  /** With generation hoisted to the parent, the modal no longer carries
+   *  an in-flight `applying` state — it builds the body and hands off.
+   *  `error` is kept for prompt-construction-time validation only
+   *  (e.g. missing source url), since real network errors now surface as
+   *  toasts on the scene card. */
   const [error, setError] = useState<string | null>(null);
-  /** null = auto-generated from cfg, string = user-edited override. */
-  const [promptOverride, setPromptOverride] = useState<string | null>(null);
-  /** Mood/Intent chip. Biases framing and expression without overwriting
-   *  identity. See src/lib/cameraLibrary.ts → EMOTION_CHIPS. */
-  const [emotionId, setEmotionId] = useState<string>("neutral");
-  const emotion = useMemo<EmotionChip | null>(
-    () => getEmotion(emotionId) ?? null,
-    [emotionId],
-  );
+  // Modal hands off synchronously, so there's never a true in-flight state
+  // here — kept as a constant so the existing `disabled` props on controls
+  // stay readable.
+  const applying = false;
 
   const subject = useMemo(
     () => buildSubjectDescriptor(scene, assets),
     [scene, assets],
   );
 
-  const generatedPrompt = useMemo(
-    () => buildChangeAnglePrompt(cfg, subject, emotion),
-    [cfg, subject, emotion],
-  );
-  const prompt = promptOverride ?? generatedPrompt;
-  const usingOverride = promptOverride !== null;
-
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !applying) onClose();
+      if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [applying, onClose]);
+  }, [onClose]);
 
   const resetAll = () => {
     setCfg(DEFAULT_CONFIG);
-    setPromptOverride(null);
     setError(null);
-    setEmotionId("neutral");
   };
 
-  const handleApply = async () => {
-    if (!sourceUrl || applying) return;
-    setError(null);
-    setApplying(true);
-    try {
-      const { data, error: invokeErr } = await supabase.functions.invoke("openai-image", {
-        body: {
-          mode: "inpaint",
-          useNanoBanana: true,
-          sourceImageUrl: sourceUrl,
-          referenceImageUrls: [],
-          prompt,
-          projectId,
-          sceneNumber: scene.scene_number,
-          imageSize: IMAGE_SIZE_MAP[videoFormat],
-        },
-      });
-      if (invokeErr) throw invokeErr;
-      const d = data as { publicUrl?: string; url?: string } | null;
-      const newUrl = d?.publicUrl ?? d?.url ?? null;
-      if (!newUrl) throw new Error("Change Angle returned no image URL");
-      await onApplied(newUrl, sourceUrl);
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setApplying(false);
+  const handleApply = () => {
+    if (!sourceUrl) {
+      setError("No source image for this scene.");
+      return;
     }
+    const prompt = buildChangeAnglePrompt(cfg, subject);
+    const body: Record<string, unknown> = {
+      mode: "inpaint",
+      sourceImageUrl: sourceUrl,
+      referenceImageUrls: [],
+      prompt,
+      projectId,
+      sceneNumber: scene.scene_number,
+      imageSize: IMAGE_SIZE_MAP[videoFormat],
+      preferredAngleModel: "gpt-image-2",
+    };
+    console.log("[ChangeAngle] handing off to parent (gpt-image-2)");
+    onSubmit({
+      sceneId: scene.id,
+      sceneNumber: scene.scene_number,
+      sourceImageUrl: sourceUrl,
+      body,
+    });
+    onClose();
   };
 
   if (!sourceUrl) {
@@ -804,59 +762,6 @@ export function ChangeAngleModal({
             </button>
           </div>
 
-          {/* Mood / Intent chip row — biases framing and expression without
-              overwriting identity. Same set CameraVariationsModal uses,
-              so a user's aesthetic preference carries across modals. */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "8px 20px",
-              borderBottom: "1px solid rgba(255,255,255,0.05)",
-              flexShrink: 0,
-              background: "#0c0c0c",
-            }}
-          >
-            <div
-              style={{
-                color: "rgba(255,255,255,0.55)",
-                fontSize: 10,
-                fontWeight: 600,
-                letterSpacing: 0.6,
-                textTransform: "uppercase",
-                marginRight: 4,
-                whiteSpace: "nowrap",
-              }}
-            >
-              Mood
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-              {EMOTION_CHIPS.map((chip) => {
-                const active = emotionId === chip.id;
-                return (
-                  <button
-                    key={chip.id}
-                    onClick={() => !applying && setEmotionId(chip.id)}
-                    disabled={applying}
-                    style={{
-                      padding: "3px 10px",
-                      fontSize: 10.5,
-                      letterSpacing: 0.2,
-                      background: active ? "rgba(249,66,58,0.14)" : "transparent",
-                      border: `1px solid ${active ? "rgba(249,66,58,0.55)" : "rgba(255,255,255,0.12)"}`,
-                      color: active ? "#fca5a5" : "rgba(255,255,255,0.7)",
-                      cursor: applying ? "not-allowed" : "pointer",
-                      fontFamily: "inherit",
-                    }}
-                  >
-                    {chip.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
           {/* Body */}
           <div style={{ padding: "4px 20px 6px", overflow: "auto", flex: 1, minHeight: 0 }}>
             {/* Orbit (yaw + pitch via sphere) */}
@@ -892,26 +797,22 @@ export function ChangeAngleModal({
                   disabled={applying}
                 />
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
-                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.55 }}>
-                    Drag the dot, use the sliders, or pick a preset — they all stay in sync.
-                    Angle is constrained to ±{YAW_MAX}° horizontal, ±{PITCH_MAX}° vertical.
-                  </div>
                   <BiSlider
-                    label="Yaw (horizontal orbit)"
+                    label="Yaw"
                     value={cfg.yaw}
                     min={-YAW_MAX}
                     max={YAW_MAX}
-                    endLabels={[`L ${YAW_MAX}°`, `R ${YAW_MAX}°`]}
+                    endLabels={["L", "R"]}
                     onChange={(v) => setCfg((p) => ({ ...p, yaw: clamp(v, -YAW_MAX, YAW_MAX) }))}
                     disabled={applying}
                     summary={summarizeYaw(cfg.yaw)}
                   />
                   <BiSlider
-                    label="Pitch (vertical tilt)"
+                    label="Pitch"
                     value={cfg.pitch}
                     min={-PITCH_MAX}
                     max={PITCH_MAX}
-                    endLabels={[`Low-angle ${PITCH_MAX}°`, `High-angle ${PITCH_MAX}°`]}
+                    endLabels={["Down", "Up"]}
                     onChange={(v) => setCfg((p) => ({ ...p, pitch: clamp(v, -PITCH_MAX, PITCH_MAX) }))}
                     disabled={applying}
                     summary={summarizePitch(cfg.pitch)}
@@ -943,18 +844,13 @@ export function ChangeAngleModal({
                       );
                     })}
                   </div>
-                  <div style={{ color: "rgba(255,255,255,0.38)", fontSize: 10, lineHeight: 1.5 }}>
-                    Center = original viewpoint. Double-click the sphere to reset.
-                    Extreme angles (back view, top-down, worm's-eye) are not available — the model
-                    cannot reliably do true 3D camera moves on an arbitrary reference image.
-                  </div>
                 </div>
               </div>
             </Section>
 
             {/* Zoom */}
             <Section
-              label="Zoom (physical dolly)"
+              label="Zoom"
               meta={
                 <span>
                   <b style={{ color: "rgba(255,255,255,0.7)" }}>{summarizeZoom(cfg.zoom)}</b>
@@ -962,40 +858,25 @@ export function ChangeAngleModal({
               }
             >
               <BiSlider
-                label="Dolly in ↔ Dolly out"
+                label="Dolly"
                 value={cfg.zoom}
                 min={-ZOOM_MAX}
                 max={ZOOM_MAX}
-                endLabels={["Pull back (wider)", "Push in (closer)"]}
+                endLabels={["Pull back", "Push in"]}
                 onChange={(v) => setCfg((p) => ({ ...p, zoom: clamp(v, -ZOOM_MAX, ZOOM_MAX) }))}
                 disabled={applying}
                 summary={summarizeZoom(cfg.zoom)}
               />
-              <div
-                style={{
-                  marginTop: 10,
-                  padding: "6px 8px",
-                  background: "rgba(255,255,255,0.03)",
-                  border: "1px solid rgba(255,255,255,0.06)",
-                  color: "rgba(255,255,255,0.45)",
-                  fontSize: 10,
-                  lineHeight: 1.5,
-                }}
-              >
-                Zoom is sent to the model as a <b>physical camera dolly</b> — the subject and the
-                background reframe together. Range capped to ±{ZOOM_MAX}% because larger dollies
-                cause the model to break identity. Re-Apply to reroll.
-              </div>
             </Section>
 
             {/* Additional notes */}
-            <Section label="Additional notes" meta="Optional">
+            <Section label="Notes" meta="Optional">
               <textarea
                 value={cfg.customText}
                 onChange={(e) => setCfg((p) => ({ ...p, customText: e.target.value }))}
                 disabled={applying}
                 rows={2}
-                placeholder="e.g. keep the wide-lens distortion, emphasise a subtle dolly motion, handheld feel..."
+                placeholder="anything else worth telling the model"
                 style={{
                   width: "100%",
                   padding: "8px 10px",
@@ -1009,59 +890,6 @@ export function ChangeAngleModal({
                   outline: "none",
                 }}
               />
-            </Section>
-
-            {/* Prompt preview + editable override — experiment freely.
-                 값이 null 이면 cfg 에서 자동 생성, 아니면 override 사용. */}
-            <Section
-              label="Prompt sent to model"
-              meta={
-                usingOverride ? (
-                  <button
-                    onClick={() => setPromptOverride(null)}
-                    disabled={applying}
-                    className="hover:text-white/80"
-                    style={{
-                      background: "transparent",
-                      border: "1px solid rgba(255,255,255,0.18)",
-                      color: "rgba(255,255,255,0.7)",
-                      fontSize: 10,
-                      padding: "2px 6px",
-                      cursor: "pointer",
-                      fontFamily: "inherit",
-                    }}
-                    title="Discard your edits, reset to auto-generated prompt"
-                  >
-                    Reset to auto
-                  </button>
-                ) : (
-                  <span style={{ color: "rgba(255,255,255,0.38)", fontSize: 10 }}>Auto</span>
-                )
-              }
-            >
-              <textarea
-                value={prompt}
-                onChange={(e) => setPromptOverride(e.target.value)}
-                disabled={applying}
-                rows={5}
-                style={{
-                  width: "100%",
-                  padding: "8px 10px",
-                  background: "#0a0a0a",
-                  border: `1px solid ${usingOverride ? "rgba(249,194,90,0.35)" : "rgba(255,255,255,0.08)"}`,
-                  color: "rgba(255,255,255,0.82)",
-                  fontSize: 11,
-                  lineHeight: 1.55,
-                  resize: "vertical",
-                  outline: "none",
-                  fontFamily:
-                    "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-                }}
-              />
-              <div style={{ marginTop: 6, color: "rgba(255,255,255,0.38)", fontSize: 10, lineHeight: 1.5 }}>
-                This is the exact text sent to Nano Banana 2 along with the reference image.
-                Edit it freely to experiment — changes to the sliders/presets/notes above will overwrite your edits.
-              </div>
             </Section>
 
             {error && (
@@ -1084,6 +912,7 @@ export function ChangeAngleModal({
           <div
             style={{
               display: "flex",
+              alignItems: "center",
               justifyContent: "flex-end",
               gap: 8,
               padding: "12px 20px",
@@ -1109,13 +938,12 @@ export function ChangeAngleModal({
             </button>
             <button
               onClick={handleApply}
-              disabled={applying}
               style={{
                 padding: "7px 16px",
                 background: "#f9423a",
                 border: "none",
                 color: "#fff",
-                cursor: applying ? "default" : "pointer",
+                cursor: "pointer",
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 6,
@@ -1123,17 +951,10 @@ export function ChangeAngleModal({
                 justifyContent: "center",
                 fontSize: 12,
                 fontWeight: 600,
-                opacity: applying ? 0.6 : 1,
               }}
+              title="Submit and close — generation continues on the scene card."
             >
-              {applying ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  Rendering
-                </>
-              ) : (
-                "Apply"
-              )}
+              Apply
             </button>
           </div>
         </div>

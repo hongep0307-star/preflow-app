@@ -134,7 +134,7 @@ export const ContiLightbox = ({ scene, allScenes, onClose, onRegenerate, onInpai
           onClick={e => e.stopPropagation()}
           alt={`Scene ${currentScene.scene_number}`} loading="lazy" decoding="async" />
       ) : (
-        <div className="text-muted-foreground text-sm" onClick={e => e.stopPropagation()}>콘티 이미지 없음</div>
+        <div className="text-muted-foreground text-sm" onClick={e => e.stopPropagation()}>No storyboard image</div>
       )}
 
       {/* Bottom info */}

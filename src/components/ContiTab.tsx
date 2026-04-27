@@ -10,9 +10,11 @@ import {
   type SetStateAction,
 } from "react";
 import { supabase } from "@/lib/supabase";
-import { deleteStoredFile } from "@/lib/storageUtils";
+import { deleteStoredFileIfUnreferenced } from "@/lib/storageUtils";
 import { generateConti, styleTransfer, IMAGE_SIZE_MAP } from "@/lib/conti";
 import type { VideoFormat, BriefAnalysis, GeneratingStage } from "@/lib/conti";
+import { generateTransitionFrame } from "@/lib/transitions";
+import { DEFAULT_TRANSITION_KEY, TRANSITION_MAP, normalizeTransitionKey } from "@/lib/transitionGrammar";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
 
@@ -51,6 +53,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
   DndContext,
@@ -88,6 +100,7 @@ import {
   ASSET_ICON,
   ASPECT_CLASS,
   MAX_HISTORY,
+  normalizeScenesSketches,
 } from "@/components/conti/contiTypes";
 import {
   TagChip,
@@ -99,9 +112,9 @@ import {
   SidePanel,
 } from "@/components/conti/contiInternals";
 import { SortableContiCard } from "@/components/conti/SortableContiCard";
-import { RelightModal } from "@/components/conti/RelightModal";
+import { RelightModal, type RelightSubmit } from "@/components/conti/RelightModal";
 import { CameraVariationsModal } from "@/components/conti/CameraVariationsModal";
-import { ChangeAngleModal } from "@/components/conti/ChangeAngleModal";
+import { ChangeAngleModal, type ChangeAngleSubmit } from "@/components/conti/ChangeAngleModal";
 import { StyleTransferConfirmModal } from "@/components/conti/StyleTransferConfirmModal";
 import { GenerateAllModal } from "@/components/conti/GenerateAllModal";
 import { SceneImageCropModal } from "@/components/conti/SceneImageCropModal";
@@ -195,6 +208,13 @@ function subscribeSceneState(pid: string, fn: () => void) {
     _sceneStateListenersByProject.get(pid)?.delete(fn);
   };
 }
+
+// TR card prompt building + image generation is delegated to
+// `lib/transitions.ts`. That module runs a Claude pre-pass (brief +
+// prev / next context + TR directive) to produce a directorial
+// transition-beat description, then routes to NB2 inpaint or GPT
+// Image 2 generate depending on the user's selected `contiModel`.
+// See lib/transitions.ts for the full rationale.
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const VersionCompareModal = ({
@@ -532,8 +552,8 @@ const NewVersionModal = ({
 };
 
 const FORMAT_OPTIONS = [
-  { id: "pdf" as const, icon: FileText, label: "PDF", description: "인쇄 · 공유용", enabled: true },
-  { id: "png" as const, icon: ImageIcon, label: "PNG", description: "고해상도 이미지", enabled: true },
+  { id: "pdf" as const, icon: FileText, label: "PDF", description: "Print · Share", enabled: true },
+  { id: "png" as const, icon: ImageIcon, label: "PNG", description: "High-resolution image", enabled: true },
   { id: "ae" as const, icon: Film, label: "AE", description: "Coming Soon", enabled: false },
 ];
 
@@ -736,8 +756,8 @@ const ExportModal = ({
                 <label className="text-xs text-muted-foreground mb-2 block">Export mode</label>
                 <div className="flex gap-2">
                   {[
-                    { value: "page" as const, label: "Page layout", desc: "PDF와 동일 5×2 레이아웃" },
-                    { value: "individual" as const, label: "Individual scenes", desc: "씬별 개별 PNG" },
+                    { value: "page" as const, label: "Page layout", desc: "Same 5×2 layout as the PDF" },
+                    { value: "individual" as const, label: "Individual scenes", desc: "Per-scene PNG files" },
                   ].map((opt) => (
                     <button
                       key={opt.value}
@@ -770,7 +790,7 @@ const ExportModal = ({
             <label className="flex items-center gap-2 cursor-pointer">
               <Checkbox checked={includeInfo} onCheckedChange={(v) => setIncludeInfo(!!v)} />
               <span className="text-[12px] text-muted-foreground">
-                메타 정보 포함 (제목, 카메라, 무드, 로케이션, 러닝타임)
+                Include metadata (title, camera, mood, location, runtime)
               </span>
             </label>
           )}
@@ -811,7 +831,45 @@ const StylePickerModal = ({
   const [selected, setSelected] = useState<string>(currentStyleId ?? NONE_ID);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [pendingDeletePreset, setPendingDeletePreset] = useState<StylePreset | null>(null);
+  const [deletingStyle, setDeletingStyle] = useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
+
+  const confirmDeleteStyle = async (preset: StylePreset) => {
+    setDeletingStyle(true);
+    try {
+      const isDeletingSelected = selected === preset.id;
+      const isDeletingCurrent = currentStyleId === preset.id;
+      const { error: detachProjectsError } = await supabase
+        .from("projects")
+        .update({ conti_style_id: null })
+        .eq("conti_style_id", preset.id);
+      if (detachProjectsError) throw detachProjectsError;
+      const { error: deleteError } = await supabase
+        .from("style_presets")
+        .delete()
+        .eq("id", preset.id);
+      if (deleteError) throw deleteError;
+      if (preset.thumbnail_url) {
+        const urlPath = preset.thumbnail_url.split("/style-presets/")[1];
+        if (urlPath) {
+          const { error: storageError } = await supabase.storage
+            .from("style-presets")
+            .remove([decodeURIComponent(urlPath)]);
+          if (storageError) throw storageError;
+        }
+      }
+      if (isDeletingSelected || isDeletingCurrent) setSelected(NONE_ID);
+      if (isDeletingCurrent) onChanged(null);
+      await fetchStyles();
+      toast({ title: `"${preset.name}" style deleted.` });
+      setPendingDeletePreset(null);
+    } catch (err: any) {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    } finally {
+      setDeletingStyle(false);
+    }
+  };
 
   const fetchStyles = useCallback(async () => {
     const { data, error } = await supabase
@@ -968,38 +1026,9 @@ const StylePickerModal = ({
                   >
                     {isCustom && (
                       <button
-                        onClick={async (e) => {
+                        onClick={(e) => {
                           e.stopPropagation();
-                          if (!window.confirm("이 스타일을 삭제하시겠습니까?")) return;
-                          try {
-                            const isDeletingSelected = selected === preset.id;
-                            const isDeletingCurrent = currentStyleId === preset.id;
-                            const { error: detachProjectsError } = await supabase
-                              .from("projects")
-                              .update({ conti_style_id: null })
-                              .eq("conti_style_id", preset.id);
-                            if (detachProjectsError) throw detachProjectsError;
-                            const { error: deleteError } = await supabase
-                              .from("style_presets")
-                              .delete()
-                              .eq("id", preset.id);
-                            if (deleteError) throw deleteError;
-                            if (preset.thumbnail_url) {
-                              const urlPath = preset.thumbnail_url.split("/style-presets/")[1];
-                              if (urlPath) {
-                                const { error: storageError } = await supabase.storage
-                                  .from("style-presets")
-                                  .remove([decodeURIComponent(urlPath)]);
-                                if (storageError) throw storageError;
-                              }
-                            }
-                            if (isDeletingSelected || isDeletingCurrent) setSelected(NONE_ID);
-                            if (isDeletingCurrent) onChanged(null);
-                            await fetchStyles();
-                            toast({ title: "스타일이 삭제되었습니다." });
-                          } catch (err: any) {
-                            toast({ title: "삭제 실패", description: err.message, variant: "destructive" });
-                          }
+                          setPendingDeletePreset(preset);
                         }}
                         className="absolute top-2 right-2 z-10 w-5 h-5 flex items-center justify-center rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
                         style={{ background: "rgba(220,38,38,0.9)" }}
@@ -1076,7 +1105,7 @@ const StylePickerModal = ({
                   handleUploadStyle(file);
                 } else {
                   toast({
-                    title: "이미지 파일만 업로드 가능합니다.",
+                    title: "Only image files can be uploaded.",
                     variant: "destructive",
                   });
                 }
@@ -1141,6 +1170,50 @@ const StylePickerModal = ({
           </Button>
         </DialogFooter>
       </DialogContent>
+      <AlertDialog
+        open={!!pendingDeletePreset}
+        onOpenChange={(o) => {
+          if (!o && !deletingStyle) setPendingDeletePreset(null);
+        }}
+      >
+        <AlertDialogContent
+          className="max-w-[400px] bg-card border-border"
+          style={{ borderRadius: 0 }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-[15px] font-semibold">
+              Delete custom style?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-[13px] text-muted-foreground">
+              {pendingDeletePreset
+                ? `"${pendingDeletePreset.name}" will be permanently removed. Projects using this style will fall back to the default.`
+                : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              className="text-[13px] h-9"
+              disabled={deletingStyle}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="text-white text-[13px] h-9"
+              style={{ background: "rgba(220,38,38,0.9)" }}
+              disabled={deletingStyle}
+              onClick={(e) => {
+                e.preventDefault();
+                if (pendingDeletePreset) void confirmDeleteStyle(pendingDeletePreset);
+              }}
+            >
+              {deletingStyle ? (
+                <Loader2 className="w-3 h-3 animate-spin mr-1.5" />
+              ) : null}
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 };
@@ -1562,9 +1635,9 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     conti_style_id: null,
   });
   const [studioScene, setStudioScene] = useState<Scene | null>(null);
-  const [studioInitialTab, setStudioInitialTab] = useState<"view" | "edit" | "history" | "compare" | undefined>(
-    undefined,
-  );
+  const [studioInitialTab, setStudioInitialTab] = useState<
+    "view" | "edit" | "sketches" | "history" | "compare" | undefined
+  >(undefined);
   const [compareSceneNumber, setCompareSceneNumber] = useState<number | null>(null);
   const [adjustingScene, setAdjustingScene] = useState<Scene | null>(null);
   const [relightingScene, setRelightingScene] = useState<Scene | null>(null);
@@ -1768,7 +1841,30 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         .select("*")
         .eq("project_id", projectId)
         .order("display_order", { ascending: true });
-      const vers = (data ?? []) as SceneVersion[];
+      const rawVers = (data ?? []) as SceneVersion[];
+      // Self-heal legacy `sketches: "[]"` (string) snapshots — see
+      // normalizeScenesSketches docs. We do this BEFORE setVersions so the
+      // local state never sees the malformed shape, and we silently re-persist
+      // any sanitised version's scenes JSON so the bad data doesn't reappear
+      // on the next reload.
+      const vers = rawVers.map((v) => {
+        const arr = Array.isArray(v.scenes) ? (v.scenes as Scene[]) : [];
+        const norm = normalizeScenesSketches(arr);
+        if (norm.changed) {
+          // Fire-and-forget — persistence failure must not block the tab from
+          // rendering a sanitised view. Logged for visibility.
+          void supabase
+            .from("scene_versions")
+            .update({ scenes: norm.scenes as any })
+            .eq("id", v.id)
+            .then((res: any) => {
+              if (res?.error) {
+                console.warn("[ContiTab] auto-heal sketches rewrite failed:", res.error);
+              }
+            });
+        }
+        return { ...v, scenes: norm.scenes as any };
+      });
       setVersions(vers);
       if (vers.length > 0) {
         const active = vers.find((v) => v.id === projectActiveVersionIdRef.current) ?? vers[0];
@@ -1814,7 +1910,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
 
     const projectPromise = supabase
       .from("projects")
-      .select("title, client, active_version_id, conti_style_id")
+      .select("title, client, active_version_id, conti_style_id, status")
       .eq("id", projectId)
       .single();
 
@@ -1871,9 +1967,24 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     const { data } = await supabase.from("scene_versions").select("*").eq("id", versionId).single();
     if (!data) return;
     const version = data as SceneVersion;
-    setVersions((prev) => prev.map((v) => (v.id === versionId ? { ...v, scenes: version.scenes } : v)));
+    // Same self-heal as in loadVersions — covers the case where the user
+    // navigates straight to a non-active version that loadVersions sanitised
+    // in memory but the user lands on before the rewrite roundtrips.
+    const arr = Array.isArray(version.scenes) ? (version.scenes as Scene[]) : [];
+    const norm = normalizeScenesSketches(arr);
+    if (norm.changed) {
+      void supabase
+        .from("scene_versions")
+        .update({ scenes: norm.scenes as any })
+        .eq("id", versionId)
+        .then((res: any) => {
+          if (res?.error) console.warn("[ContiTab] auto-heal sketches rewrite failed:", res.error);
+        });
+    }
+    const cleanedScenes = norm.scenes;
+    setVersions((prev) => prev.map((v) => (v.id === versionId ? { ...v, scenes: cleanedScenes as any } : v)));
     setActiveVersionId(versionId);
-    const hydrated = await hydrateSceneHistory(version.scenes as Scene[]);
+    const hydrated = await hydrateSceneHistory(cleanedScenes);
     setActiveScenes(hydrated);
     projectActiveVersionIdRef.current = versionId;
     replaceImageHistory(buildHistoryFromScenes(hydrated));
@@ -1968,7 +2079,26 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     if (!target) return;
     await supabase.from("scenes").update(fields).eq("id", target.id);
     const latest = getSceneState(projectId)?.scenes ?? current;
-    await updateVersionScenes(latest.map((s) => (s.scene_number === sceneNumber ? { ...s, ...fields } : s)));
+    const merged = latest.map((s) => (s.scene_number === sceneNumber ? { ...s, ...fields } : s));
+    await updateVersionScenes(merged);
+
+    // is_final 토글 시 프로젝트 status 자동 동기화.
+    //   - non-transition 씬을 기준으로 판단 (TR 카드는 작품 컷이 아님)
+    //   - 모든 씬이 final 이면 'completed', 하나라도 해제되면 'active'
+    //   - total === 0 (빈 프로젝트) 은 승격 대상 아님
+    //   - 이미 desired 상태면 DB write 생략
+    if ("is_final" in fields) {
+      const real = merged.filter((s) => !s.is_transition);
+      const allFinal = real.length > 0 && real.every((s) => s.is_final === true);
+      const desired = allFinal ? "completed" : "active";
+      if ((projectInfo.status ?? "active") !== desired) {
+        const { error } = await supabase.from("projects").update({ status: desired }).eq("id", projectId);
+        if (!error) {
+          setProjectInfo((prev) => ({ ...prev, status: desired }));
+          toast({ title: allFinal ? "Project marked as completed" : "Project set back to active" });
+        }
+      }
+    }
   };
 
   const handleSetThumbnail = async (imageUrl: string) => {
@@ -2016,12 +2146,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         if (upErr) throw upErr;
         const { data: urlData } = supabase.storage.from("style-presets").getPublicUrl(storagePath);
         const publicUrl = urlData.publicUrl;
-        const presetName = `Scene ${scene.scene_number}${scene.title ? ` – ${scene.title}` : ""}`.slice(0, 60);
+        const projectTitle = (projectInfo.title ?? "").trim() || "Untitled Project";
+        const sceneLabel = `S${String(scene.scene_number).padStart(2, "0")}`;
+        const presetName = `${projectTitle} - ${sceneLabel}`.slice(0, 60);
         const { data: inserted, error: insErr } = await supabase
           .from("style_presets")
           .insert({
             name: presetName,
-            description: `From scene ${scene.scene_number}`,
+            description: `From ${projectTitle} · scene ${scene.scene_number}`,
             thumbnail_url: publicUrl,
             style_prompt: "Match the visual style, color palette, and artistic treatment of the reference image.",
             is_default: false,
@@ -2048,11 +2180,30 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         });
       }
     },
-    [projectId, toast],
+    [projectId, projectInfo.title, toast],
   );
 
   const handleDuplicateScene = async (scene: Scene) => {
     const tempNumber = 90000 + (Date.now() % 10000);
+    // Recompute tagged_assets from the duplicated text instead of
+    // blindly inheriting. Without this, character/item tags that were
+    // carry-over on the source scene (i.e. not actually @-mentioned in
+    // the text) silently follow the copy, and the next generation
+    // renders ghosts of removed characters (e.g. a scene copied from
+    // "@전사가 @바이킹을 조준" to a 1st-person POV rewrite that no
+    // longer mentions @전사 still ships @전사's photo as a ref).
+    // We trust the text: if a tag is actually mentioned in
+    // description/location, it stays; otherwise it's dropped.
+    const combinedText = `${scene.description ?? ""} ${scene.location ?? ""}`;
+    const mentionedTags: string[] = [];
+    const seen = new Set<string>();
+    for (const m of combinedText.match(/@[\w가-힣]+/g) ?? []) {
+      const r = resolveAsset(m, assets);
+      if (r && !seen.has(r.name)) {
+        mentionedTags.push(r.name);
+        seen.add(r.name);
+      }
+    }
     const { data, error } = await supabase
       .from("scenes")
       .insert({
@@ -2064,14 +2215,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         location: scene.location,
         mood: scene.mood,
         duration_sec: scene.duration_sec,
-        tagged_assets: scene.tagged_assets ?? [],
+        tagged_assets: mentionedTags,
         conti_image_url: null,
         source: "conti",
       })
       .select()
       .single();
     if (error || !data) {
-      toast({ title: "복제 실패", description: error?.message, variant: "destructive" });
+      toast({ title: "Duplicate failed", description: error?.message, variant: "destructive" });
       return;
     }
     // ⚠️ await 이후에는 반드시 모듈 store 로부터 최신 scene 배열을 다시 읽어야 한다.
@@ -2111,9 +2262,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       updated.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
     await updateVersionScenes(updated);
+    const transitionLabel = (() => {
+      const key = normalizeTransitionKey(deletedScene?.transition_type ?? null);
+      return key ? TRANSITION_MAP[key].label : "Transition";
+    })();
     toast({
       title: isTransition
-        ? `Transition (${deletedScene?.transition_type ?? "TRANSITION"}) deleted.`
+        ? `Transition (${transitionLabel}) deleted.`
         : `Scene ${sceneNumber} deleted.`,
     });
   };
@@ -2221,7 +2376,15 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         title: "",
         description: "",
         is_transition: true,
-        transition_type: "TRANSITION",
+        // DEFAULT_TRANSITION_KEY (= "WHIP_PAN") is a concrete, library-backed
+        // technique so the Claude prompt's technique dispatch actually has
+        // something to bind to from first click. The old "TRANSITION"
+        // placeholder was a catch-all that no system prompt entry matched,
+        // which silently disabled all technique-specific guidance.
+        // Users can change the technique from the TR card's picker;
+        // legacy rows persisting "TRANSITION" in the DB are transparently
+        // rerouted via `normalizeTransitionKey`.
+        transition_type: DEFAULT_TRANSITION_KEY,
         conti_image_url: null,
         source: "conti",
       })
@@ -2264,7 +2427,11 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       s.id === scene.id ? { ...s, transition_type: newType, title: "" } : s,
     );
     await updateVersionScenes(updatedScenes);
-    toast({ title: `Transition → ${newType}` });
+    const newLabel = (() => {
+      const key = normalizeTransitionKey(newType);
+      return key ? TRANSITION_MAP[key].label : newType;
+    })();
+    toast({ title: `Transition → ${newLabel}` });
   };
 
   const handleImportSceneImage = async (sceneNumber: number, imageUrl: string) => {
@@ -2296,6 +2463,134 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     toast({ title: `Scene ${scene.scene_number} restored.` });
   };
 
+  /**
+   * Background runner for ChangeAngle.
+   *
+   * Lifecycle, mirrors the inpaint flow so the user gets the same UX:
+   *   1) Modal hands off the request synchronously and closes itself.
+   *   2) We mark the scene as edit-generating + set a stage so the
+   *      SortableContiCard renders its standard `1/1 Generating…` overlay
+   *      (see SortableContiCard `isEditGenerating` branch).
+   *   3) Network call runs untethered to the modal lifecycle — closing or
+   *      reopening the modal does NOT cancel anything.
+   *   4) On success, we follow the same write-then-version-sync pattern
+   *      used everywhere else (`pushHistory` → DB → updateVersionScenes
+   *      → bumpCache) so cards refresh + history works for "Restore".
+   *   5) Always clear the spinner state in `finally` so a failed call
+   *      doesn't leave the card stuck in Generating.
+   *
+   * Concurrency guard:
+   *   If the same scene already has an edit-generation in flight (could be
+   *   inpaint OR a previous ChangeAngle that hasn't returned), we toast
+   *   and return early instead of stacking duplicate calls. The card
+   *   spinner can only represent one job at a time anyway.
+   */
+  const runChangeAngle = async (req: ChangeAngleSubmit) => {
+    const inFlight = getLoading(projectId).editGeneratingIds;
+    if (inFlight.has(req.sceneId)) {
+      toast({
+        title: `Scene ${req.sceneNumber} is still generating`,
+        description: "Wait for the current edit to finish before applying another angle.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setEditGeneratingIds((prev) => new Set(prev).add(req.sceneId));
+    setSceneStages((prev) => ({ ...prev, [req.sceneId]: "generating" }));
+    try {
+      const { data, error: invokeErr } = await supabase.functions.invoke("openai-image", {
+        body: req.body,
+      });
+      if (invokeErr) throw invokeErr;
+      const d = data as { publicUrl?: string; url?: string; usedModel?: string } | null;
+      const newUrl = d?.publicUrl ?? d?.url ?? null;
+      if (!newUrl) throw new Error("Change Angle returned no image URL");
+      console.log("[ChangeAngle] success:", { usedModel: d?.usedModel });
+      pushHistory(req.sceneId, req.sourceImageUrl);
+      await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", req.sceneId);
+      const current = getSceneState(projectId)?.scenes ?? activeScenes;
+      const updated = current.map((s) =>
+        s.id === req.sceneId ? { ...s, conti_image_url: newUrl } : s,
+      );
+      await updateVersionScenes(updated);
+      bumpCache(req.sceneNumber);
+      toast({ title: `Scene ${req.sceneNumber} re-angled.` });
+    } catch (err: any) {
+      console.error("[ChangeAngle] failed:", err);
+      toast({
+        title: `Scene ${req.sceneNumber} change angle failed`,
+        description: err?.message ?? String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setEditGeneratingIds((prev) => {
+        const n = new Set(prev);
+        n.delete(req.sceneId);
+        return n;
+      });
+      setSceneStages((prev) => {
+        const n = { ...prev };
+        delete n[req.sceneId];
+        return n;
+      });
+    }
+  };
+
+  /**
+   * Background runner for Relight. Mirror of `runChangeAngle` — same
+   * `editGeneratingIds` + `sceneStages` channel so the scene card shows
+   * the standard `1/1 Generating…` overlay while the modal stays closed.
+   */
+  const runRelight = async (req: RelightSubmit) => {
+    const inFlight = getLoading(projectId).editGeneratingIds;
+    if (inFlight.has(req.sceneId)) {
+      toast({
+        title: `Scene ${req.sceneNumber} is still generating`,
+        description: "Wait for the current edit to finish before relighting.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setEditGeneratingIds((prev) => new Set(prev).add(req.sceneId));
+    setSceneStages((prev) => ({ ...prev, [req.sceneId]: "generating" }));
+    try {
+      const { data, error: invokeErr } = await supabase.functions.invoke("openai-image", {
+        body: req.body,
+      });
+      if (invokeErr) throw invokeErr;
+      const d = data as { publicUrl?: string; url?: string } | null;
+      const newUrl = d?.publicUrl ?? d?.url ?? null;
+      if (!newUrl) throw new Error("Relight returned no image URL");
+      pushHistory(req.sceneId, req.sourceImageUrl);
+      await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", req.sceneId);
+      const current = getSceneState(projectId)?.scenes ?? activeScenes;
+      const updated = current.map((s) =>
+        s.id === req.sceneId ? { ...s, conti_image_url: newUrl } : s,
+      );
+      await updateVersionScenes(updated);
+      bumpCache(req.sceneNumber);
+      toast({ title: `Scene ${req.sceneNumber} relit.` });
+    } catch (err: any) {
+      console.error("[Relight] failed:", err);
+      toast({
+        title: `Scene ${req.sceneNumber} relight failed`,
+        description: err?.message ?? String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setEditGeneratingIds((prev) => {
+        const n = new Set(prev);
+        n.delete(req.sceneId);
+        return n;
+      });
+      setSceneStages((prev) => {
+        const n = { ...prev };
+        delete n[req.sceneId];
+        return n;
+      });
+    }
+  };
+
   const handleUploadConti = async (scene: Scene, file: File) => {
     setUploadingSceneIds((prev) => new Set(prev).add(scene.id));
     try {
@@ -2315,7 +2610,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       bumpCache(scene.scene_number);
       toast({ title: `Scene ${scene.scene_number} image uploaded.` });
     } catch (err: any) {
-      toast({ title: "업로드 실패", description: err.message, variant: "destructive" });
+      toast({ title: "Upload failed", description: err.message, variant: "destructive" });
     } finally {
       setUploadingSceneIds((prev) => {
         const n = new Set(prev);
@@ -2331,7 +2626,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const MODEL_OPTIONS: { id: ContiModel; name: string; desc: string }[] = [
     { id: "nano-banana-2", name: "Nano Banana 2", desc: "Consistency + composition (default)" },
-    { id: "gpt", name: "GPT 2", desc: "General purpose" },
+    { id: "gpt", name: "GPT Image 2", desc: "General purpose" },
   ];
   useEffect(() => {
     if (!showModelMenu) return;
@@ -2353,23 +2648,51 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         toast({ title: "Adjacent scenes need images first", variant: "destructive" });
         return;
       }
-      setSceneStages((prev) => ({ ...prev, [scene.id]: "generating" }));
+      setSceneStages((prev) => ({ ...prev, [scene.id]: "translating" }));
       updateGeneratingSceneIds((prev) => new Set(prev).add(scene.id));
       setGeneratingSceneVersionMap((prev) => ({ ...prev, [scene.id]: activeVersionId }));
       try {
-        const { data: imgData } = await supabase.functions.invoke("openai-image", {
-          body: {
-            mode: "inpaint",
-            prompt: `Create a single cinematic transition frame using ${scene.transition_type ?? "CUT"} technique. Blend these two scenes naturally.`,
-            sourceImageUrl: prevScene.conti_image_url,
-            referenceImageUrls: [nextScene.conti_image_url],
-            useNanoBanana: true,
-            projectId,
-            sceneNumber: scene.scene_number,
-            imageSize: IMAGE_SIZE_MAP[videoFormat],
+        const newUrl = await generateTransitionFrame({
+          projectId,
+          videoFormat,
+          briefAnalysis: briefAnalysisRef.current,
+          model: contiModel,
+          prev: {
+            scene_number: prevScene.scene_number,
+            title: prevScene.title,
+            description: prevScene.description,
+            camera_angle: prevScene.camera_angle,
+            mood: prevScene.mood,
+            location: prevScene.location,
+            conti_image_url: prevScene.conti_image_url,
           },
+          next: {
+            scene_number: nextScene.scene_number,
+            title: nextScene.title,
+            description: nextScene.description,
+            camera_angle: nextScene.camera_angle,
+            mood: nextScene.mood,
+            location: nextScene.location,
+            conti_image_url: nextScene.conti_image_url,
+          },
+          tr: {
+            scene_number: scene.scene_number,
+            description: scene.description,
+            transition_type: scene.transition_type,
+          },
+          // Pass the full board so the Claude pre-pass can build a ±2-scene
+          // narrative window around the TR and gauge story position
+          // (opening / mid-body / climax / resolution). Without this the
+          // model only ever sees the two adjacent shots and can't calibrate
+          // technique intensity to where we are in the story.
+          allScenes: activeScenes.map((s) => ({
+            scene_number: s.scene_number,
+            title: s.title,
+            description: s.description,
+            is_transition: !!s.is_transition,
+          })),
+          onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
         });
-        const newUrl = imgData?.publicUrl ?? imgData?.url ?? null;
         if (newUrl) {
           pushHistory(scene.id, scene.conti_image_url);
           await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", scene.id);
@@ -2418,7 +2741,6 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         projectId,
         videoFormat,
         briefAnalysis: briefAnalysisRef.current,
-        moodReferenceUrl: getMoodReferenceUrl(scene.scene_number),
         model: contiModel,
         onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
       });
@@ -2494,7 +2816,6 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               projectId,
               videoFormat,
               briefAnalysis: briefAnalysisRef.current,
-              moodReferenceUrl: getMoodReferenceUrl(scene.scene_number),
               model: contiModel,
               onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
             });
@@ -2562,6 +2883,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       return postProcessChain;
     };
     let doneCount = 0;
+    // Track per-scene failures so the outer toast can tell the user
+    // *something actually went wrong* instead of always claiming success.
+    // Pre-fix this was the source of the "GPT image 2 로 스타일 변형이
+    // 안된다" perception: every scene threw, ContiTab silently swallowed
+    // the throw into console, and the finally block toasted "Style
+    // transfer complete!" — leaving the user staring at unchanged images.
+    const failedScenes: { sceneNumber: number; reason: string }[] = [];
     try {
       for (let i = 0; i < targetScenes.length; i += STYLE_BATCH) {
         const batch = targetScenes.slice(i, i + STYLE_BATCH);
@@ -2592,6 +2920,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 projectId,
                 videoFormat,
                 styleImageUrl: currentStyle?.thumbnail_url ?? null,
+                model: contiModel,
                 onStageChange: (stage) => setSceneStages((prev) => ({ ...prev, [scene.id]: stage })),
               });
               console.log("[StyleTransfer/ContiTab] ✓ got newUrl for scene", scene.scene_number, newUrl);
@@ -2613,11 +2942,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 console.log("[StyleTransfer/ContiTab] ✓ done scene", scene.scene_number);
               });
             } catch (err: any) {
+              const reason = err?.message ?? String(err);
               console.error(
                 `[StyleTransfer/ContiTab] ✗ Scene ${scene.scene_number} FAILED:`,
-                err?.message,
+                reason,
                 err?.stack ?? err,
               );
+              failedScenes.push({ sceneNumber: scene.scene_number, reason });
             } finally {
               setStyleTransferringIds((prev) => {
                 const n = new Set(prev);
@@ -2640,7 +2971,29 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       setStyleTransferProgress(null);
       setQueuedSceneIds(new Set());
       if (mode === "selected") setSelectedSceneIds(new Set());
-      toast({ title: "Style transfer complete!" });
+      // Toast strategy:
+      //   · 0 failed → success
+      //   · all failed → loud destructive toast carrying the first error
+      //                  detail (e.g. the OpenAI message from gpt-image-2)
+      //   · partial → warning toast with counts + first failure reason
+      // The first-failure reason is included so the user can act on
+      // "OPENAI_API_KEY not set" / "invalid size" / etc. without having
+      // to dig through devtools.
+      if (failedScenes.length === 0) {
+        toast({ title: "Style transfer complete!" });
+      } else if (failedScenes.length === targetScenes.length) {
+        toast({
+          variant: "destructive",
+          title: "Style transfer failed",
+          description: failedScenes[0].reason,
+        });
+      } else {
+        toast({
+          variant: "destructive",
+          title: `Style transfer: ${failedScenes.length} of ${targetScenes.length} scenes failed`,
+          description: `Scene ${failedScenes[0].sceneNumber}: ${failedScenes[0].reason}`,
+        });
+      }
     }
   };
 
@@ -2741,7 +3094,9 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       };
       const buildMetaRow = (label: string, value: string | null | undefined) => {
         const v = value || "—";
-        return `<div style="display:flex; gap:6px; align-items:baseline;"><span style="font-size:9px; font-weight:500; color:#666; width:52px; flex-shrink:0;">${label}</span><span style="font-size:9px; color:#aaa;">${escHtml(v)}</span></div>`;
+        // PNG export 와 동일 — 카드 폭 대비 9px 은 너무 작아 PDF/ZIP 에서 글자가
+        // 파묻힘. 15px 로 상향.
+        return `<div style="display:flex; gap:8px; align-items:baseline;"><span style="font-size:15px; font-weight:500; color:#666; width:72px; flex-shrink:0;">${label}</span><span style="font-size:15px; color:#aaa;">${escHtml(v)}</span></div>`;
       };
 
       for (const { label, scenes } of selectedVersions) {
@@ -2755,8 +3110,8 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           const container = document.createElement("div");
           container.style.cssText = `position:fixed; left:-9999px; top:0; z-index:-1; width:${renderW}px; background:#141414; padding:${padX}px; font-family:Pretendard,Inter,sans-serif; display:flex; flex-direction:column; gap:10px;`;
           const header = document.createElement("div");
-          header.style.cssText = "display:flex; align-items:baseline; gap:8px; margin-bottom:2px;";
-          header.innerHTML = `<span style="font-size:14px; font-weight:600; color:#ffffff;">${escHtml(projectInfo.title || "Pre-Flow")}</span><span style="font-size:12px; font-weight:400; color:#f9423a;">${escHtml(label)}</span>`;
+          header.style.cssText = "display:flex; align-items:baseline; gap:10px; margin-bottom:6px;";
+          header.innerHTML = `<span style="font-size:22px; font-weight:600; color:#ffffff;">${escHtml(projectInfo.title || "Pre-Flow")}</span><span style="font-size:18px; font-weight:400; color:#f9423a;">${escHtml(label)}</span>`;
           container.appendChild(header);
           const pageCardRows: HTMLDivElement[] = [];
           for (const row of pageRows) {
@@ -2839,24 +3194,25 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               }
               card.appendChild(imgWrap);
               const textArea = document.createElement("div");
-              textArea.style.cssText = "padding:5px 8px 8px 8px; display:flex; flex-direction:column; gap:5px; flex:1;";
+              textArea.style.cssText =
+                "padding:10px 14px 14px 14px; display:flex; flex-direction:column; gap:8px; flex:1;";
               const titleRow = document.createElement("div");
-              titleRow.style.cssText = "display:flex; align-items:flex-start; gap:6px;";
+              titleRow.style.cssText = "display:flex; align-items:flex-start; gap:8px;";
               const sceneLabel = document.createElement("div");
-              sceneLabel.style.cssText = `font-size:11px; font-weight:600; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
+              sceneLabel.style.cssText = `font-size:17px; font-weight:700; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
               sceneLabel.textContent = getSceneLabel(scene, scenes);
               titleRow.appendChild(sceneLabel);
               if (includeInfoParam && !scene.is_transition) {
                 const title = document.createElement("div");
                 title.style.cssText =
-                  "font-size:11px; font-weight:600; color:#ffffff; word-break:break-word; line-height:1.3; flex:1;";
+                  "font-size:17px; font-weight:600; color:#ffffff; word-break:break-word; line-height:1.3; flex:1;";
                 title.textContent = stripAt(scene.title || `Scene ${scene.scene_number}`);
                 titleRow.appendChild(title);
               }
               textArea.appendChild(titleRow);
               if (includeInfoParam) {
                 const metaWrap = document.createElement("div");
-                metaWrap.style.cssText = "display:flex; flex-direction:column; gap:2px;";
+                metaWrap.style.cssText = "display:flex; flex-direction:column; gap:3px;";
                 metaWrap.innerHTML = [
                   buildMetaRow("Camera", scene.camera_angle ? stripAt(scene.camera_angle) : null),
                   buildMetaRow("Mood", scene.mood ? stripAt(scene.mood) : null),
@@ -2868,7 +3224,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               if (scene.description) {
                 const desc = document.createElement("div");
                 desc.style.cssText =
-                  "font-size:9px; color:#999; line-height:1.45; margin-top:3px; white-space:pre-wrap; word-break:break-word;";
+                  "font-size:14px; color:#999; line-height:1.5; margin-top:5px; white-space:pre-wrap; word-break:break-word;";
                 desc.textContent = stripAt(scene.description);
                 textArea.appendChild(desc);
               }
@@ -2958,9 +3314,12 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       };
       const buildMetaRow = (label: string, value: string | null | undefined, large = false) => {
         const v = value || "—";
-        const fs = large ? "12px" : "9px";
-        const lw = large ? "62px" : "52px";
-        return `<div style="display:flex; gap:6px; align-items:baseline;"><span style="font-size:${fs}; font-weight:500; color:#666; width:${lw}; flex-shrink:0;">${label}</span><span style="font-size:${fs}; color:#aaa;">${escHtml(v)}</span></div>`;
+        // Page 모드 기본 9px → 15px 로 상향. 카드 폭 464px 에 비해 기존 9px
+        // 는 이미지 대비 ~1/90 크기라 PNG export 시 글자가 완전히 파묻힘.
+        // large(individual) 모드는 12→15px 로 소폭 조정.
+        const fs = large ? "15px" : "15px";
+        const lw = large ? "72px" : "72px";
+        return `<div style="display:flex; gap:8px; align-items:baseline;"><span style="font-size:${fs}; font-weight:500; color:#666; width:${lw}; flex-shrink:0;">${label}</span><span style="font-size:${fs}; color:#aaa;">${escHtml(v)}</span></div>`;
       };
 
       if (mode === "page") {
@@ -2979,8 +3338,8 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             const container = document.createElement("div");
             container.style.cssText = `position:fixed; left:-9999px; top:0; z-index:-1; width:${renderW}px; background:#141414; padding:${padX}px; font-family:Pretendard,Inter,sans-serif; display:flex; flex-direction:column; gap:10px;`;
             const header = document.createElement("div");
-            header.style.cssText = "display:flex; align-items:baseline; gap:8px; margin-bottom:2px;";
-            header.innerHTML = `<span style="font-size:14px; font-weight:600; color:#ffffff;">${escHtml(projectInfo.title || "Pre-Flow")}</span><span style="font-size:12px; font-weight:400; color:#f9423a;">${escHtml(label)}</span>`;
+            header.style.cssText = "display:flex; align-items:baseline; gap:10px; margin-bottom:6px;";
+            header.innerHTML = `<span style="font-size:22px; font-weight:600; color:#ffffff;">${escHtml(projectInfo.title || "Pre-Flow")}</span><span style="font-size:18px; font-weight:400; color:#f9423a;">${escHtml(label)}</span>`;
             container.appendChild(header);
             const pageCardRows: HTMLDivElement[] = [];
             for (const row of pageRows) {
@@ -3060,30 +3419,32 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                   imgWrap.appendChild(noImg);
                 }
                 card.appendChild(imgWrap);
+                // 카드 폭 ~464px 기준 타이포를 1.6~1.8 배 상향. 기존 11/9px
+                // 은 이미지 대비 글자가 파묻혀 export 시 가독성이 매우 낮았음.
                 const textArea = document.createElement("div");
                 textArea.style.cssText =
-                  "padding:5px 8px 8px 8px; display:flex; flex-direction:column; gap:5px; flex:1;";
+                  "padding:10px 14px 14px 14px; display:flex; flex-direction:column; gap:8px; flex:1;";
                 const titleRow = document.createElement("div");
-                titleRow.style.cssText = "display:flex; align-items:flex-start; gap:6px;";
+                titleRow.style.cssText = "display:flex; align-items:flex-start; gap:8px;";
                 const sceneLabel = document.createElement("div");
-                sceneLabel.style.cssText = `font-size:11px; font-weight:600; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
+                sceneLabel.style.cssText = `font-size:17px; font-weight:700; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
                 sceneLabel.textContent = getSceneLabel(scene, scenes);
                 titleRow.appendChild(sceneLabel);
                 if (includeInfo && !scene.is_transition) {
                   const title = document.createElement("div");
                   title.style.cssText =
-                    "font-size:11px; font-weight:600; color:#ffffff; word-break:break-word; line-height:1.3; flex:1;";
+                    "font-size:17px; font-weight:600; color:#ffffff; word-break:break-word; line-height:1.3; flex:1;";
                   title.textContent = stripAt(scene.title || `Scene ${scene.scene_number}`);
                   titleRow.appendChild(title);
                 }
                 textArea.appendChild(titleRow);
                 if (includeInfo) {
                   const metaWrap = document.createElement("div");
-                  metaWrap.style.cssText = "display:flex; flex-direction:column; gap:2px;";
+                  metaWrap.style.cssText = "display:flex; flex-direction:column; gap:3px;";
                   metaWrap.innerHTML = [
                     buildMetaRow("Camera", scene.camera_angle ? stripAt(scene.camera_angle) : null),
                     buildMetaRow("Mood", scene.mood ? stripAt(scene.mood) : null),
-                    buildMetaRow("Location", scene.location ? stripAt(scene.location) : null),
+                    buildMetaRow("Location", scene.location ? stripAt(scene.location) : null,),
                     buildMetaRow("Duration", scene.duration_sec ? `${scene.duration_sec}s` : null),
                   ].join("");
                   textArea.appendChild(metaWrap);
@@ -3091,7 +3452,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 if (scene.description) {
                   const desc = document.createElement("div");
                   desc.style.cssText =
-                    "font-size:9px; color:#999; line-height:1.45; margin-top:3px; white-space:pre-wrap; word-break:break-word;";
+                    "font-size:14px; color:#999; line-height:1.5; margin-top:5px; white-space:pre-wrap; word-break:break-word;";
                   desc.textContent = stripAt(scene.description);
                   textArea.appendChild(desc);
                 }
@@ -3247,26 +3608,28 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               imgWrap.appendChild(noImg);
             }
             container.appendChild(imgWrap);
+            // Individual 모드 800px 컨테이너에 1000px+ 이미지 → 14px 텍스트는
+            // 상대적으로 작아 보임. 20px 라인으로 통일해서 export 가독성 확보.
             const textArea = document.createElement("div");
             textArea.style.cssText =
-              "padding:10px 14px 16px; display:flex; flex-direction:column; gap:6px; background:#1a1a1a;";
+              "padding:14px 18px 20px; display:flex; flex-direction:column; gap:8px; background:#1a1a1a;";
             const indTitleRow = document.createElement("div");
-            indTitleRow.style.cssText = "display:flex; align-items:baseline; gap:8px;";
+            indTitleRow.style.cssText = "display:flex; align-items:baseline; gap:10px;";
             const indSceneLabel = document.createElement("span");
-            indSceneLabel.style.cssText = `font-size:14px; font-weight:700; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
+            indSceneLabel.style.cssText = `font-size:20px; font-weight:700; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
             indSceneLabel.textContent = getSceneLabel(scene, scenes);
             indTitleRow.appendChild(indSceneLabel);
             if (includeInfo && !scene.is_transition) {
               const indTitleEl = document.createElement("span");
               indTitleEl.style.cssText =
-                "font-size:14px; font-weight:600; color:#ffffff; line-height:1.3; word-break:break-word;";
+                "font-size:20px; font-weight:600; color:#ffffff; line-height:1.3; word-break:break-word;";
               indTitleEl.textContent = stripAt(scene.title || `Scene ${scene.scene_number}`);
               indTitleRow.appendChild(indTitleEl);
             }
             textArea.appendChild(indTitleRow);
             if (includeInfo && !scene.is_transition) {
               const indMetaWrap = document.createElement("div");
-              indMetaWrap.style.cssText = "display:flex; flex-direction:column; gap:2px;";
+              indMetaWrap.style.cssText = "display:flex; flex-direction:column; gap:4px;";
               indMetaWrap.innerHTML = [
                 buildMetaRow("Camera", scene.camera_angle ? stripAt(scene.camera_angle) : null, true),
                 buildMetaRow("Mood", scene.mood ? stripAt(scene.mood) : null, true),
@@ -3278,7 +3641,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             if (scene.description) {
               const indDesc = document.createElement("div");
               indDesc.style.cssText =
-                "font-size:13px; color:#999; line-height:1.5; white-space:pre-wrap; word-break:break-word;";
+                "font-size:16px; color:#999; line-height:1.55; white-space:pre-wrap; word-break:break-word;";
               indDesc.textContent = stripAt(scene.description);
               textArea.appendChild(indDesc);
             }
@@ -3347,6 +3710,11 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
 
   const noDescriptionCount = activeScenes.filter((s) => !s.is_transition && !s.description?.trim()).length;
   const scenesWithImages = activeScenes.filter((s) => !s.is_transition && s.conti_image_url).length;
+  // Transfer 대상 = runStyleTransferAll('all') 의 타깃과 동일해야 버튼에 찍히는
+  // 숫자와 실제 처리 건수가 일치한다. 실제 타깃은 TR 카드도 포함하므로
+  // 여기서도 is_transition 필터를 뗀다. 서브바의 "Img N/M" 카운터는 여전히
+  // "씬 중 이미지 보유 수" 라는 별개 semantic 이라 scenesWithImages 그대로 쓴다.
+  const transferableSceneCount = activeScenes.filter((s) => s.conti_image_url).length;
   const dragActiveScene = dragActiveId ? activeScenes.find((s) => s.id === dragActiveId) : null;
 
   return (
@@ -3620,7 +3988,17 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           )}
         </div>
 
-        {selectedSceneIds.size > 0 ? (
+        {/* ── Selection chip (only when something is checked) ──────────
+         * Selection state used to REPLACE the entire main toolbar (model
+         * picker / Generate All / Transfer / Info / Export). That meant
+         * the moment a user ticked a card they lost the ability to see or
+         * change the current generator model — making "Transfer" feel
+         * like it ignored the model selector even though it was plumbed
+         * correctly downstream (ContiTab → styleTransfer → openai-image
+         * handler). We now render the main toolbar unconditionally and
+         * only prepend/append selection-specific chips here.
+         */}
+        {selectedSceneIds.size > 0 && (
           <>
             <div className="w-px h-5 mx-1" style={{ background: "rgba(255,255,255,0.08)" }} />
             <span className="text-[10px] font-mono font-medium tracking-wide" style={{ color: "#f0f0f0" }}>
@@ -3640,145 +4018,159 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             >
               <X className="w-3 h-3" />
             </button>
-            {currentStyle && activeScenes.some((s) => s.conti_image_url && selectedSceneIds.has(s.id)) && (
-              <button
-                onClick={() => setShowStyleTransferModal(true)}
-                disabled={styleTransferring || generatingAll}
-                className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-opacity disabled:opacity-40"
-                style={{ background: KR, border: "none", cursor: "pointer", borderRadius: 0 }}
-              >
-                {styleTransferring ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Wand2 className="w-3.5 h-3.5" />
-                )}
-                Transfer
-              </button>
-            )}
-            <button
-              onClick={bulkDeleteScenes}
-              className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-colors"
-              style={{ background: "#dc2626", border: "none", cursor: "pointer", borderRadius: 0 }}
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              Delete ({selectedSceneIds.size})
-            </button>
           </>
-        ) : (
-          <>
-            <div className="relative" ref={modelMenuRef}>
-              <button
-                onClick={() => setShowModelMenu((p) => !p)}
-                className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors"
-                style={{
-                  background: "rgba(255,255,255,0.04)",
-                  color: "rgba(255,255,255,0.7)",
-                  border: showModelMenu ? `1px solid ${KR}` : "1px solid rgba(255,255,255,0.08)",
-                  cursor: "pointer",
-                  borderRadius: 0,
-                }}
-              >
-                <Wand2 className="w-3.5 h-3.5" />
-                {MODEL_OPTIONS.find((m) => m.id === contiModel)?.name ?? "Dev"}
-              </button>
-              {showModelMenu && (
-                <div
-                  className="absolute top-full left-0 mt-1 z-50 border border-border bg-card shadow-lg"
-                  style={{ borderRadius: 0, minWidth: 160 }}
-                >
-                  {MODEL_OPTIONS.map((opt) => {
-                    const isSelected = contiModel === opt.id;
-                    return (
-                      <button
-                        key={opt.id}
-                        onClick={() => {
-                          setContiModel(opt.id);
-                          setShowModelMenu(false);
-                        }}
-                        className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-[rgba(249,66,58,0.06)]"
-                        style={{
-                          background: isSelected ? KR_BG : "transparent",
-                          borderRadius: 0,
-                          cursor: "pointer",
-                          border: "none",
-                        }}
+        )}
+
+        {/* ── Model picker (always visible) ──────────────────────────── */}
+        <div className="relative" ref={modelMenuRef}>
+          <button
+            onClick={() => setShowModelMenu((p) => !p)}
+            className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors"
+            style={{
+              background: "rgba(255,255,255,0.04)",
+              color: "rgba(255,255,255,0.7)",
+              border: showModelMenu ? `1px solid ${KR}` : "1px solid rgba(255,255,255,0.08)",
+              cursor: "pointer",
+              borderRadius: 0,
+            }}
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+            {MODEL_OPTIONS.find((m) => m.id === contiModel)?.name ?? "Dev"}
+          </button>
+          {showModelMenu && (
+            <div
+              className="absolute top-full left-0 mt-1 z-50 border border-border bg-card shadow-lg"
+              style={{ borderRadius: 0, minWidth: 160 }}
+            >
+              {MODEL_OPTIONS.map((opt) => {
+                const isSelected = contiModel === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => {
+                      setContiModel(opt.id);
+                      setShowModelMenu(false);
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-[rgba(249,66,58,0.06)]"
+                    style={{
+                      background: isSelected ? KR_BG : "transparent",
+                      borderRadius: 0,
+                      cursor: "pointer",
+                      border: "none",
+                    }}
+                  >
+                    <div className="flex-1">
+                      <div
+                        className="text-[11px] font-bold"
+                        style={{ color: isSelected ? KR : "rgba(255,255,255,0.7)" }}
                       >
-                        <div className="flex-1">
-                          <div
-                            className="text-[11px] font-bold"
-                            style={{ color: isSelected ? KR : "rgba(255,255,255,0.7)" }}
-                          >
-                            {opt.name}
-                          </div>
-                          <div className="text-[9px]" style={{ color: "rgba(255,255,255,0.35)" }}>
-                            {opt.desc}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+                        {opt.name}
+                      </div>
+                      <div className="text-[9px]" style={{ color: "rgba(255,255,255,0.35)" }}>
+                        {opt.desc}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
+          )}
+        </div>
 
-            <button
-              onClick={() => setShowGenerateAllModal(true)}
-              disabled={generatingAll || activeScenes.length === 0}
-              className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-opacity disabled:opacity-40"
-              style={{ background: KR, border: "none", cursor: "pointer", borderRadius: 0 }}
-            >
-              {generatingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-              Generate All
-            </button>
+        {/* ── Generate All (always visible) ──────────────────────────── */}
+        <button
+          onClick={() => setShowGenerateAllModal(true)}
+          disabled={generatingAll || activeScenes.length === 0}
+          className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-opacity disabled:opacity-40"
+          style={{ background: KR, border: "none", cursor: "pointer", borderRadius: 0 }}
+        >
+          {generatingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+          Generate All
+        </button>
 
-            <button
-              onClick={() => setShowInfo((p) => !p)}
-              className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors"
-              style={{
-                background: showInfo ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.04)",
-                color: showInfo ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.35)",
-                border: `1px solid ${showInfo ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)"}`,
-                cursor: "pointer",
-                borderRadius: 0,
-              }}
-            >
-              {showInfo ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-              Info
-            </button>
-
-            <button
-              onClick={() => setShowExportModal(true)}
-              disabled={isExporting || activeScenes.length === 0}
-              className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors disabled:opacity-40"
-              style={{
-                background: "rgba(255,255,255,0.04)",
-                color: "rgba(255,255,255,0.5)",
-                border: "1px solid rgba(255,255,255,0.08)",
-                cursor: "pointer",
-                borderRadius: 0,
-              }}
-            >
-              {isExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-              Export
-            </button>
-
-            {versions.length === 0 && activeScenes.length > 0 && (
-              <button
-                onClick={() => setShowNewVersionModal(true)}
-                className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors"
-                style={{
-                  background: "rgba(255,255,255,0.04)",
-                  color: "rgba(255,255,255,0.35)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  cursor: "pointer",
-                  borderRadius: 0,
-                }}
-              >
-                <Plus className="w-3.5 h-3.5" />
-                New
-              </button>
+        {/* ── Transfer (always visible when a style is picked and there's
+         * at least one scene to apply it to) ────────────────────────────
+         * Used to only appear under `selectedSceneIds.size > 0`, which
+         * hid it whenever no card was checked. The StyleTransferConfirmModal
+         * already offers both "Transfer All (N)" and "Selected (M)"
+         * buttons based on the `selectedCount` prop, so this button can
+         * legitimately drive the whole UX from the always-visible state.
+         */}
+        {currentStyle && transferableSceneCount > 0 && (
+          <button
+            onClick={() => setShowStyleTransferModal(true)}
+            disabled={styleTransferring || generatingAll}
+            className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-opacity disabled:opacity-40"
+            style={{ background: KR, border: "none", cursor: "pointer", borderRadius: 0 }}
+          >
+            {styleTransferring ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Wand2 className="w-3.5 h-3.5" />
             )}
-          </>
+            Transfer
+          </button>
+        )}
+
+        {/* ── Delete (only when selection > 0) ───────────────────────── */}
+        {selectedSceneIds.size > 0 && (
+          <button
+            onClick={bulkDeleteScenes}
+            className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-colors"
+            style={{ background: "#dc2626", border: "none", cursor: "pointer", borderRadius: 0 }}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            Delete ({selectedSceneIds.size})
+          </button>
+        )}
+
+        {/* ── Info / Export / New (always visible) ───────────────────── */}
+        <button
+          onClick={() => setShowInfo((p) => !p)}
+          className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors"
+          style={{
+            background: showInfo ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.04)",
+            color: showInfo ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.35)",
+            border: `1px solid ${showInfo ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)"}`,
+            cursor: "pointer",
+            borderRadius: 0,
+          }}
+        >
+          {showInfo ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+          Info
+        </button>
+
+        <button
+          onClick={() => setShowExportModal(true)}
+          disabled={isExporting || activeScenes.length === 0}
+          className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors disabled:opacity-40"
+          style={{
+            background: "rgba(255,255,255,0.04)",
+            color: "rgba(255,255,255,0.5)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            cursor: "pointer",
+            borderRadius: 0,
+          }}
+        >
+          {isExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+          Export
+        </button>
+
+        {versions.length === 0 && activeScenes.length > 0 && (
+          <button
+            onClick={() => setShowNewVersionModal(true)}
+            className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors"
+            style={{
+              background: "rgba(255,255,255,0.04)",
+              color: "rgba(255,255,255,0.35)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              cursor: "pointer",
+              borderRadius: 0,
+            }}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            New
+          </button>
         )}
       </div>
 
@@ -3899,6 +4291,10 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                           onChangeAngle={
                             scene.conti_image_url ? () => setChangeAngleScene(scene) : undefined
                           }
+                          onSketches={() => {
+                            setStudioInitialTab("sketches");
+                            setStudioScene(scene);
+                          }}
                           displayNumber={displayNum}
                           onTransitionTypeChange={handleTransitionTypeChange}
                           showInfo={showInfo}
@@ -3958,16 +4354,12 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           projectId={projectId}
           videoFormat={videoFormat}
           onClose={() => setRelightingScene(null)}
-          onApplied={async (newUrl, previousUrl) => {
-            const target = relightingScene;
-            if (!target) return;
-            pushHistory(target.id, previousUrl);
-            await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", target.id);
-            const current = getSceneState(projectId)?.scenes ?? activeScenes;
-            const updated = current.map((s) => (s.id === target.id ? { ...s, conti_image_url: newUrl } : s));
-            await updateVersionScenes(updated);
-            bumpCache(target.scene_number);
-            toast({ title: `Scene ${target.scene_number} relit.` });
+          onSubmit={(req) => {
+            // Modal already calls onClose; do NOT await here. The runner
+            // drives the same `editGeneratingIds` + `sceneStages` channel
+            // that inpaint / ChangeAngle use, so the user sees
+            // `1/1 Generating…` on the card and can keep working.
+            void runRelight(req);
           }}
         />
       )}
@@ -4075,16 +4467,12 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           projectId={projectId}
           videoFormat={videoFormat}
           onClose={() => setChangeAngleScene(null)}
-          onApplied={async (newUrl, previousUrl) => {
-            const target = changeAngleScene;
-            if (!target) return;
-            pushHistory(target.id, previousUrl);
-            await supabase.from("scenes").update({ conti_image_url: newUrl }).eq("id", target.id);
-            const current = getSceneState(projectId)?.scenes ?? activeScenes;
-            const updated = current.map((s) => (s.id === target.id ? { ...s, conti_image_url: newUrl } : s));
-            await updateVersionScenes(updated);
-            bumpCache(target.scene_number);
-            toast({ title: `Scene ${target.scene_number} re-angled.` });
+          onSubmit={(req) => {
+            // Modal already calls onClose; do NOT await here. The runner
+            // drives the same `editGeneratingIds` + `sceneStages` channel
+            // that inpaint uses, so the user sees `1/1 Generating…` on
+            // the card and can keep working in the meantime.
+            void runChangeAngle(req);
           }}
         />
       )}
@@ -4147,6 +4535,28 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               return next;
             });
           }}
+          // StudioSketchesTab calls this with a functional updater (not
+          // a final array) so that two sibling-model batches finishing
+          // in the same tick can each merge their delta against the
+          // freshest version-JSON snapshot, instead of both computing
+          // `merged` against the same stale React state and clobbering
+          // each other (NB visible / GPT missing symptom).
+          //
+          // We mirror the result into `activeScenes` + the active
+          // version's scenes JSON so (a) SortableContiCard's sketch-
+          // count badge updates live and (b) reopening Studio doesn't
+          // hand back a stale `scene.sketches` prop that would clobber
+          // the freshly-saved list.
+          onSketchesUpdated={(sceneId, updater) => {
+            const latest = getSceneState(projectId)?.scenes ?? activeScenes;
+            void updateVersionScenes(
+              latest.map((s) =>
+                s.id === sceneId
+                  ? { ...s, sketches: updater(Array.isArray(s.sketches) ? s.sketches : []) }
+                  : s,
+              ),
+            );
+          }}
           // ── inpaint stage를 카드 스피너에 전달 ──
           onStageChange={(sceneId, stage) => {
             setSceneStages((prev) => {
@@ -4181,7 +4591,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           aspectClass={ASPECT_CLASS[videoFormat]}
           onClose={() => setHistorySheet(null)}
           onRollback={(url) => handleRollback(historySheet, url)}
-          onDelete={(url) => {
+          onDelete={async (url) => {
             const sn = historySheet.scene_number;
             setImageHistory((prev) => {
               const updated = (prev[sn] ?? []).filter((u) => u !== url);
@@ -4190,15 +4600,20 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             const scene = (getSceneState(projectId)?.scenes ?? activeScenes).find((s) => s.scene_number === sn);
             if (scene) {
               const updatedHist = (imageHistory[sn] ?? []).filter((u) => u !== url);
-              supabase.from("scenes").update({ conti_image_history: updatedHist }).eq("id", scene.id).then();
+              // DB 업데이트를 await 한 뒤에 reference-check 를 돌려야
+              // 방금 뺀 자신이 false-positive 로 잡혀 파일이 orphan 으로
+              // 남는 걸 피할 수 있다.
+              await supabase
+                .from("scenes")
+                .update({ conti_image_history: updatedHist })
+                .eq("id", scene.id);
             }
-            // 히스토리에서 빼면서 실제 PNG 파일도 디스크에서 제거.
-            // 단, 그 URL 이 현재 active conti_image_url 이면 (하이라이트된
-            // 라이브 이미지) 파일 삭제는 건너뛴다 — 화면에서 깨진 이미지가
-            // 뜨는 걸 방지. active 아닌 과거 버전만 실제 삭제.
-            const allScenes = getSceneState(projectId)?.scenes ?? activeScenes;
-            const stillActive = allScenes.some((s) => s.conti_image_url === url);
-            if (!stillActive) void deleteStoredFile(url);
+            // 프로젝트 내 모든 위치(다른 씬의 history, sketches, scene_versions
+            // snapshot, Mood Ideation 배열) 를 훑어 아직 참조중이면 스킵.
+            // 단일 active version 기준의 `conti_image_url` 만 확인하던 기존
+            // 체크가 멀티버전/스케치/무드 경로와 겹치는 URL 을 오삭제해
+            // HistorySheet 엑박을 만들던 회귀를 차단한다.
+            void deleteStoredFileIfUnreferenced(projectId, url);
           }}
         />
       )}
@@ -4241,7 +4656,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         <StyleTransferConfirmModal
           styleName={currentStyle.name}
           styleThumb={currentStyle.thumbnail_url}
-          sceneCount={scenesWithImages}
+          sceneCount={transferableSceneCount}
           selectedCount={activeScenes.filter((s) => s.conti_image_url && selectedSceneIds.has(s.id)).length}
           onClose={() => setShowStyleTransferModal(false)}
           onConfirm={runStyleTransferAll}

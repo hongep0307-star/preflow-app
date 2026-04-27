@@ -1,23 +1,41 @@
 import { Sparkles } from "lucide-react";
 import { KR } from "./agentTypes";
 
-const CONTENT_TYPE_META: Record<string, { ko: string; color: string }> = {
-  product_launch: { ko: "상품 런칭", color: "#f59e0b" },
-  event: { ko: "이벤트", color: "#8b5cf6" },
-  update: { ko: "업데이트", color: "#06b6d4" },
-  community: { ko: "커뮤니티", color: "#10b981" },
-  brand_film: { ko: "브랜드 필름", color: "#f9423a" },
+const CONTENT_TYPE_META: Record<string, { label: string; color: string }> = {
+  product_launch: { label: "Product Launch", color: "#f59e0b" },
+  event: { label: "Event", color: "#8b5cf6" },
+  update: { label: "Update", color: "#06b6d4" },
+  community: { label: "Community", color: "#10b981" },
+  brand_film: { label: "Brand Film", color: "#f9423a" },
 };
 
-const HOOK_LABEL_KO: Record<string, string> = {
-  gameplay_first: "게임플레이 우선",
-  fail_solve: "실패→해결",
-  power_fantasy: "파워 판타지",
-  unboxing_reveal: "언박싱 공개",
-  before_after: "전/후 비교",
-  mystery_tease: "미스터리 티저",
-  testimonial: "증언",
-  pattern_interrupt: "패턴 인터럽트",
+const HOOK_LABEL: Record<string, string> = {
+  gameplay_first: "Gameplay First",
+  fail_solve: "Fail → Solve",
+  power_fantasy: "Power Fantasy",
+  unboxing_reveal: "Unboxing Reveal",
+  before_after: "Before / After",
+  mystery_tease: "Mystery Tease",
+  testimonial: "Testimonial",
+  pattern_interrupt: "Pattern Interrupt",
+};
+
+type FieldKey = "goal" | "target" | "usp" | "tone";
+
+// Friendly English display labels for the four core fields.
+const FIELD_LABEL: Record<FieldKey, string> = {
+  goal: "Goal",
+  target: "Target",
+  usp: "USP",
+  tone: "Tone & Manner",
+};
+
+// Aliases that may appear in the seed context (Korean first, then English).
+const FIELD_ALIASES: Record<FieldKey, string[]> = {
+  goal: ["목표", "Goal"],
+  target: ["타겟", "Target"],
+  usp: ["USP"],
+  tone: ["톤앤매너", "Tone & Manner", "Tone and Manner"],
 };
 
 export const BriefAnalysisCard = ({ content }: { content: string }) => {
@@ -25,40 +43,48 @@ export const BriefAnalysisCard = ({ content }: { content: string }) => {
     .replace(/^\[브리프 분석 결과\]\s*/i, "")
     .replace(/^\[Brief Analysis\]\s*/i, "");
 
-  // label: value (공백 필수) — "9:16" 같이 공백 없는 콜론은 label로 해석되지 않음
-  const extract = (label: string): string | null => {
-    const esc = label.replace(/([.*+?^=!:${}()|[\]\\])/g, "\\$1");
-    const re = new RegExp(`^${esc}:\\s+(.+)$`, "m");
-    const m = raw.match(re);
-    return m ? m[1].trim() : null;
+  const extract = (aliases: string[]): string | null => {
+    for (const label of aliases) {
+      const esc = label.replace(/([.*+?^=!:${}()|[\]\\])/g, "\\$1");
+      const re = new RegExp(`^${esc}:\\s+(.+)$`, "m");
+      const m = raw.match(re);
+      if (m) return m[1].trim();
+    }
+    return null;
   };
 
-  const goal = extract("목표");
-  const target = extract("타겟");
-  const usp = extract("USP");
-  const tone = extract("톤앤매너");
-  const ideaNote = extract("아이디어 메모");
-  const directorRec = extract("디렉터 추천");
+  const goal = extract(FIELD_ALIASES.goal);
+  const target = extract(FIELD_ALIASES.target);
+  const usp = extract(FIELD_ALIASES.usp);
+  const tone = extract(FIELD_ALIASES.tone);
+  const ideaNote = extract(["아이디어 메모", "Idea Memo", "Idea Note"]);
+  const directorRec = extract(["디렉터 추천", "Director Recommendation", "Director Rec"]);
 
-  const ctMatch = raw.match(/\[콘텐츠 타입\]\s*(\w+)(?:\s*\(신뢰도\s*(\d+)%\))?/);
+  const ctMatch =
+    raw.match(/\[콘텐츠 타입\]\s*(\w+)(?:\s*\(신뢰도\s*(\d+)%\))?/) ||
+    raw.match(/\[Content Type\]\s*(\w+)(?:\s*\(confidence\s*(\d+)%\))?/i);
   const contentType = ctMatch?.[1];
   const contentTypeConf = ctMatch?.[2];
   const contentTypeMeta = contentType ? CONTENT_TYPE_META[contentType] : null;
-  const contentTypeLabel = contentTypeMeta?.ko ?? contentType ?? null;
+  const contentTypeLabel = contentTypeMeta?.label ?? contentType ?? null;
   const contentTypeColor = contentTypeMeta?.color ?? KR;
 
-  const formatMatch = raw.match(/-\s*포맷\s+(\S+)\s*·\s*길이\s+(\S+)/);
+  const formatMatch =
+    raw.match(/-\s*포맷\s+(\S+)\s*·\s*길이\s+(\S+)/) ||
+    raw.match(/-\s*Format\s+(\S+)\s*·\s*Duration\s+(\S+)/i);
   const format = formatMatch?.[1];
   const duration = formatMatch?.[2];
 
-  const sceneMatch = raw.match(/-\s*씬 수:\s*(\d+)(?:\s*\(범위\s*(\d+)~(\d+)\))?/);
+  const sceneMatch =
+    raw.match(/-\s*씬 수:\s*(\d+)(?:\s*\(범위\s*(\d+)~(\d+)\))?/) ||
+    raw.match(/-\s*Scenes:\s*(\d+)(?:\s*\(range\s*(\d+)[~-](\d+)\))?/i);
   const scenesRec = sceneMatch?.[1];
 
   const hookMatch = raw.match(/-\s*primary:\s*(\w+)/);
   const hook = hookMatch?.[1];
-  const hookLabel = hook ? (HOOK_LABEL_KO[hook] ?? hook) : null;
+  const hookLabel = hook ? (HOOK_LABEL[hook] ?? hook) : null;
 
-  // 끝에 붙어 있는 자유 서술 (예: "이 브리프를 바탕으로 ...") 을 추출
+  // Extract trailing free-form request text (if any).
   const blocks = raw.split(/\n\n+/);
   const lastBlock = blocks[blocks.length - 1]?.trim() ?? "";
   const isStructured =
@@ -68,16 +94,16 @@ export const BriefAnalysisCard = ({ content }: { content: string }) => {
   const requestText = !isStructured && lastBlock.length > 0 ? lastBlock : null;
 
   const coreFields = [
-    { key: "목표", value: goal, color: "#f9423a" },
-    { key: "타겟", value: target, color: "#6366f1" },
-    { key: "USP", value: usp, color: "#d97706" },
-    { key: "톤앤매너", value: tone, color: "#059669" },
+    { key: FIELD_LABEL.goal, value: goal, color: "#f9423a" },
+    { key: FIELD_LABEL.target, value: target, color: "#6366f1" },
+    { key: FIELD_LABEL.usp, value: usp, color: "#d97706" },
+    { key: FIELD_LABEL.tone, value: tone, color: "#059669" },
   ].filter((f) => f.value);
 
   const metaPills: { label: string; value: string }[] = [];
-  if (format) metaPills.push({ label: "포맷", value: duration ? `${format} · ${duration}` : format });
-  if (scenesRec) metaPills.push({ label: "씬", value: `${scenesRec}개` });
-  if (hookLabel) metaPills.push({ label: "훅", value: hookLabel });
+  if (format) metaPills.push({ label: "Format", value: duration ? `${format} · ${duration}` : format });
+  if (scenesRec) metaPills.push({ label: "Scenes", value: `${scenesRec}` });
+  if (hookLabel) metaPills.push({ label: "Hook", value: hookLabel });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -181,7 +207,7 @@ export const BriefAnalysisCard = ({ content }: { content: string }) => {
           {ideaNote && (
             <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", lineHeight: 1.5 }}>
               <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", opacity: 0.55, marginRight: 6, textTransform: "uppercase" as const }}>
-                아이디어
+                Idea
               </span>
               {ideaNote}
             </div>
@@ -189,7 +215,7 @@ export const BriefAnalysisCard = ({ content }: { content: string }) => {
           {directorRec && (
             <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", lineHeight: 1.5 }}>
               <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", opacity: 0.55, marginRight: 6, textTransform: "uppercase" as const }}>
-                디렉터
+                Director
               </span>
               {directorRec}
             </div>
@@ -197,7 +223,7 @@ export const BriefAnalysisCard = ({ content }: { content: string }) => {
         </div>
       )}
 
-      {/* Trailing request text (e.g. "이 브리프를 바탕으로 ...") */}
+      {/* Trailing request text */}
       {requestText && (
         <div
           style={{

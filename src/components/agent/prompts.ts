@@ -8,8 +8,8 @@ export const FORMAT_CONTEXT: Record<string, string> = {
   square: "정방형(1:1) 영상. SNS 플랫폼.",
 };
 
-export const LANG_DIRECTIVE_KO = `CRITICAL LANGUAGE RULE — KOREAN OUTPUT (한국어)
-ALL output text MUST be in Korean. This applies to EVERY field in EVERY block:
+export const LANG_DIRECTIVE_KO = `DEFAULT LANGUAGE RULE — KOREAN OUTPUT (한국어)
+By default, ALL output text should be in Korean — unless the user has explicitly requested a different language in chat (see LANGUAGE OVERRIDE section at the end). This applies to EVERY field in EVERY block:
 - scene block: title, description, camera_angle, location, mood — ALL Korean
 - strategy block: ALL Korean
 - storylines block: title, synopsis, mood — ALL Korean
@@ -54,17 +54,36 @@ DO NOT write mood in pure English.
   ✗ BAD:  "mood": "Tense, cool teal tones, minimal"
 DO NOT prefix description with a camera header like "VLS / Eye Level / Slow Push In —". Camera info belongs ONLY in camera_angle.
 
+[LANGUAGE OVERRIDE — USER REQUEST PRIORITY]
+The above language rule is the DEFAULT, not absolute.
+If the user explicitly requests a different output language in chat
+(e.g. "in English", "영어로 다시 써줘", "switch to Japanese", "rewrite in Spanish"),
+follow that request immediately and use the new language for that response
+and all subsequent responses, until the user requests another language.
+This user instruction takes priority over the default language rule above.
+Code fence labels (\`\`\`scene, \`\`\`strategy, \`\`\`storylines, \`\`\`scene_alt, \`\`\`scene_audit, \`\`\`reference_decomposition) and asset @tag_name remain unchanged.
+JSON keys remain unchanged; only string VALUES translate.
+
 `;
 
-export const LANG_DIRECTIVE_EN = `CRITICAL LANGUAGE RULE — ENGLISH OUTPUT
-ALL output text MUST be in English. This applies to EVERY field in EVERY block:
+export const LANG_DIRECTIVE_EN = `DEFAULT LANGUAGE RULE — ENGLISH OUTPUT
+By default, ALL output text should be in English — unless the user has explicitly requested a different language in chat (see LANGUAGE OVERRIDE section at the end). This applies to EVERY field in EVERY block:
 - scene block: title, description, camera_angle, location, mood — ALL English
 - strategy block: ALL English
 - storylines block: title, synopsis, mood — ALL English
 - conversational chat messages: English
-DO NOT use Korean in any field. ONLY exception: asset @tag_name (kept as registered).
+Avoid Korean in any field by default. ONLY exception: asset @tag_name (kept as registered).
   ✓ GOOD: "title": "First Light", "description": "Wide establishing shot of rooftop...", "camera_angle": "Extreme wide, low angle, slow dolly-in", "location": "Urban rooftop at sunrise", "mood": "Hopeful, golden warmth, cinematic"
-  ✗ BAD:  Any Korean characters (가-힣) in any field.
+
+[LANGUAGE OVERRIDE — USER REQUEST PRIORITY]
+The above language rule is the DEFAULT, not absolute.
+If the user explicitly requests a different output language in chat
+(e.g. "in Korean", "한국어로 다시 써줘", "switch to Japanese", "rewrite in Spanish"),
+follow that request immediately and use the new language for that response
+and all subsequent responses, until the user requests another language.
+This user instruction takes priority over the default language rule above.
+Code fence labels (\`\`\`scene, \`\`\`strategy, \`\`\`storylines, \`\`\`scene_alt, \`\`\`scene_audit, \`\`\`reference_decomposition) and asset @tag_name remain unchanged.
+JSON keys remain unchanged; only string VALUES translate.
 
 `;
 
@@ -298,11 +317,70 @@ const buildV2BriefContext = (a: Analysis): string => {
   return blocks.join("\n\n");
 };
 
+/**
+ * OpenAI (GPT-5.x) 전용 추가 directive.
+ *
+ * 1) reasoning: 모델이 내부적으로 단계 추론하고 출력은 엄격한 펜스만 내도록 유도.
+ * 2) Phase 0 (reference_decomposition): 사용자가 영상 레퍼런스를 첨부했으면
+ *    storylines 보다 먼저 영상 분해 결과를 전용 펜스로 출력.
+ * 3) scene_alt: 각 씬에 대해 1~2개 대안을 별도 펜스로 제공 (사용자가 main↔alt 스왑).
+ * 4) scene_audit: 모든 씬 출력 후 ABCD 자체 채점 + 개선 제안.
+ *
+ * Claude 에는 적용하지 않는 이유: Claude 는 펜스 외 잡담을 잘 줄여주며,
+ * 추론 directive 가 오히려 출력을 길게 만들 수 있어 v1 에서는 OpenAI 전용.
+ */
+const GPT_REASONING_AND_FENCE_RULES = `
+[REASONING & OUTPUT DISCIPLINE — GPT-5.x ONLY]
+- Plan internally step by step, then output only what the spec requires.
+- No chain-of-thought in the visible response. No meta-commentary like "Let me think step by step…".
+- Conversational text outside fences should be brief (1–3 sentences) and only when the spec asks for it.
+- Always emit code fences with the exact labels specified below; never invent new fence labels.
+
+[PHASE 0 — REFERENCE DECOMPOSITION]
+If the brief context contains [레퍼런스 영상 인사이트] / [Reference Video Insights] (i.e. the user attached a YouTube link or uploaded a video), you MUST output a single \`\`\`reference_decomposition\` fence at the very top of your FIRST response (before \`\`\`storylines\`):
+\`\`\`reference_decomposition
+{
+  "source": "youtube|upload",
+  "title": "원본 제목 또는 파일명",
+  "scenes": [
+    { "t": "0-3s", "beat": "오프닝 훅", "visual": "핵심 비주얼 한 줄", "audio": "사운드 큐(있으면)" }
+  ],
+  "patterns_to_borrow": ["차용할 만한 기법 1줄 ×N"],
+  "patterns_to_avoid": ["피해야 할 패턴 1줄 ×N"]
+}
+\`\`\`
+Do not include this fence if no reference video was attached.
+
+[PHASE 1 — STORYLINE REFERENCE ANCHOR]
+When you emit a \`\`\`storylines\` fence and a reference_decomposition exists, each storyline object MUST include an extra field "reference_anchor": "어떤 reference 패턴을 차용했는지 또는 의도적으로 대비했는지 1줄". If no reference video, omit the field.
+
+[PHASE 2 — SCENE ALTERNATIVES]
+For EACH \`\`\`scene\` fence you emit in Phase 2, optionally emit ONE additional \`\`\`scene_alt\` fence right after it:
+\`\`\`scene_alt
+{ "scene_number": <same as parent scene>, "variant": "B", "title": "...", "description": "...", "rationale": "테스트할 가설 한 줄" }
+\`\`\`
+Variants beyond B (C/D) only if the user explicitly asks for more.
+
+[FINAL — SELF AUDIT]
+After ALL \`\`\`scene\` (and any \`\`\`scene_alt\`) fences in a Phase 2 response, emit exactly ONE \`\`\`scene_audit\` fence:
+\`\`\`scene_audit
+{
+  "abcd": { "A": 0.0-1.0, "B": 0.0-1.0, "C": 0.0-1.0, "D": 0.0-1.0 },
+  "issues": ["문제 한 줄 ×N"],
+  "suggested_fixes": ["바로 적용 가능한 수정 한 줄 ×N"]
+}
+\`\`\`
+Skip scene_audit in pure conversational replies (no scene fences). Always include it when one or more scenes are output.
+
+`;
+
 export const buildSystemPrompt = (
   vf: string,
   assets?: Asset[],
   analysis?: Analysis | null,
   lang: "ko" | "en" = "ko",
+  /** 디스패처 provider — OpenAI(GPT-5.x) 일 때만 추가 directive 를 붙인다. */
+  provider?: "anthropic" | "openai",
 ) => {
   const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
   const charCtx = assets ? buildCharacterContext(assets) : "";
@@ -327,21 +405,51 @@ export const buildSystemPrompt = (
 
   if (analysis?.idea_note) parts.push(`[아이디어 메모]\n${analysis.idea_note}`);
   if (analysis?.image_analysis) parts.push(`[레퍼런스 이미지 분석]\n${analysis.image_analysis}`);
+  // GPT-5.x 가 Phase 0 분해를 트리거할 수 있도록 영상 인사이트가 있으면 시스템 컨텍스트에 명시.
+  const videoInsights = (analysis as any)?.reference_video_insights;
+  if (Array.isArray(videoInsights) && videoInsights.length > 0) {
+    try {
+      parts.push(`[레퍼런스 영상 인사이트]\n${JSON.stringify(videoInsights, null, 2)}`);
+    } catch {
+      /* ignore serialize failure */
+    }
+  }
   if (analysis?.creative_gap?.recommendation) parts.push(`[디렉터 방향성]\n${analysis.creative_gap.recommendation}`);
   const ideaCtx = parts.length ? "\n\n" + parts.join("\n\n") : "";
-  return `${langDirective}${SYSTEM_PROMPT_BASE}${charCtx}${ideaCtx}\n\n[영상 포맷]\n${FORMAT_CONTEXT[vf] ?? FORMAT_CONTEXT.vertical}`;
+  const providerExt = provider === "openai" ? GPT_REASONING_AND_FENCE_RULES : "";
+  return `${langDirective}${SYSTEM_PROMPT_BASE}${providerExt}${charCtx}${ideaCtx}\n\n[영상 포맷]\n${FORMAT_CONTEXT[vf] ?? FORMAT_CONTEXT.vertical}`;
 };
 
-export const buildBriefContextString = (a: Analysis): string => {
+export const buildBriefContextString = (a: Analysis, lang: "ko" | "en" = "ko"): string => {
+  const L =
+    lang === "en"
+      ? {
+          goal: "Goal",
+          target: "Target",
+          usp: "USP",
+          tone: "Tone & Manner",
+          idea: "Idea Memo",
+          director: "Director Recommendation",
+          refImage: "Reference Image",
+        }
+      : {
+          goal: "목표",
+          target: "타겟",
+          usp: "USP",
+          tone: "톤앤매너",
+          idea: "아이디어 메모",
+          director: "디렉터 추천",
+          refImage: "레퍼런스 이미지",
+        };
   const lines = [
-    `목표: ${briefFieldToString(a.goal)}`,
-    `타겟: ${briefFieldToString(a.target)}`,
-    `USP: ${briefFieldToString(a.usp)}`,
-    `톤앤매너: ${briefFieldToString(a.tone_manner)}`,
+    `${L.goal}: ${briefFieldToString(a.goal)}`,
+    `${L.target}: ${briefFieldToString(a.target)}`,
+    `${L.usp}: ${briefFieldToString(a.usp)}`,
+    `${L.tone}: ${briefFieldToString(a.tone_manner)}`,
   ];
-  if (a.idea_note) lines.push(`\n아이디어 메모: ${a.idea_note}`);
-  if (a.creative_gap?.recommendation) lines.push(`디렉터 추천: ${a.creative_gap.recommendation}`);
-  if (a.image_analysis) lines.push(`레퍼런스 이미지: ${a.image_analysis}`);
+  if (a.idea_note) lines.push(`\n${L.idea}: ${a.idea_note}`);
+  if (a.creative_gap?.recommendation) lines.push(`${L.director}: ${a.creative_gap.recommendation}`);
+  if (a.image_analysis) lines.push(`${L.refImage}: ${a.image_analysis}`);
   const v2 = buildV2BriefContext(a);
   if (v2) lines.push("", v2);
   return lines.join("\n");

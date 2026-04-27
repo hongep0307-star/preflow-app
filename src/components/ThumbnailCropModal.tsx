@@ -43,13 +43,26 @@ export const ThumbnailCropModal = ({ imageUrl, initial, onSave, onClose }: Props
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
       if (!dragging.current) return;
+      const img = imgRef.current;
+      if (!img) return;
       const dx = e.clientX - lastMouse.current.x;
       const dy = e.clientY - lastMouse.current.y;
       lastMouse.current = { x: e.clientX, y: e.clientY };
 
-      // Convert pixel delta to percentage shift (inverse direction for object-position)
-      const pctX = (dx / PREVIEW_W) * 100 * (1 / Math.max(scale - 1, 0.3));
-      const pctY = (dy / PREVIEW_H) * 100 * (1 / Math.max(scale - 1, 0.3));
+      // 마우스-이미지 1:1 이동을 위해 실제 표시된 이미지 크기 기반으로 %→px 매핑.
+      // object-fit: cover 로 natW×natH 를 PREVIEW 에 덮어 맞추고, 거기에 다시
+      // transform: scale(scale) 이 걸림. overflow 픽셀 수를 알면 드래그 1px 당
+      // object-position 이 얼마나 바뀌어야 하는지 정확히 계산 가능.
+      const natW = img.naturalWidth || PREVIEW_W;
+      const natH = img.naturalHeight || PREVIEW_H;
+      const fit = Math.max(PREVIEW_W / natW, PREVIEW_H / natH);
+      const dispW = natW * fit * scale;
+      const dispH = natH * fit * scale;
+      const overflowX = Math.max(0, dispW - PREVIEW_W);
+      const overflowY = Math.max(0, dispH - PREVIEW_H);
+
+      const pctX = overflowX > 0 ? (dx / overflowX) * 100 : 0;
+      const pctY = overflowY > 0 ? (dy / overflowY) * 100 : 0;
 
       setPos((prev) => ({
         x: clamp(prev.x - pctX, 0, 100),

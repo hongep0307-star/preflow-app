@@ -8,6 +8,16 @@ import { Input } from '@/components/ui/input';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 interface SceneVersion {
   id: string;
@@ -30,6 +40,8 @@ export const useVersionHistory = ({ projectId, onRestore }: Props) => {
   const [versionName, setVersionName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [versions, setVersions] = useState<SceneVersion[]>([]);
+  const [pendingRestore, setPendingRestore] = useState<SceneVersion | null>(null);
+  const [isRestoring, setIsRestoring] = useState(false);
 
   const fetchVersions = useCallback(async () => {
     const { data } = await supabase
@@ -50,7 +62,7 @@ export const useVersionHistory = ({ projectId, onRestore }: Props) => {
         .order('scene_number');
 
       if (!currentScenes || currentScenes.length === 0) {
-        toast({ title: '저장할 씬이 없습니다', variant: 'destructive' });
+        toast({ title: 'No scenes to save', variant: 'destructive' });
         return;
       }
 
@@ -68,23 +80,25 @@ export const useVersionHistory = ({ projectId, onRestore }: Props) => {
         scenes: currentScenes,
       });
 
-      toast({ title: '버전이 저장됐습니다!' });
+      toast({ title: 'Version saved.' });
       setSaveModalOpen(false);
       setVersionName('');
       await fetchVersions();
     } catch (err: any) {
-      toast({ title: '버전 저장 실패', description: err.message, variant: 'destructive' });
+      toast({ title: 'Save failed', description: err.message, variant: 'destructive' });
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleRestoreVersion = async (version: SceneVersion) => {
-    const confirmed = window.confirm(
-      `"${version.version_name}"으로 복원하시겠어요?\n현재 씬 목록이 이 버전으로 교체됩니다.\n(복원 전에 현재 버전을 저장해두는 것을 권장합니다)`
-    );
-    if (!confirmed) return;
+  const handleRestoreVersion = (version: SceneVersion) => {
+    setPendingRestore(version);
+  };
 
+  const confirmRestore = async () => {
+    const version = pendingRestore;
+    if (!version) return;
+    setIsRestoring(true);
     try {
       await supabase.from('scenes').delete().eq('project_id', projectId);
 
@@ -96,9 +110,12 @@ export const useVersionHistory = ({ projectId, onRestore }: Props) => {
       await supabase.from('scenes').insert(scenesToRestore);
       onRestore();
       setDrawerOpen(false);
-      toast({ title: `"${version.version_name}"으로 복원됐습니다.` });
+      setPendingRestore(null);
+      toast({ title: `Restored to "${version.version_name}".` });
     } catch (err: any) {
-      toast({ title: '복원 실패', description: err.message, variant: 'destructive' });
+      toast({ title: 'Restore failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setIsRestoring(false);
     }
   };
 
@@ -117,6 +134,10 @@ export const useVersionHistory = ({ projectId, onRestore }: Props) => {
     versions,
     handleSaveVersion,
     handleRestoreVersion,
+    pendingRestore,
+    setPendingRestore,
+    confirmRestore,
+    isRestoring,
   };
 };
 
@@ -134,10 +155,10 @@ export const VersionSaveModal = ({
   <Dialog open={open} onOpenChange={o => !o && onClose()}>
     <DialogContent className="max-w-[400px] bg-card border-border">
       <DialogHeader>
-        <DialogTitle className="text-[15px] font-semibold">현재 버전 저장</DialogTitle>
+        <DialogTitle className="text-[15px] font-semibold">Save current version</DialogTitle>
       </DialogHeader>
       <div>
-        <label className="text-xs text-muted-foreground mb-1.5 block">버전 이름</label>
+        <label className="text-xs text-muted-foreground mb-1.5 block">Version name</label>
         <Input
           value={versionName}
           onChange={e => setVersionName(e.target.value)}
@@ -147,13 +168,58 @@ export const VersionSaveModal = ({
         />
       </div>
       <DialogFooter>
-        <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>취소</Button>
+        <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>Cancel</Button>
         <Button className="text-[13px] h-9" onClick={onSave} disabled={isSaving}>
-          {isSaving ? '저장 중...' : '저장'}
+          {isSaving ? 'Saving...' : 'Save'}
         </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
+);
+
+/* ── Version Restore Confirm Dialog ── */
+export const VersionRestoreConfirm = ({
+  pendingRestore,
+  onOpenChange,
+  onConfirm,
+  isRestoring,
+}: {
+  pendingRestore: SceneVersion | null;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+  isRestoring: boolean;
+}) => (
+  <AlertDialog open={!!pendingRestore} onOpenChange={(o) => !isRestoring && onOpenChange(o)}>
+    <AlertDialogContent
+      className="max-w-[420px] bg-card border-border"
+      style={{ borderRadius: 0 }}
+    >
+      <AlertDialogHeader>
+        <AlertDialogTitle className="text-[15px] font-semibold">
+          Restore to "{pendingRestore?.version_name ?? `v${pendingRestore?.version_number}`}"?
+        </AlertDialogTitle>
+        <AlertDialogDescription className="text-[13px] text-muted-foreground leading-relaxed">
+          The current scene list will be replaced with this version. We recommend saving the current state first so you can come back to it.
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      <AlertDialogFooter>
+        <AlertDialogCancel className="text-[13px] h-9" disabled={isRestoring}>
+          Cancel
+        </AlertDialogCancel>
+        <AlertDialogAction
+          className="text-white text-[13px] h-9"
+          style={{ background: '#f9423a' }}
+          disabled={isRestoring}
+          onClick={(e) => {
+            e.preventDefault();
+            onConfirm();
+          }}
+        >
+          {isRestoring ? 'Restoring…' : 'Restore'}
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>
 );
 
 /* ── Version Save & History Buttons ── */
@@ -165,7 +231,7 @@ export const VersionButtons = ({
 }) => (
   <>
     <Button variant="ghost" size="sm" onClick={onSave} className="gap-1 text-muted-foreground">
-      <Save className="w-4 h-4" />버전 저장
+      <Save className="w-4 h-4" />Save version
     </Button>
     <Button variant="ghost" size="sm" onClick={onHistory} className="gap-1 text-muted-foreground">
       <History className="w-4 h-4" />
@@ -196,7 +262,7 @@ export const VersionHistoryDrawer = ({
       >
         {/* Header */}
         <div className="px-5 py-4 border-b border-border flex items-center justify-between shrink-0">
-          <span className="text-base font-semibold text-foreground">버전 히스토리</span>
+          <span className="text-base font-semibold text-foreground">Version history</span>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors">
             <X className="w-5 h-5" />
           </button>
@@ -212,7 +278,7 @@ export const VersionHistoryDrawer = ({
                     {version.version_name || `v${version.version_number}`}
                   </div>
                   <div className="text-[11px] text-muted-foreground/50 mt-0.5">
-                    {new Date(version.created_at).toLocaleString('ko-KR')} · 씬 {(version.scenes as any[]).length}개
+                    {new Date(version.created_at).toLocaleString()} · {(version.scenes as any[]).length} scene{(version.scenes as any[]).length === 1 ? '' : 's'}
                   </div>
                 </div>
                 <button
@@ -220,7 +286,7 @@ export const VersionHistoryDrawer = ({
                   className="flex items-center gap-1 text-[12px] px-2.5 py-1 rounded-md border transition-colors"
                   style={{ color: '#f9423a', background: 'rgba(249,66,58,0.10)', borderColor: 'rgba(249,66,58,0.28)' }}
                 >
-                  <RotateCcw className="w-3 h-3" />복원
+                  <RotateCcw className="w-3 h-3" />Restore
                 </button>
               </div>
 
@@ -252,8 +318,8 @@ export const VersionHistoryDrawer = ({
           {versions.length === 0 && (
             <EmptyState
               icon={<History className="w-8 h-8" />}
-              title="저장된 버전이 없습니다."
-              description="‘버전 저장’ 버튼으로 현재 상태를 저장하세요."
+              title="No saved versions yet."
+              description="Use the Save version button to snapshot the current state."
               compact
             />
           )}

@@ -71,7 +71,7 @@ const ProjectPage = () => {
   const [editingField, setEditingField] = useState<"format" | "client" | "deadline" | null>(null);
   const [editClient, setEditClient] = useState("");
   const [editDeadline, setEditDeadline] = useState("");
-  const [briefLang, setBriefLang] = useState<"ko" | "en">("ko");
+  const [briefLang, setBriefLang] = useState<"ko" | "en">("en");
   const [editingTitle, setEditingTitle] = useState(false);
   const [editTitle, setEditTitle] = useState("");
 
@@ -98,6 +98,17 @@ const ProjectPage = () => {
           if (folderData) setFolderName(folderData.name);
         }
       }
+      // Load persisted brief analysis language so ABCD/Agent render in the
+      // analyzed language from the first paint (UI defaults to English).
+      const { data: briefRow } = await supabase
+        .from("briefs")
+        .select("lang")
+        .eq("project_id", id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const storedLang = (briefRow as any)?.lang;
+      if (storedLang === "ko" || storedLang === "en") setBriefLang(storedLang);
     };
     fetchData();
   }, [id]);
@@ -110,17 +121,33 @@ const ProjectPage = () => {
     if (!id) return;
     let cancelled = false;
     (async () => {
-      const [briefRes, assetRes, sceneRes] = await Promise.all([
+      const [briefRes, assetRes, sceneRes, versionRes] = await Promise.all([
         supabase.from("briefs").select("analysis").eq("project_id", id).limit(1),
         supabase.from("assets").select("id").eq("project_id", id).limit(1),
-        supabase.from("scenes").select("id, conti_image_url").eq("project_id", id),
+        supabase.from("scenes").select("id, conti_image_url, source").eq("project_id", id),
+        // Send-to-Conti only persists into `scene_versions` as a JSON
+        // snapshot — it does NOT create rows in `scenes` (and
+        // clearScenesAfterSend wipes the agent-sourced drafts). So
+        // presence of a version row is the real signal that Ideation
+        // delivered its artifact.
+        supabase.from("scene_versions").select("id").eq("project_id", id).limit(1),
       ]);
       if (cancelled) return;
       const briefRow = (briefRes.data as Array<{ analysis: string | null }> | null)?.[0];
       const briefDone = !!(briefRow?.analysis && String(briefRow.analysis).trim().length > 0);
       const assetsDone = ((assetRes.data as unknown[] | null)?.length ?? 0) > 0;
-      const sceneRows = (sceneRes.data as Array<{ id: string; conti_image_url: string | null }> | null) ?? [];
-      const ideationDone = sceneRows.length > 0;
+      const sceneRows =
+        (sceneRes.data as Array<{ id: string; conti_image_url: string | null; source: string | null }> | null) ?? [];
+      // Ideation completion: either a scene row exists (in-progress
+      // Ideation drafts) OR at least one scene_version exists (drafts
+      // were already shipped to Conti and `clearScenesAfterSend`
+      // subsequently emptied the scenes table). Checking only the
+      // scenes table made the step regress the moment the user advanced
+      // to Conti — exactly opposite of what a "done" indicator should
+      // do. Either signal is sufficient evidence that Ideation delivered
+      // its artifact at least once.
+      const hasVersion = ((versionRes.data as unknown[] | null)?.length ?? 0) > 0;
+      const ideationDone = sceneRows.length > 0 || hasVersion;
       // Conti 완료 판정: 씬이 1개 이상이면서 모든 씬에 conti_image_url 이 채워져 있을 때.
       // 씬이 0개면 당연히 미완료.
       const contiDone =
@@ -330,7 +357,7 @@ const ProjectPage = () => {
                   setEditingTitle(true);
                 }}
                 className="text-[15px] font-bold text-white/80 truncate max-w-[200px] hover:text-white transition-colors cursor-pointer tracking-wide"
-                title="제목 수정"
+                title="Edit title"
               >
                 {project?.title || ""}
               </button>
@@ -433,7 +460,7 @@ const ProjectPage = () => {
                       updateProjectField({ deadline: null });
                     }}
                     className="text-muted-foreground hover:text-destructive transition-colors"
-                    title="마감일 삭제"
+                    title="Clear deadline"
                   >
                     <X className="w-3 h-3" />
                   </button>

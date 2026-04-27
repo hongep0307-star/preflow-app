@@ -8,7 +8,6 @@ import {
   X,
   ImageIcon,
   Crop,
-  Palette,
   Lightbulb,
   Sparkles,
   ChevronRight,
@@ -1177,6 +1176,8 @@ export const SidePanel = ({
   };
   useEffect(() => () => cancelFlyoutClose(), []);
 
+  // 항목 순서 규칙: 사용 가능한 액션을 위로, 비활성(Unavailable) 은 맨 아래로
+  // 모아 시각적으로 덜 거슬리도록 한다.
   const variantsChildren: SidePanelLeaf[] = [];
   if (hasImage && onRelight)
     variantsChildren.push({
@@ -1186,13 +1187,23 @@ export const SidePanel = ({
       fn: onRelight,
       danger: false,
     });
-  // Camera Variations / Change Angle — temporarily disabled again.
-  // Even with the Phase 1-3 refactor (Presets / Contact Sheet / A-then-B
-  // chain prompts) NB2(Gemini 3.1 Flash Image) is not reliable enough at
-  // novel-view synthesis for production use. Keep the entries visible so
-  // operators know the feature exists, but block invocation. When we
-  // wire a dedicated novel-view model (Qwen-Image-Edit Multi-Angle etc.)
-  // flip `disabled` off and pass `onCameraVariations` / `onChangeAngle`.
+  // Change Angle — re-enabled as part of the Sketches+ChangeAngle plan.
+  // The modal itself now offers NB2 vs GPT Image 2 so the caller can pick
+  // whichever handles the yaw/pitch/zoom move better, which is what the
+  // feature was gated on previously.
+  if (hasImage && onChangeAngle)
+    variantsChildren.push({
+      kind: "leaf",
+      icon: <Move3d className="w-3.5 h-3.5" />,
+      label: "Change Angle",
+      fn: onChangeAngle,
+      danger: false,
+    });
+  // Camera Variations — still gated on novel-view quality. NB2 alone isn't
+  // production-grade at that job; keep the menu entry visible (so operators
+  // know the capability is planned) but block invocation until we wire a
+  // dedicated novel-view model (Qwen-Image-Edit Multi-Angle etc.). Pinned
+  // to the bottom since it's currently disabled.
   if (hasImage)
     variantsChildren.push({
       kind: "leaf",
@@ -1203,24 +1214,9 @@ export const SidePanel = ({
       disabled: true,
       hint: "Unavailable",
     });
-  if (hasImage)
-    variantsChildren.push({
-      kind: "leaf",
-      icon: <Move3d className="w-3.5 h-3.5" />,
-      label: "Change Angle",
-      fn: () => {},
-      danger: false,
-      disabled: true,
-      hint: "Unavailable",
-    });
-  if (hasImage && onUseAsStyle)
-    variantsChildren.push({
-      kind: "leaf",
-      icon: <Palette className="w-3.5 h-3.5" />,
-      label: "Use as Style",
-      fn: onUseAsStyle,
-      danger: false,
-    });
+  // "Use as Style" 은 콘티 이미지 호버시 나오는 Palette 퀵 아이콘으로
+  // 이미 노출되므로 Variants 서브메뉴에서는 중복 제거. 시그니처의
+  // onUseAsStyle prop 은 호버 아이콘이 계속 사용하므로 유지.
 
   const entries: SidePanelEntry[] = [
     { kind: "leaf", icon: <Copy className="w-3.5 h-3.5" />, label: "Duplicate scene", fn: onDuplicate, danger: false },

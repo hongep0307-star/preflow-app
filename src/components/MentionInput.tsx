@@ -111,7 +111,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
   assets,
   onSend,
   disabled,
-  placeholder = "메시지를 입력하세요...",
+  placeholder = "Type a message...",
   value,
   onChange,
   minHeight,

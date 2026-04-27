@@ -75,7 +75,7 @@ export default function AgentAbcdPanel({
   projectId,
   scenes,
   briefAnalysis,
-  lang = "ko",
+  lang = "en",
   defaultOpen = false,
 }: Props) {
   const [open, setOpen] = useState(defaultOpen);

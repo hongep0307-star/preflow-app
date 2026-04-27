@@ -28,8 +28,7 @@
  */
 
 import { useMemo, useRef, useState, useEffect } from "react";
-import { ChevronDown, ChevronUp, Lightbulb, Loader2, X, Palette as PaletteIcon } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { ChevronDown, ChevronUp, Lightbulb, X, Palette as PaletteIcon } from "lucide-react";
 import type { Scene } from "./contiTypes";
 import { IMAGE_SIZE_MAP } from "@/lib/conti";
 
@@ -645,12 +644,34 @@ const Section = ({ label, meta, icon, first, children }: SectionProps) => (
 );
 
 /* ━━━ Main modal ━━━ */
+
+/** Self-contained spec the parent needs to fire the actual generation in
+ *  the background. The modal builds this from its UI state and hands it
+ *  off via `onSubmit` — it does NOT call the network itself anymore.
+ *
+ *  Promoting the request to the parent lets ContiTab drive the same
+ *  `editGeneratingIds` + `sceneStages` channels that inpaint / ChangeAngle
+ *  already use, so the user sees the standard `1/1 Generating…` spinner
+ *  on the scene card with the modal out of the way. */
+export interface RelightSubmit {
+  sceneId: string;
+  sceneNumber: number;
+  /** Source image at submit time — the parent uses this to push history
+   *  before overwriting `conti_image_url`. */
+  sourceImageUrl: string;
+  /** Ready-to-invoke body for `supabase.functions.invoke("openai-image", ...)`. */
+  body: Record<string, unknown>;
+}
+
 export interface RelightModalProps {
   scene: Scene;
   projectId: string;
   videoFormat: VideoFormat;
   onClose: () => void;
-  onApplied: (newUrl: string, previousUrl: string | null) => void | Promise<void>;
+  /** Hand off the built request to the parent. The modal closes itself
+   *  right after; the parent runs the generation and drives the
+   *  scene-card spinner. */
+  onSubmit: (req: RelightSubmit) => void;
 }
 
 const BACKDROP_STYLE: React.CSSProperties = {
@@ -673,23 +694,30 @@ const PANEL_STYLE: React.CSSProperties = {
   overflow: "hidden",
 };
 
-export function RelightModal({ scene, projectId, videoFormat, onClose, onApplied }: RelightModalProps) {
+export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit }: RelightModalProps) {
   const sourceUrl = scene.conti_image_url;
   const [cfg, setCfg] = useState<RelightConfig>(DEFAULT_CONFIG);
-  const [applying, setApplying] = useState(false);
+  /** With generation hoisted to the parent, the modal no longer carries
+   *  an in-flight `applying` state — it builds the body and hands off.
+   *  `error` is kept for prompt-construction-time validation only
+   *  (e.g. missing source url); real network errors now surface as
+   *  toasts on the scene card. */
   const [error, setError] = useState<string | null>(null);
   const [showPrompt, setShowPrompt] = useState(false);
+  // Modal hands off synchronously, so there's never a true in-flight state
+  // here — kept as a constant so the existing `disabled` props on controls
+  // stay readable.
+  const applying = false;
 
   const prompt = useMemo(() => buildRelightPrompt(cfg), [cfg]);
 
-  // Escape → 닫기 (applying 중엔 비활성)
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !applying) onClose();
+      if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [applying, onClose]);
+  }, [onClose]);
 
   const applyQuickPreset = (preset: QuickPreset) => {
     setCfg((prev) => ({ ...prev, ...preset.apply() }));
@@ -704,34 +732,28 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onApplied
     setCfg((prev) => ({ ...prev, colorHex: hex, colorLabel: null }));
   };
 
-  const handleApply = async () => {
-    if (!sourceUrl || applying) return;
-    setError(null);
-    setApplying(true);
-    try {
-      const { data, error: invokeErr } = await supabase.functions.invoke("openai-image", {
-        body: {
-          mode: "inpaint",
-          useNanoBanana: true,
-          sourceImageUrl: sourceUrl,
-          referenceImageUrls: [],
-          prompt,
-          projectId,
-          sceneNumber: scene.scene_number,
-          imageSize: IMAGE_SIZE_MAP[videoFormat],
-        },
-      });
-      if (invokeErr) throw invokeErr;
-      const d = data as { publicUrl?: string; url?: string } | null;
-      const newUrl = d?.publicUrl ?? d?.url ?? null;
-      if (!newUrl) throw new Error("Relight returned no image URL");
-      await onApplied(newUrl, sourceUrl);
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setApplying(false);
+  const handleApply = () => {
+    if (!sourceUrl) {
+      setError("No source image for this scene.");
+      return;
     }
+    const body: Record<string, unknown> = {
+      mode: "inpaint",
+      useNanoBanana: true,
+      sourceImageUrl: sourceUrl,
+      referenceImageUrls: [],
+      prompt,
+      projectId,
+      sceneNumber: scene.scene_number,
+      imageSize: IMAGE_SIZE_MAP[videoFormat],
+    };
+    onSubmit({
+      sceneId: scene.id,
+      sceneNumber: scene.scene_number,
+      sourceImageUrl: sourceUrl,
+      body,
+    });
+    onClose();
   };
 
   if (!sourceUrl) {
@@ -1071,14 +1093,7 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onApplied
                 opacity: applying ? 0.6 : 1,
               }}
             >
-              {applying ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  Relighting
-                </>
-              ) : (
-                "Apply"
-              )}
+              Apply
             </button>
           </div>
         </div>

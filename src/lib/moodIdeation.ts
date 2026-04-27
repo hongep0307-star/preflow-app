@@ -199,8 +199,9 @@ function buildLegacyMoodPrompt(opts: MoodGenerateOptions): string {
     if (scene.location) parts.push(`Location: ${scene.location.replace(/@/g, "")}`);
     if (scene.description) parts.push(`Scene content: ${scene.description.replace(/@/g, "")}`);
 
-    if (scene.tagged_assets?.length) {
-      const descs = scene.tagged_assets
+    const activeTags = filterActiveTags(scene);
+    if (activeTags.length) {
+      const descs = activeTags
         .map((tag) => {
           const a = assets.find(
             (asset) =>
@@ -454,8 +455,9 @@ function buildSingleSceneContext(opts: MoodGenerateOptions, assignments: ShotAss
   // uniform composition across all N variations.
   lines.push(`  ` + sl.join(" | "));
 
-  if (scene.tagged_assets && scene.tagged_assets.length > 0) {
-    const taggedAssetDetails = scene.tagged_assets
+  const activeTagsForDetails = filterActiveTags(scene);
+  if (activeTagsForDetails.length > 0) {
+    const taggedAssetDetails = activeTagsForDetails
       .map((tag) => {
         const a = assets.find(
           (asset) =>
@@ -815,9 +817,29 @@ function buildShotAssignments(opts: MoodGenerateOptions, count: number): ShotAss
     const scene = pool[i % pool.length];
     return {
       scene,
-      tagged: resolveTaggedAssets(opts.assets, scene.tagged_assets),
+      tagged: resolveTaggedAssets(opts.assets, filterActiveTags(scene)),
       variant: pickVariant(i),
     };
+  });
+}
+
+/** Belt-and-suspenders: drop `scene.tagged_assets` entries that no
+ *  longer appear as `@mentions` in the scene's description/location
+ *  text. Mirrors the guard in conti.ts `generateConti`. Fixes the
+ *  "untagged character still appears" symptom on duplicated scenes
+ *  whose `tagged_assets` column still carries ancestor cast. */
+function filterActiveTags(scene: {
+  description?: string | null;
+  location?: string | null;
+  tagged_assets?: string[];
+}): string[] {
+  if (!scene.tagged_assets || scene.tagged_assets.length === 0) return [];
+  const text = `${scene.description ?? ""} ${scene.location ?? ""}`;
+  const mentionTokens = (text.match(/@[\w가-힣]+/g) ?? []).map((m) => m.slice(1).toLowerCase());
+  if (mentionTokens.length === 0) return [];
+  return scene.tagged_assets.filter((tag) => {
+    const name = (tag.startsWith("@") ? tag.slice(1) : tag).toLowerCase();
+    return mentionTokens.some((tok) => tok === name || tok.startsWith(name));
   });
 }
 
@@ -868,18 +890,18 @@ function buildMoodAssetAppendix(
       const rows = [
         `• ${name}:${
           hasRef(a)
-            ? " [REFERENCE IMAGE PROVIDED — preserve this person's exact facial features, skin tone, hair, and body proportions.]"
+            ? " [REFERENCE IMAGE PROVIDED] Preserve ONLY the facial identity — face shape, skin tone, hair color and style. Pose, expression, gaze, head tilt, and body orientation MUST follow THIS shot's assigned camera variant and the scene's action — do NOT copy pose or expression from the reference photo."
             : a.ai_description
               ? ` ${a.ai_description}`
               : ""
         }`,
-        a.outfit_description ? `  OUTFIT (render exactly): ${a.outfit_description}` : "",
+        a.outfit_description ? `  OUTFIT: ${a.outfit_description}` : "",
         a.ai_description && hasRef(a) ? `  Appearance notes: ${a.ai_description}` : "",
       ].filter(Boolean);
       return rows.join("\n");
     });
     sections.push(
-      `[CHARACTERS — VISUAL CONSISTENCY IS MANDATORY]\nThe following characters MUST appear as described.\n` +
+      `[CHARACTERS — IDENTITY CONSISTENCY]\nThe following characters appear in this shot. Preserve their facial identity; stage their pose and expression fresh per this shot's camera variant and scene action.\n` +
         lines.join("\n"),
     );
   }
@@ -891,7 +913,7 @@ function buildMoodAssetAppendix(
       return (
         `• ${name}: ${desc}\n` +
         `  → THIS ITEM MUST BE VISIBLY PRESENT AND CLEARLY RECOGNIZABLE IN THE FRAME.` +
-        (hasRef(a) ? " [Reference image provided — match the item's design precisely.]" : "")
+        (hasRef(a) ? " [Reference image provided — match the item's design.]" : "")
       );
     });
     sections.push(`[PROPS — MUST BE VISIBLE AND IDENTIFIABLE]\n${lines.join("\n")}`);
@@ -903,19 +925,27 @@ function buildMoodAssetAppendix(
       const desc = a.space_description ?? a.ai_description ?? "as described by tag name";
       return (
         `• ${name}: ${desc}` +
-        (hasRef(a) ? "\n  → [Reference image provided — match this environment precisely.]" : "")
+        (hasRef(a)
+          ? "\n  → [Reference image provided] Match the location's architectural features, materials, and color palette. Frame the shot per this shot's assigned camera variant — do NOT reproduce the reference's camera angle or composition."
+          : "")
       );
     });
     sections.push(
-      `[BACKGROUND / LOCATION — MAINTAIN SPATIAL CONSISTENCY]\n${lines.join("\n")}`,
+      `[BACKGROUND / LOCATION — SPATIAL IDENTITY]\n${lines.join("\n")}\n— Framing/camera angle is set by this shot's assigned camera variant, not by the reference image.`,
     );
   }
 
   if (sections.length === 0) return "";
+  const castLock = `\n\n═══ CAST LOCK (STRICT) ═══
+The characters and objects listed in ASSET REQUIREMENTS above are the ONLY people and tangible objects allowed in this frame.
+Do NOT add bystanders, extras, additional characters, pets, logos, brand signage, text, or props that are not explicitly listed.
+If the scene implies someone/something off-camera, keep them off-camera.
+═══════════════════════════════════`;
   return (
     `\n\n═══ ASSET REQUIREMENTS (HIGHEST PRIORITY) ═══\n` +
     sections.join("\n\n") +
-    `\n═══════════════════════════════════════════`
+    `\n═══════════════════════════════════════════` +
+    castLock
   );
 }
 
@@ -1062,7 +1092,7 @@ export const generateMoodImages = async (
     }
   }
 
-  if (!urls.length) throw new Error("모든 이미지 생성 실패");
+  if (!urls.length) throw new Error("All image generations failed");
 
   // NOTE: 여기서 DB 에 직접 append 하지 않는다.
   //       MoodIdeationPanel 쪽의 persistMoodGenResultToDB 가

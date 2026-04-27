@@ -20,6 +20,25 @@ export const ASSET_ICON: Record<string, string> = {
 };
 
 // ─── Types ───
+/**
+ * Sketch — a per-scene composition/draft image generated from the scene's
+ * text description in ContiStudio's Sketches tab. Stored on the owning scene
+ * row so the lifecycle is tied to that scene (scene delete → sketches gone).
+ *
+ * Role distinction vs `briefs.mood_image_urls` (Mood Ideation in the Ideation
+ * tab): Mood is project-scoped tone exploration; Sketches are scene-scoped
+ * compositional candidates you can promote into `conti_image_url`.
+ */
+export interface Sketch {
+  id: string;
+  url: string;
+  /** Generator model used — "nano-banana-2" | "gpt-image-1.5" | "gpt-image-2".
+   *  Kept free-form string so adding new models later does not widen this union. */
+  model: string;
+  createdAt: string;
+  liked?: boolean;
+}
+
 export interface Scene {
   id: string;
   project_id: string;
@@ -36,6 +55,75 @@ export interface Scene {
   is_transition?: boolean;
   transition_type?: string | null;
   conti_image_crop?: any;
+  /** Per-scene Sketches; lives on the scene row so a scene delete cascades.
+   *  Optional because legacy rows may not have the column yet. */
+  sketches?: Sketch[];
+  /** User-confirmed "final" marker. Dashboard progress counts only scenes
+   *  with `is_final === true`. When every non-transition scene is final,
+   *  ContiTab auto-promotes `projects.status` to `completed`; unmarking
+   *  any demotes back to `active`. Legacy rows lack the column → treated
+   *  as `false`. */
+  is_final?: boolean;
+}
+
+/**
+ * Coerce a single scene's `sketches` field to a real `Sketch[]`.
+ *
+ * Some legacy `scene_versions.scenes` JSON snapshots have `sketches` stored as
+ * the **string** `"[]"` (or even a JSON-encoded array string) instead of an
+ * actual array. The symptoms in the UI are:
+ *   · `SortableContiCard` reads `scene.sketches.length` → for a 2-char string
+ *     `"[]"` that yields 2, so a phantom "2 sketches" badge appears even
+ *     though the user never generated any.
+ *   · Clicking the card opens `StudioSketchesTab` whose `useState<Sketch[]>`
+ *     receives the string as-is, and the very next render calls
+ *     `sketches.filter(...)` → `TypeError: sketches.filter is not a function`
+ *     and the storyboard tab crashes into the error boundary.
+ *
+ * Normalising at the read boundary (after deserialisation, before the value
+ * touches React state) fixes both symptoms in one place. We also try
+ * `JSON.parse` for the rare case the string actually contains a stringified
+ * array of real sketches — those should not be silently dropped.
+ */
+export function normalizeSceneSketches(scene: Scene): {
+  scene: Scene;
+  changed: boolean;
+} {
+  const raw = (scene as any).sketches;
+  if (Array.isArray(raw)) return { scene, changed: false };
+  if (raw === null || raw === undefined || raw === "") {
+    // Treat absence/empty-string as "no sketches"; only mark changed if the
+    // shape was non-array (so we know to re-persist sanitised JSON).
+    if (raw === undefined) return { scene, changed: false };
+    return { scene: { ...scene, sketches: [] }, changed: true };
+  }
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return { scene: { ...scene, sketches: parsed }, changed: true };
+    } catch {
+      /* fall through */
+    }
+    return { scene: { ...scene, sketches: [] }, changed: true };
+  }
+  // Any other shape (object, number, boolean…) is invalid → reset to empty.
+  return { scene: { ...scene, sketches: [] }, changed: true };
+}
+
+/** Apply `normalizeSceneSketches` over an array, also reporting whether ANY
+ *  scene was mutated. Caller can use the boolean to decide if the cleaned
+ *  array should be re-persisted to scene_versions for self-healing. */
+export function normalizeScenesSketches(scenes: Scene[]): {
+  scenes: Scene[];
+  changed: boolean;
+} {
+  let anyChanged = false;
+  const out = scenes.map((s) => {
+    const r = normalizeSceneSketches(s);
+    if (r.changed) anyChanged = true;
+    return r.scene;
+  });
+  return { scenes: anyChanged ? out : scenes, changed: anyChanged };
 }
 /** Camera framing buckets for background variations.
  *  Mirrors src/components/assets/types.tsx → BackgroundFraming.
@@ -66,6 +154,9 @@ export interface ProjectInfo {
   client: string | null;
   active_version_id: string | null;
   conti_style_id: string | null;
+  /** "active" | "completed". Mirrored in ContiTab state so auto-status toggle
+   *  on final-toggle can skip DB writes when already in desired state. */
+  status?: string | null;
 }
 export interface SceneVersion {
   id: string;

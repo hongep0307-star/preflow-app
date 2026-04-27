@@ -65,7 +65,6 @@ export interface ContiGenerateOptions {
   briefAnalysis?: BriefAnalysis | null;
   styleAnchor?: string;
   styleImageUrl?: string;
-  moodReferenceUrl?: string;
   model?: ContiModel;
   onStageChange?: (stage: GeneratingStage) => void;
 }
@@ -77,6 +76,11 @@ export interface StyleTransferOptions {
   styleImageUrl: string;
   stylePrompt?: string;
   videoFormat: VideoFormat;
+  /** Which generator to drive. Matches ContiTab's top-bar `contiModel`
+   *  selector so Style Transfer follows the same model knob as Generate /
+   *  Regenerate / TR. When omitted we keep the legacy behaviour (NB2
+   *  first, GPT edits as silent fallback on NB2 outage). */
+  model?: ContiModel;
   onStageChange?: (stage: GeneratingStage) => void;
 }
 
@@ -421,6 +425,7 @@ Given a scene description, mood, and location, output a SHORT visual interpretat
 
 Do NOT describe what characters look like or their outfits.
 Do NOT restate the original scene description.
+Do NOT introduce new characters, props, objects, brand names, text, or signage that are not already present in the given scene description — stick strictly to atmospheric and compositional directives.
 Output ONLY the visual directives as a short paragraph. No labels, no bullet points, no explanation.`,
         messages: [
           {
@@ -450,15 +455,15 @@ const buildAssetSections = (assets: Asset[], hasImageUrls: boolean): string => {
       const rows = [
         `• ${a.tag_name}:${
           a.photo_url && hasImageUrls
-            ? " [REFERENCE IMAGE PROVIDED — You MUST preserve this person's exact facial features, skin tone, hair color, hair style, and body proportions. HIGHEST PRIORITY constraint.]"
+            ? " [REFERENCE IMAGE PROVIDED] Preserve ONLY the facial identity — face shape, skin tone, hair color and style. Pose, expression, gaze, head tilt, and body orientation MUST follow THIS scene's ACTION — do NOT copy pose or expression from the reference photo."
             : a.photo_url
-              ? " [Reference photo provided — match appearance closely]"
+              ? " [Reference photo provided — match facial identity; pose/expression per scene action]"
               : a.ai_description
                 ? ` ${sanitizeImagePrompt(a.ai_description)}`
                 : ""
         }`,
         a.outfit_description
-          ? `  OUTFIT (MANDATORY — render exactly): ${sanitizeImagePrompt(a.outfit_description)}`
+          ? `  OUTFIT: ${sanitizeImagePrompt(a.outfit_description)}`
           : "",
         a.ai_description && a.photo_url && hasImageUrls
           ? `  Appearance notes: ${sanitizeImagePrompt(a.ai_description)}`
@@ -467,7 +472,7 @@ const buildAssetSections = (assets: Asset[], hasImageUrls: boolean): string => {
       return rows.join("\n");
     });
     sections.push(
-      `[CHARACTERS — VISUAL CONSISTENCY IS MANDATORY]\nThe following characters MUST appear exactly as described.\n` +
+      `[CHARACTERS — IDENTITY CONSISTENCY]\nThe following characters appear in this scene. Preserve their facial identity; stage their pose and expression fresh per this scene's ACTION.\n` +
         lines.join("\n"),
     );
   }
@@ -490,14 +495,14 @@ const buildAssetSections = (assets: Asset[], hasImageUrls: boolean): string => {
       return (
         `• ${a.tag_name}: ${desc}` +
         (a.photo_url && hasImageUrls
-          ? "\n  → [Reference image provided — MATCH THIS ENVIRONMENT PRECISELY.]"
+          ? "\n  → [Reference image provided] Match the location's architectural features, materials, and color palette. Frame the shot freshly per SHOT TYPE above — do NOT reproduce the reference's camera angle or composition."
           : "\n  → Recreate this location with consistency across all scenes.")
       );
     });
     sections.push(
       `[BACKGROUND / LOCATION — MAINTAIN SPATIAL CONSISTENCY]\n` +
         lines.join("\n") +
-        `\n— Every scene sharing this location must look like the same physical space.`,
+        `\n— Every scene sharing this location must look like the same physical space, but framing/camera angle is set by this scene's SHOT TYPE.`,
     );
   }
 
@@ -526,7 +531,6 @@ const buildContiPrompt = (
   videoFormat: VideoFormat,
   briefAnalysis?: BriefAnalysis | null,
   styleAnchor: string = DEFAULT_STYLE_ANCHOR,
-  hasMoodReference: boolean = false,
 ): string => {
   const totalScenes = allScenes.length;
   const sceneIndex = allScenes.findIndex((s) => s.scene_number === scene.scene_number);
@@ -562,14 +566,6 @@ ${nextScene ? `Next: "${nextScene.title}"` : "CLOSING scene"}
 → Composition MUST differ from adjacent scenes.`;
 
   const styleRules = `${styleAnchor}\n- ${FORMAT_PROMPT_NOTE[videoFormat]}`;
-
-  const moodRefNote = hasMoodReference
-    ? `\n═══ MOOD REFERENCE IMAGE (COMPOSITION GUIDE) ═══
-The FIRST reference image is a mood/composition guide.
-STRICTLY FOLLOW its camera angle, framing, character placement, spatial layout, and overall composition.
-Adapt the scene content and characters into this exact composition framework.
-═══════════════════════════════════════════\n`
-    : "";
 
   const visualInterpretation = enrichedContext ? `\n  VISUAL DIRECTION: ${enrichedContext}` : "";
 
@@ -626,9 +622,20 @@ ${constraints.avoid.map((v) => `  ✗ ${sanitizeImagePrompt(v)}`).join("\n")}
 ═══════════════════════════════════════════`
       : "";
 
+  const castLockBlock = assetSection
+    ? `\n═══ CAST LOCK (STRICT) ═══
+The characters and objects listed in ASSET REQUIREMENTS above are the ONLY people and tangible objects allowed in this frame.
+Do NOT add bystanders, extras, additional characters, pets, logos, brand signage, text, or props that are not explicitly listed.
+If the scene description implies someone/something off-camera, keep them off-camera.
+═══════════════════════════════════`
+    : "";
+
+  const topDirective =
+    `Create a single cinematic storyboard frame for a commercial advertisement.\n` +
+    `Compose this frame FRESH based on the SHOT TYPE and this scene's ACTION below. Reference images are for identity and material guidance only — never for composition, pose, or expression copying.`;
+
   return [
-    `Create a single cinematic storyboard frame for a commercial advertisement.`,
-    moodRefNote,
+    topDirective,
     `\n${shotDirective}\n`,
     sceneDetail,
     firstFrameBlock,
@@ -637,6 +644,7 @@ ${constraints.avoid.map((v) => `  ✗ ${sanitizeImagePrompt(v)}`).join("\n")}
     assetSection
       ? `\n═══ ASSET REQUIREMENTS (HIGHEST PRIORITY) ═══\n${assetSection}\n═══════════════════════════════════════════`
       : "",
+    castLockBlock,
     briefContext,
     flowContext,
     styleRules,
@@ -701,12 +709,10 @@ export const fetchTaggedAssets = async (tags: string[], projectId: string): Prom
 const buildAssetImageUrls = (
   assets: Asset[],
   styleImageUrl?: string,
-  moodReferenceUrl?: string,
 ): string[] => {
   const MAX = 6;
   const urls: string[] = [];
 
-  if (moodReferenceUrl) urls.push(moodReferenceUrl);
   if (styleImageUrl) urls.push(styleImageUrl);
 
   const bgAssets = assets.filter((a) => a.asset_type === "background" && a.photo_url);
@@ -732,6 +738,57 @@ const buildAssetImageUrls = (
   return urls;
 };
 
+/* ━━━━━ filterMustShowForScene ━━━━━
+ *
+ * `hero_visual.must_show` is a brief-level array ("things that MUST be
+ * visible") and `buildContiPrompt` injects it into every non-TR scene
+ * unconditionally. When the brief was built around an IP collab (e.g.
+ * PUBGM × Lupi), items like "Lupi mascot visible" leak the hero character
+ * into scenes where the user explicitly did NOT tag that asset — the model
+ * sees a "MUST be visible" directive and quietly paints it into the
+ * background.
+ *
+ * This filter drops must_show items that name a project asset which is not
+ * tagged on the current scene. Items that reference only generic visual
+ * elements (no asset name match) pass through untouched, preserving the
+ * original intent for abstract must-shows like "brand logo moment" /
+ * "hero product close-up" when no per-asset conflict exists.
+ *
+ * Matching is lowercase substring against each project asset `tag_name`
+ * (minus the `@` prefix). A 2-char minimum guards against a 1-letter tag
+ * (`@A`) matching every English sentence. Partial overlaps are accepted on
+ * purpose — must_show items rarely contain the raw `@tag` token and usually
+ * paraphrase the asset name.
+ */
+function filterMustShowForScene(
+  items: string[] | undefined,
+  projectAssetTags: string[],
+  sceneTagSet: Set<string>,
+  sceneNumber: number,
+): string[] {
+  if (!items || items.length === 0) return [];
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const raw of items) {
+    const lower = raw.toLowerCase();
+    const mentioned = projectAssetTags.filter((t) => t.length >= 2 && lower.includes(t));
+    if (mentioned.length === 0) {
+      kept.push(raw);
+      continue;
+    }
+    const allTagged = mentioned.every((t) => sceneTagSet.has(t));
+    if (allTagged) kept.push(raw);
+    else dropped.push(raw);
+  }
+  if (dropped.length > 0) {
+    console.warn(
+      `[generateConti] S${sceneNumber} dropped ${dropped.length} must_show item(s) referencing non-tagged assets:`,
+      dropped,
+    );
+  }
+  return kept;
+}
+
 /* ━━━━━ generateConti ━━━━━ */
 export const generateConti = async ({
   scene,
@@ -741,17 +798,54 @@ export const generateConti = async ({
   briefAnalysis,
   styleAnchor = DEFAULT_STYLE_ANCHOR,
   styleImageUrl,
-  moodReferenceUrl,
   model = "nano-banana-2",
   onStageChange,
 }: ContiGenerateOptions): Promise<string> => {
-  const taggedAssets = await fetchTaggedAssets(scene.tagged_assets ?? [], projectId);
-  const assetImageUrls = buildAssetImageUrls(
-    taggedAssets,
-    styleImageUrl,
-    moodReferenceUrl,
+  // Belt-and-suspenders: drop stale `tagged_assets` entries that are
+  // no longer `@mentioned` anywhere in description/location. The UI
+  // save path (computeTaggedAssets) now enforces this on every edit,
+  // but legacy scene rows — especially ones duplicated before that
+  // fix — may still carry zombie character/item tags from ancestors.
+  // Reading the text as the source of truth here prevents their photos
+  // from being quietly attached as references.
+  const combinedText = `${scene.description ?? ""} ${scene.location ?? ""}`;
+  const mentionTokens = (combinedText.match(/@[\w가-힣]+/g) ?? []).map((m) =>
+    m.slice(1).toLowerCase(),
   );
+  const activeTagList = (scene.tagged_assets ?? []).filter((tag) => {
+    const name = (tag.startsWith("@") ? tag.slice(1) : tag).toLowerCase();
+    // Exact match or Korean-particle suffix (e.g. `@YD가` → tag `YD`).
+    return mentionTokens.some((tok) => tok === name || tok.startsWith(name));
+  });
+  if (activeTagList.length !== (scene.tagged_assets ?? []).length) {
+    const dropped = (scene.tagged_assets ?? []).filter((t) => !activeTagList.includes(t));
+    console.warn("[generateConti] dropped stale tagged_assets", { dropped, scene: scene.scene_number });
+  }
+  const taggedAssets = await fetchTaggedAssets(activeTagList, projectId);
+  const assetImageUrls = buildAssetImageUrls(taggedAssets, styleImageUrl);
   const assetSection = buildAssetSections(taggedAssets, assetImageUrls.length > 0);
+
+  // Fetch all project asset tag names (lightweight) so we can filter
+  // `hero_visual.must_show` items that name an asset not tagged on the
+  // current scene — see `filterMustShowForScene` for rationale.
+  const { data: allProjectAssetsRaw } = await supabase
+    .from("assets")
+    .select("tag_name")
+    .eq("project_id", projectId);
+  const projectAssetTags: string[] = (allProjectAssetsRaw ?? [])
+    .map((a: { tag_name: string | null }) => a.tag_name ?? "")
+    .filter(Boolean)
+    .map((t: string) => (t.startsWith("@") ? t.slice(1) : t).toLowerCase());
+  const sceneTagSet = new Set(
+    (scene.tagged_assets ?? []).map((t) => (t.startsWith("@") ? t.slice(1) : t).toLowerCase()),
+  );
+
+  const filteredMustShow = filterMustShowForScene(
+    briefAnalysis?.hero_visual?.must_show,
+    projectAssetTags,
+    sceneTagSet,
+    scene.scene_number,
+  );
 
   const safeBrief: BriefAnalysis | null = briefAnalysis
     ? {
@@ -761,7 +855,9 @@ export const generateConti = async ({
         tone_manner: fieldToArray(briefAnalysis.tone_manner).map(sanitizeImagePrompt),
         visual_direction: briefAnalysis.visual_direction,
         // v2 fields — 통과시켜 buildContiPrompt 가 활용. sanitize 는 첫프레임/CTA 시점에 국소 적용.
-        hero_visual: briefAnalysis.hero_visual,
+        hero_visual: briefAnalysis.hero_visual
+          ? { ...briefAnalysis.hero_visual, must_show: filteredMustShow }
+          : undefined,
         hook_strategy: briefAnalysis.hook_strategy,
         product_info: briefAnalysis.product_info,
         constraints: briefAnalysis.constraints,
@@ -798,10 +894,25 @@ export const generateConti = async ({
     videoFormat,
     safeBrief as any,
     styleAnchor,
-    !!moodReferenceUrl,
   );
   const finalPrompt =
     sanitizeImagePrompt(rawPrompt) + "\n\nSafe for all audiences. No violence, weapons, or real celebrities.";
+
+  // Opt-in diagnostic dump. Enable in DevTools with:
+  //   (window as any).__CONTI_DEBUG__ = true
+  // to inspect which brief fragments landed in the prompt for a given scene.
+  if (typeof window !== "undefined" && (window as any).__CONTI_DEBUG__ === true) {
+    console.groupCollapsed(
+      `[conti] S${scene.scene_number} prompt (${finalPrompt.length} chars)`,
+    );
+    console.log("scene.tagged_assets:", scene.tagged_assets);
+    console.log("projectAssetTags:", projectAssetTags);
+    console.log("must_show (raw):", briefAnalysis?.hero_visual?.must_show ?? "(none)");
+    console.log("must_show (filtered):", filteredMustShow);
+    console.log("assetImageUrls:", assetImageUrls);
+    console.log(finalPrompt);
+    console.groupEnd();
+  }
 
   onStageChange?.("generating");
   const { data, error } = await supabase.functions.invoke("openai-image", {
@@ -838,6 +949,7 @@ export const styleTransfer = async ({
   styleImageUrl,
   stylePrompt,
   videoFormat,
+  model,
   onStageChange,
 }: StyleTransferOptions): Promise<string> => {
   const styleDesc = stylePrompt?.trim() || "";
@@ -903,6 +1015,9 @@ export const styleTransfer = async ({
     originalImageUrl: scene.conti_image_url,
     stylePrompt: styleDesc || "(image-only)",
     imageSize,
+    // model 을 로그에 노출해 "GPT 선택했는데 NB2 로 나오는 것 같다" 류의
+    // 체감 버그를 서버 로그 ([StyleTransfer] stModel=...) 와 교차확인할 수 있게 한다.
+    requestedModel: model ?? "(default=nano-banana-2)",
   });
 
   const { data, error } = await supabase.functions.invoke("openai-image", {
@@ -915,6 +1030,12 @@ export const styleTransfer = async ({
       imageSize, // 프로젝트 포맷 기준
       projectId,
       sceneNumber: scene.scene_number,
+      // When the user's selected model is "gpt", skip the NB2 primary
+      // pass entirely so GPT Image 2 is used for style consistency
+      // (GPT now handles style preservation as well as NB2). When
+      // omitted or "nano-banana-2" the edge keeps the legacy NB2→GPT
+      // fallback chain, so this is backward compatible.
+      model: model ?? null,
     },
   });
 
@@ -924,7 +1045,16 @@ export const styleTransfer = async ({
   const publicUrl = data.publicUrl;
   if (!publicUrl) throw new Error("No image URL returned");
 
-  console.log("[StyleTransfer] 완료, usedModel:", data.usedModel);
+  // usedModel 값은 경로 판별용 — 아래 한 가지 중 하나가 나와야 한다.
+  //   "gpt-image-2"               → 사용자가 GPT 선택, GPT primary 성공
+  //   "nano-banana-2"             → 사용자가 NB2(기본) 선택, NB2 primary 성공
+  //   "style-gpt-fallback:...":   → NB2 primary 실패해서 GPT 폴백으로 넘어감
+  // "GPT 로 해도 NB2 로 도는 것 같다" 체감이 있다면 이 값이 실제로 뭐 찍혔는지 확인.
+  console.log("[StyleTransfer] 완료", {
+    scene: scene.scene_number,
+    requestedModel: model ?? "(default=nano-banana-2)",
+    usedModel: data.usedModel,
+  });
 
   onStageChange?.("uploading");
   // 새 이미지의 자연 비율 = FORMAT_RATIO[videoFormat] = 프리뷰 컨테이너 비율 → 별도의 crop 불필요.

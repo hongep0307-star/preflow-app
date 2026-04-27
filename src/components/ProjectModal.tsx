@@ -55,6 +55,8 @@ export const ProjectModal = ({
 }: ProjectModalProps) => {
   const [loading, setLoading] = useState(false);
   const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
+  // 마감일 달력 팝오버 — 날짜 선택 시 자동으로 닫기 위해 controlled 로 운영.
+  const [deadlineOpen, setDeadlineOpen] = useState(false);
   const { toast } = useToast();
 
   const [formData, setFormData] = useState({
@@ -191,7 +193,7 @@ export const ProjectModal = ({
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label className="text-muted-foreground text-[13px]">Deadline</Label>
-              <Popover>
+              <Popover open={deadlineOpen} onOpenChange={setDeadlineOpen}>
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
@@ -210,7 +212,12 @@ export const ProjectModal = ({
                   <Calendar
                     mode="single"
                     selected={formData.deadline ? parse(formData.deadline, "yyyy-MM-dd", new Date()) : undefined}
-                    onSelect={(d) => setFormData({ ...formData, deadline: d ? format(d, "yyyy-MM-dd") : "" })}
+                    onSelect={(d) => {
+                      setFormData({ ...formData, deadline: d ? format(d, "yyyy-MM-dd") : "" });
+                      // 날짜 클릭 시 팝오버 자동 종료. `d` 가 undefined(= 같은 날짜 재클릭으로 deselect)
+                      // 인 경우엔 사용자가 의도적으로 비우는 동작이므로 이 경우에도 닫아도 UX 상 무리 없음.
+                      setDeadlineOpen(false);
+                    }}
                     initialFocus
                     className={cn("p-3 pointer-events-auto")}
                   />
@@ -271,11 +278,21 @@ export const ProjectModal = ({
                     key={opt.value}
                     type="button"
                     onClick={() => setFormData({ ...formData, video_format: opt.value })}
-                    className="flex flex-col items-center justify-center p-3 rounded-none border cursor-pointer transition-all min-h-[110px]"
+                    // `transition-all` 을 빼고 `focus:outline-none` 을 명시하는 이유:
+                    //   1) transition-all 은 `outline` 까지 전환 대상에 넣어서
+                    //      outline-style 이 none → solid 로 바뀌는 순간
+                    //      브라우저 UA 기본 outline-color(Windows Chromium 에서는
+                    //      흰색/라이트 블루) 가 1프레임 깜빡인다.
+                    //   2) 클릭 직후 `:focus` 로 승격되며 UA 기본 포커스 링이
+                    //      섞이는 것도 흰색 플래시로 보이므로 억제.
+                    // 대신 outline 을 항상 `2px solid` 로 유지하고 색만
+                    // transparent ↔ KR_BORDER 로 바꿔 즉시 빨강으로 전환되게 한다.
+                    className="flex flex-col items-center justify-center p-3 rounded-none border cursor-pointer min-h-[110px] focus:outline-none focus-visible:outline-none"
                     style={{
                       borderColor: selected ? KR : "hsl(var(--border))",
                       background: selected ? KR_BG : "transparent",
-                      outline: selected ? `2px solid ${KR_BORDER}` : "none",
+                      outline: `2px solid ${selected ? KR_BORDER : "transparent"}`,
+                      WebkitTapHighlightColor: "transparent",
                     }}
                   >
                     <div className="flex items-center justify-center h-10 mb-1.5">

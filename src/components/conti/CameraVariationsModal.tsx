@@ -988,7 +988,7 @@ function ContactSheetTab({
                 lineHeight: 1.55,
               }}
             >
-              One NB2 call renders a 3×3 contact sheet of nine different camera
+              One Nano Banana 2 call renders a 3×3 contact sheet of nine different camera
               angles of your scene in a single 2K image. We then split the
               sheet into nine clickable tiles on your machine. Click the tile
               you like → <b>Apply</b> replaces the scene image with that tile.

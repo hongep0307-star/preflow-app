@@ -48,6 +48,100 @@ export async function deleteStoredFile(url: string | null | undefined): Promise<
   }
 }
 
+/** 프로젝트 안에서 이 URL 이 아직 어디선가 참조중인지 검사.
+ *
+ *  "씬 conti_image / conti_image_history / sketches" + "scene_versions 의
+ *  모든 씬 snapshot" + "briefs.mood_image_urls" 를 모두 훑어 찾는다. 일부
+ *  삭제 경로가 "나만의 리스트에서 빠졌으니 파일도 지운다" 로 동작하면서
+ *  다른 리스트에 여전히 남아있는 URL 의 파일을 오삭제해 `HistorySheet` 가
+ *  엑박을 띄우는 회귀가 있었다 — 중앙 가드로 통일한다.
+ *
+ *  Query string (`?t=...`) 은 cache-buster 라 DB 에 저장된 형태와 호출부
+ *  형태가 다를 수 있다. 비교는 base URL (query/hash 스트립) substring 으로
+ *  수행해 양쪽 모두 매칭.
+ *
+ *  `excludeSceneId` — 삭제 직전에 해당 씬의 history/sketches 를 이미
+ *  업데이트했는데 await 타이밍상 아직 DB 에 반영 안됐을 수 있을 때, 그
+ *  씬 행의 검사를 건너뛰게 해 false-positive(= 파일 안 지움 → orphan) 를
+ *  줄이는 용도. 호출부가 DB 업데이트를 제대로 await 했다면 넘기지 않아도 됨. */
+export async function isUrlReferencedInProject(
+  projectId: string,
+  url: string | null | undefined,
+  opts?: { excludeSceneId?: string },
+): Promise<boolean> {
+  if (!url || typeof url !== "string") return false;
+  const bare = url.split(/[?#]/)[0];
+  if (!bare) return false;
+
+  // 1) scenes rows — 현재 프로젝트의 모든 씬.
+  let scenesQuery = supabase
+    .from("scenes")
+    .select("id, conti_image_url, conti_image_history, sketches")
+    .eq("project_id", projectId);
+  if (opts?.excludeSceneId) scenesQuery = scenesQuery.neq("id", opts.excludeSceneId);
+  const { data: sceneRows } = await scenesQuery;
+  for (const r of (sceneRows ?? []) as any[]) {
+    if (typeof r.conti_image_url === "string" && r.conti_image_url.includes(bare)) return true;
+    const hist = r.conti_image_history;
+    if (Array.isArray(hist) && hist.some((u: unknown) => typeof u === "string" && u.includes(bare))) {
+      return true;
+    } else if (typeof hist === "string" && hist.includes(bare)) {
+      return true;
+    }
+    const sk = r.sketches;
+    if (Array.isArray(sk)) {
+      if (sk.some((s: any) => typeof s?.url === "string" && s.url.includes(bare))) return true;
+    } else if (typeof sk === "string" && sk.includes(bare)) {
+      return true;
+    }
+  }
+
+  // 2) scene_versions.scenes JSONB — 과거 버전 snapshot 들.
+  const { data: versionRows } = await supabase
+    .from("scene_versions")
+    .select("scenes")
+    .eq("project_id", projectId);
+  for (const v of (versionRows ?? []) as any[]) {
+    const raw = typeof v.scenes === "string" ? v.scenes : JSON.stringify(v.scenes ?? []);
+    if (raw.includes(bare)) return true;
+  }
+
+  // 3) briefs.mood_image_urls — Mood Ideation 배열.
+  const { data: briefRows } = await supabase
+    .from("briefs")
+    .select("mood_image_urls")
+    .eq("project_id", projectId);
+  for (const b of (briefRows ?? []) as any[]) {
+    const raw =
+      typeof b.mood_image_urls === "string"
+        ? b.mood_image_urls
+        : JSON.stringify(b.mood_image_urls ?? []);
+    if (raw.includes(bare)) return true;
+  }
+
+  return false;
+}
+
+/** `deleteStoredFile` 의 안전 래퍼: 프로젝트 내 다른 위치에서 아직
+ *  참조중이면 삭제를 스킵한다. 참조 검사 실패(예: 네트워크 오류)도
+ *  false-positive 방향으로 수렴 — 삭제를 건너뛰어 엑박보다 orphan 을
+ *  선호한다. */
+export async function deleteStoredFileIfUnreferenced(
+  projectId: string,
+  url: string | null | undefined,
+  opts?: { excludeSceneId?: string },
+): Promise<void> {
+  if (!url) return;
+  try {
+    const referenced = await isUrlReferencedInProject(projectId, url, opts);
+    if (referenced) return;
+  } catch (e) {
+    console.warn("[storage] reference check failed; skipping delete", url, e);
+    return;
+  }
+  await deleteStoredFile(url);
+}
+
 /** 여러 URL 을 한 번에 삭제. 버킷별로 묶어서 배치 remove 호출 하므로
  *  많은 파일을 한꺼번에 지울 때 왕복 호출 수가 줄어든다. */
 export async function deleteStoredFiles(urls: Array<string | null | undefined>): Promise<void> {

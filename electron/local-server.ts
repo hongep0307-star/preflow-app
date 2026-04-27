@@ -7,7 +7,9 @@ import {
   handleTranslateAnalysis,
   handleAnalyzeReferenceImages,
   handleOpenaiImage,
+  handleOpenAIResponses,
 } from "./api-handlers";
+import { handleYoutubeIngest } from "./youtube-handler";
 import {
   dbSelect,
   dbInsert,
@@ -206,6 +208,10 @@ export function startLocalServer(): Promise<number> {
           result = await handleAnalyzeReferenceImages(body);
         } else if (url === "/api/openai-image") {
           result = await handleOpenaiImage(body);
+        } else if (url === "/api/openai-chat") {
+          result = await handleOpenAIResponses(body);
+        } else if (url === "/api/youtube-ingest") {
+          result = await handleYoutubeIngest(body);
         } else {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Not found" }));

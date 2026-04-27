@@ -106,10 +106,19 @@ function createTables() {
       conti_image_crop TEXT,
       is_transition INTEGER DEFAULT 0,
       transition_type TEXT,
+      sketches TEXT DEFAULT '[]',
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     )
   `);
+
+  // sketches: per-scene composition candidates generated in ContiStudio's Sketches tab.
+  // JSON array of { id, url, model, createdAt, liked? }. Tied to the scene row's
+  // lifecycle via FK cascade — delete the scene, the sketches go with it.
+  // Idempotent ALTER for legacy DBs created before this column existed.
+  try {
+    d.exec(`ALTER TABLE scenes ADD COLUMN sketches TEXT DEFAULT '[]'`);
+  } catch (_) { /* column already exists */ }
 
   d.exec(`
     CREATE TABLE IF NOT EXISTS assets (

@@ -170,6 +170,17 @@ export interface Analysis {
   idea_note?: string;
   image_analysis?: string;
   reference_mood?: string;
+  /** GPT-5.x 가 영상 레퍼런스를 분석했을 때 채워지는 인사이트 배열. */
+  reference_video_insights?: Array<{
+    source: "youtube" | "upload";
+    title?: string;
+    hook_pattern?: string;
+    pacing_per_scene?: Array<{ t: string; beat: string }>;
+    visual_motifs?: string[];
+    audio_cues?: string[];
+    transferable_techniques?: string[];
+    do_not_copy?: string[];
+  }>;
   visual_direction?:
     | {
         camera?: string;
@@ -235,13 +246,40 @@ export type ParsedScene = {
   tagged_assets?: string[];
 };
 
-export type StorylineOption = { id: string; title: string; synopsis: string; mood?: string };
+export type StorylineOption = { id: string; title: string; synopsis: string; mood?: string; reference_anchor?: string };
+
+/** GPT-5.x 가 Phase 2 에서 각 씬에 대해 제시하는 대안 변형. */
+export type ParsedSceneAlt = {
+  scene_number: number;
+  variant: string;
+  title?: string;
+  description?: string;
+  rationale?: string;
+};
+
+/** 씬들 출력 후 자체 채점 결과. */
+export type ParsedSceneAudit = {
+  abcd: { A?: number; B?: number; C?: number; D?: number };
+  issues?: string[];
+  suggested_fixes?: string[];
+};
+
+/** 레퍼런스 영상 분해 (Phase 0). storylines 보다 먼저 나온다. */
+export type ParsedReferenceDecomposition = {
+  hook?: string;
+  scenes?: Array<{ t?: string; beat?: string; visual?: string; audio?: string }>;
+  motifs?: string[];
+  do_not_copy?: string[];
+};
 
 export type MessageSegment =
   | { type: "text"; content: string }
   | { type: "scene"; data: ParsedScene | null }
   | { type: "strategy"; content: string }
-  | { type: "storylines"; options: StorylineOption[] };
+  | { type: "storylines"; options: StorylineOption[] }
+  | { type: "scene_alt"; data: ParsedSceneAlt | null }
+  | { type: "scene_audit"; data: ParsedSceneAudit | null }
+  | { type: "reference_decomposition"; data: ParsedReferenceDecomposition | null };
 
 export type RightPanel = "scenes" | "mood";
 
@@ -423,7 +461,9 @@ function applyIdMapToText(text: string, idMap: Record<string, string>): string {
 
 export function parseMessageSegments(text: string, usedIds?: Set<string>): MessageSegment[] {
   const segments: MessageSegment[] = [];
-  const regex = /```(scene|strategy|storylines)\s*([\s\S]*?)```/g;
+  // ★ scene_alt 와 scene 의 매칭 우선순위 — `scene_alt` 가 더 길어 alternation 앞에 둔다.
+  // ★ reference_decomposition 도 추가.
+  const regex = /```(reference_decomposition|scene_audit|scene_alt|scene|strategy|storylines)\s*([\s\S]*?)```/g;
   let lastIndex = 0,
     match: RegExpExecArray | null;
   let idMap: Record<string, string> = {};
@@ -433,7 +473,13 @@ export function parseMessageSegments(text: string, usedIds?: Set<string>): Messa
       const before = text.slice(lastIndex, match.index).trim();
       if (before) segments.push({ type: "text", content: applyIdMapToText(before, idMap) });
     }
-    const bt = match[1] as "scene" | "strategy" | "storylines";
+    const bt = match[1] as
+      | "scene"
+      | "strategy"
+      | "storylines"
+      | "scene_alt"
+      | "scene_audit"
+      | "reference_decomposition";
     const bc = match[2].trim();
     if (bt === "scene") {
       try {
@@ -452,6 +498,24 @@ export function parseMessageSegments(text: string, usedIds?: Set<string>): Messa
         segments.push({ type: "storylines", options: parsed });
       } catch {
         segments.push({ type: "text", content: bc });
+      }
+    } else if (bt === "scene_alt") {
+      try {
+        segments.push({ type: "scene_alt", data: JSON.parse(cleanJsonString(bc)) });
+      } catch {
+        segments.push({ type: "scene_alt", data: null });
+      }
+    } else if (bt === "scene_audit") {
+      try {
+        segments.push({ type: "scene_audit", data: JSON.parse(cleanJsonString(bc)) });
+      } catch {
+        segments.push({ type: "scene_audit", data: null });
+      }
+    } else if (bt === "reference_decomposition") {
+      try {
+        segments.push({ type: "reference_decomposition", data: JSON.parse(cleanJsonString(bc)) });
+      } catch {
+        segments.push({ type: "reference_decomposition", data: null });
       }
     } else {
       segments.push({ type: "strategy", content: bc });
@@ -519,7 +583,9 @@ export function remapMessageForHistory(text: string, usedIds: Set<string>): stri
 
 export function extractScenesFromText(text: string): ParsedScene[] {
   const result: ParsedScene[] = [];
-  for (const m of [...text.matchAll(/```scene\s*([\s\S]*?)```/g)]) {
+  // ★ `scene_alt` 와 충돌 방지: 정확히 ```scene\n 또는 ```scene\s 로 시작하되,
+  //   ` `scene_` 같은 prefix 매칭은 [\s] 매칭으로 막는다.
+  for (const m of [...text.matchAll(/```scene(?![a-z_])\s*([\s\S]*?)```/g)]) {
     try {
       const s = JSON.parse(cleanJsonString(m[1]));
       if (s.scene_number && typeof s.scene_number === "number") result.push(s);
@@ -531,39 +597,99 @@ export function extractScenesFromText(text: string): ParsedScene[] {
 // ── Pending scenes persistence ──
 
 export const _pendingScenesByProject = new Map<string, ParsedScene[]>();
-// 진행 중인 mood generation 의 전체 상태를 모듈 레벨로 보관.
-// AgentTab/MoodIdeationPanel 이 언마운트(탭 이동)된 동안에도 in-flight 콜백이 안전하게 갱신할 수 있도록
-// skeletonIds 와 arrivedUrls 를 함께 보관하고, subscribe 패턴으로 마운트된 인스턴스에 변화를 통지한다.
+
+/* ─────────────────────────────────────────────────────────────
+ *  Mood Generation In-Flight 스토어 (배치 리스트)
+ *
+ *   — AgentTab/MoodIdeationPanel 이 언마운트(탭 이동)된 동안에도
+ *     in-flight 콜백이 안전하게 상태를 갱신할 수 있도록 모듈 레벨에 보관.
+ *
+ *   — 한 프로젝트에서 여러 배치를 동시에 실행할 수 있도록
+ *     `Map<pid, MoodGenState[]>` 로 들고 있고, 각 배치는 `batchId` 로 식별.
+ *     이전에는 `Map<pid, MoodGenState>` 단일 슬롯이라 두 번째 generate 호출이
+ *     첫 배치의 skeletonIds/arrivedUrls 를 덮어쓰는 한계가 있었음.
+ *
+ *   — DB persist (skeletonIds 1:1 매핑) 는 배치 단위로 호출되어야 함.
+ * ───────────────────────────────────────────────────────────── */
 export type MoodGenState = {
+  /** 배치 식별자 — 한 프로젝트 안에서 unique. */
+  batchId: string;
   count: number;
   skeletonIds: string[];
   arrivedUrls: string[];
   promise: Promise<void> | null;
 };
 
-export const _moodGeneratingByProject = new Map<string, MoodGenState>();
+/** Map<projectId, MoodGenState[]> — 배열 순서는 시작 시각(오래된→최신). */
+export const _moodGeneratingByProject = new Map<string, MoodGenState[]>();
 const _moodGenListeners = new Map<string, Set<() => void>>();
 
-export function getMoodGen(pid: string): MoodGenState | undefined {
-  return _moodGeneratingByProject.get(pid);
+const notify = (pid: string) => _moodGenListeners.get(pid)?.forEach((fn) => fn());
+
+/** 현재 진행중인 모든 배치를 시작 순서대로 반환 (없으면 빈 배열). */
+export function getMoodGenBatches(pid: string): MoodGenState[] {
+  return _moodGeneratingByProject.get(pid) ?? [];
 }
-export function setMoodGen(pid: string, next: MoodGenState | null) {
-  if (next === null) _moodGeneratingByProject.delete(pid);
+
+/** in-flight 배치가 1개라도 있는지. UI 카운터/스피너 토글용. */
+export function isAnyMoodGenInFlight(pid: string): boolean {
+  return (_moodGeneratingByProject.get(pid)?.length ?? 0) > 0;
+}
+
+/** 배치 한 개를 추가. batchId 는 호출자가 미리 발급해서 넘긴다 (clean-up 시 같은 ID 사용). */
+export function addMoodGenBatch(pid: string, state: MoodGenState) {
+  const arr = _moodGeneratingByProject.get(pid) ?? [];
+  arr.push(state);
+  _moodGeneratingByProject.set(pid, arr);
+  notify(pid);
+}
+
+/** 특정 배치만 부분 갱신. batchId 가 매칭 안 되면 no-op. */
+export function patchMoodGenBatch(pid: string, batchId: string, patch: Partial<MoodGenState>) {
+  const arr = _moodGeneratingByProject.get(pid);
+  if (!arr) return;
+  const idx = arr.findIndex((b) => b.batchId === batchId);
+  if (idx < 0) return;
+  arr[idx] = { ...arr[idx], ...patch };
+  notify(pid);
+}
+
+/** 특정 배치를 제거. 배열이 비면 Map 엔트리도 지운다. */
+export function removeMoodGenBatch(pid: string, batchId: string) {
+  const arr = _moodGeneratingByProject.get(pid);
+  if (!arr) return;
+  const next = arr.filter((b) => b.batchId !== batchId);
+  if (next.length === 0) _moodGeneratingByProject.delete(pid);
   else _moodGeneratingByProject.set(pid, next);
-  _moodGenListeners.get(pid)?.forEach((fn) => fn());
+  notify(pid);
 }
-export function patchMoodGen(pid: string, patch: Partial<MoodGenState>) {
-  const cur = _moodGeneratingByProject.get(pid);
-  if (!cur) return;
-  _moodGeneratingByProject.set(pid, { ...cur, ...patch });
-  _moodGenListeners.get(pid)?.forEach((fn) => fn());
-}
+
+/** 변경 구독. 배치 추가/패치/제거 모두 동일 콜백을 깨운다. */
 export function subscribeMoodGen(pid: string, fn: () => void) {
   if (!_moodGenListeners.has(pid)) _moodGenListeners.set(pid, new Set());
   _moodGenListeners.get(pid)!.add(fn);
   return () => {
     _moodGenListeners.get(pid)?.delete(fn);
   };
+}
+
+/** 배치 리스트에서 skeleton ID → 도착 URL 룩업. UI sync 에서 쓰는 헬퍼.
+ *  찾지 못하면 null. */
+export function lookupArrivedUrlForSkeleton(pid: string, skelId: string): string | null {
+  const arr = _moodGeneratingByProject.get(pid);
+  if (!arr) return null;
+  for (const b of arr) {
+    const i = b.skeletonIds.indexOf(skelId);
+    if (i >= 0) return b.arrivedUrls[i] ?? null;
+  }
+  return null;
+}
+
+/** 진행중인 모든 배치의 skeleton ID 합집합. fetchBrief 등에서 placeholder 보존용. */
+export function collectAllInFlightSkeletonIds(pid: string): Set<string> {
+  const out = new Set<string>();
+  for (const b of getMoodGenBatches(pid)) for (const id of b.skeletonIds) out.add(id);
+  return out;
 }
 
 /* ─────────────────────────────────────────────────────────────
