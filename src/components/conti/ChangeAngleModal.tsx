@@ -24,6 +24,7 @@ import type { Scene, Asset } from "./contiTypes";
 import { IMAGE_SIZE_MAP } from "@/lib/conti";
 import { buildAdvancedChainPrompt } from "@/lib/cameraLibrary";
 import { buildSubjectDescriptor } from "@/lib/subjectDescriptor";
+import { useT, useUiLanguage, type UiLanguage } from "@/lib/uiLanguage";
 
 type VideoFormat = keyof typeof IMAGE_SIZE_MAP;
 
@@ -65,15 +66,22 @@ interface OrbitPreset {
 }
 const ORBIT_PRESETS: OrbitPreset[] = [
   { id: "front",     label: "Front",     yaw: 0,    pitch: 0   },
-  { id: "l45",       label: "L 3/4",     yaw: -45,  pitch: 0   },
-  { id: "r45",       label: "R 3/4",     yaw: 45,   pitch: 0   },
-  { id: "profile_l", label: "L Profile", yaw: -90,  pitch: 0   },
-  { id: "profile_r", label: "R Profile", yaw: 90,   pitch: 0   },
   { id: "back",      label: "Back",      yaw: 180,  pitch: 0   },
   { id: "high",      label: "High",      yaw: 0,    pitch: 30  },
   { id: "low",       label: "Low",       yaw: 0,    pitch: -30 },
   { id: "overhead",  label: "Overhead",  yaw: 0,    pitch: 85  },
 ];
+
+const ORBIT_PRESET_LABEL_KO: Record<string, string> = {
+  front: "정면",
+  back: "후면",
+  high: "하이앵글",
+  low: "로우앵글",
+  overhead: "오버헤드",
+};
+
+const getOrbitPresetLabel = (preset: OrbitPreset, language: UiLanguage) =>
+  language === "ko" ? (ORBIT_PRESET_LABEL_KO[preset.id] ?? preset.label) : preset.label;
 
 /* ━━━ Prompt Construction ━━━
  *
@@ -157,6 +165,28 @@ const summarizeZoom = (zoom: number): string => {
   return `out ${-a}%`;
 };
 
+const summarizeYawUi = (yaw: number, language: UiLanguage): string => {
+  const a = Math.round(yaw);
+  if (Math.abs(a) < 8) return language === "ko" ? "동일" : "same";
+  if (language === "ko") return `${a > 0 ? "우" : "좌"} ${Math.abs(a)}°`;
+  return `${a > 0 ? "R" : "L"} ${Math.abs(a)}°`;
+};
+
+const summarizePitchUi = (pitch: number, language: UiLanguage): string => {
+  const a = Math.round(pitch);
+  if (Math.abs(a) < 6) return language === "ko" ? "동일" : "same";
+  if (language === "ko") return a > 0 ? `아래 ${a}°` : `위 ${-a}°`;
+  return a > 0 ? `down ${a}°` : `up ${-a}°`;
+};
+
+const summarizeZoomUi = (zoom: number, language: UiLanguage): string => {
+  const a = Math.round(zoom);
+  if (Math.abs(a) < 6) return language === "ko" ? "동일" : "same";
+  if (language === "ko") return a > 0 ? `앞으로 ${a}%` : `뒤로 ${-a}%`;
+  if (a > 0) return `in ${a}%`;
+  return `out ${-a}%`;
+};
+
 /* Prompt construction delegates to buildAdvancedChainPrompt in the shared
  * camera library. The "A, then B" chain pattern (yaw+zoom as one clause,
  * pitch as a second step) has measurably better NB2 adherence than the
@@ -215,9 +245,13 @@ interface SphereControlProps {
   pitch: number;
   onChange: (v: { yaw: number; pitch: number }) => void;
   disabled?: boolean;
+  labels: {
+    top: string;
+    bottom: string;
+  };
 }
 
-const SphereControl = ({ yaw, pitch, onChange, disabled }: SphereControlProps) => {
+const SphereControl = ({ yaw, pitch, onChange, disabled, labels }: SphereControlProps) => {
   const svgRef = useRef<SVGSVGElement>(null);
   /** hemi: 1 = 앞 반구(z>=0), -1 = 뒤 반구(z<0).
    *  offsetX/Y: 포인터 다운 시점의 (커서 ↔ 도트) 화면 오프셋.
@@ -404,10 +438,10 @@ const SphereControl = ({ yaw, pitch, onChange, disabled }: SphereControlProps) =
       <circle cx={cx} cy={cy} r={2} fill="rgba(255,255,255,0.38)" />
       {/* cardinal labels */}
       <text x={cx} y={cy - SPHERE_RADIUS - 8} textAnchor="middle" fill="rgba(255,255,255,0.55)" fontSize={9} style={labelStyle}>
-        Top
+        {labels.top}
       </text>
       <text x={cx} y={cy + SPHERE_RADIUS + 14} textAnchor="middle" fill="rgba(255,255,255,0.55)" fontSize={9} style={labelStyle}>
-        Bottom
+        {labels.bottom}
       </text>
       <text x={cx - SPHERE_RADIUS - 6} y={cy + 3} textAnchor="end" fill="rgba(255,255,255,0.55)" fontSize={9} style={labelStyle}>
         L
@@ -417,11 +451,11 @@ const SphereControl = ({ yaw, pitch, onChange, disabled }: SphereControlProps) =
       </text>
       {/* draggable viewpoint dot */}
       {inFront ? (
-        <circle cx={dotX} cy={dotY} r={7} fill="#f9423a" stroke="#fff" strokeWidth={1.5} />
+        <circle cx={dotX} cy={dotY} r={7} fill="hsl(var(--primary))" stroke="#fff" strokeWidth={1.5} />
       ) : (
         <g>
-          <circle cx={dotX} cy={dotY} r={7} fill="none" stroke="#f9423a" strokeWidth={2} strokeDasharray="3 2" />
-          <circle cx={dotX} cy={dotY} r={2} fill="#f9423a" />
+          <circle cx={dotX} cy={dotY} r={7} fill="none" stroke="hsl(var(--primary))" strokeWidth={2} strokeDasharray="3 2" />
+          <circle cx={dotX} cy={dotY} r={2} fill="hsl(var(--primary))" />
         </g>
       )}
     </svg>
@@ -439,6 +473,7 @@ interface BiSliderProps {
   onChange: (v: number) => void;
   disabled?: boolean;
   summary: string;
+  resetTitle: string;
 }
 const BiSlider = ({
   label,
@@ -450,6 +485,7 @@ const BiSlider = ({
   onChange,
   disabled,
   summary,
+  resetTitle,
 }: BiSliderProps) => (
   <div>
     <div
@@ -475,8 +511,8 @@ const BiSlider = ({
       onChange={(e) => onChange(Number(e.target.value))}
       onDoubleClick={() => onChange(0)}
       disabled={disabled}
-      style={{ width: "100%", accentColor: "#f9423a", cursor: disabled ? "default" : "pointer" }}
-      title="Double-click to reset to 0"
+      style={{ width: "100%", accentColor: "hsl(var(--primary))", cursor: disabled ? "default" : "pointer" }}
+      title={resetTitle}
     />
     <div
       style={{
@@ -588,15 +624,15 @@ const BACKDROP_STYLE: React.CSSProperties = {
   position: "fixed",
   inset: 0,
   zIndex: 100,
-  background: "rgba(0,0,0,0.65)",
+  background: "rgba(0,0,0,0.78)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   padding: 24,
 };
 const PANEL_STYLE: React.CSSProperties = {
-  background: "#121212",
-  border: "1px solid rgba(255,255,255,0.08)",
+  background: "hsl(var(--card))",
+  border: "1px solid hsl(var(--border-subtle))",
   width: "min(960px, 100%)",
   height: "min(92vh, 780px)",
   display: "grid",
@@ -613,6 +649,8 @@ export function ChangeAngleModal({
   onClose,
   onSubmit,
 }: ChangeAngleModalProps) {
+  const t = useT();
+  const { language } = useUiLanguage();
   const sourceUrl = scene.conti_image_url;
   const [cfg, setCfg] = useState<ChangeAngleConfig>(DEFAULT_CONFIG);
   /** With generation hoisted to the parent, the modal no longer carries
@@ -646,7 +684,7 @@ export function ChangeAngleModal({
 
   const handleApply = () => {
     if (!sourceUrl) {
-      setError("No source image for this scene.");
+      setError(t("variant.noSourceImage"));
       return;
     }
     const prompt = buildChangeAnglePrompt(cfg, subject);
@@ -677,7 +715,7 @@ export function ChangeAngleModal({
           style={{ ...PANEL_STYLE, gridTemplateColumns: "1fr", padding: 24 }}
           onClick={(e) => e.stopPropagation()}
         >
-          <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>No source image for this scene.</div>
+          <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>{t("variant.noSourceImage")}</div>
         </div>
       </div>
     );
@@ -731,7 +769,7 @@ export function ChangeAngleModal({
                 letterSpacing: 0.1,
               }}
             >
-              Change Angle
+              {t("conti.changeAngle")}
             </div>
             <button
               onClick={resetAll}
@@ -747,16 +785,16 @@ export function ChangeAngleModal({
                 fontSize: 11,
                 padding: "2px 6px",
               }}
-              title="Reset all controls to 0"
+              title={t("variant.resetAllTitle")}
             >
-              <RotateCcw className="w-3 h-3" /> Reset
+              <RotateCcw className="w-3 h-3" /> {t("variant.reset")}
             </button>
             <button
               onClick={onClose}
               disabled={applying}
               className="text-white/60 hover:text-white/90 disabled:opacity-40"
               style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}
-              title="Close (Esc)"
+              title={t("variant.closeEsc")}
             >
               <X className="w-4 h-4" />
             </button>
@@ -766,13 +804,13 @@ export function ChangeAngleModal({
           <div style={{ padding: "4px 20px 6px", overflow: "auto", flex: 1, minHeight: 0 }}>
             {/* Orbit (yaw + pitch via sphere) */}
             <Section
-              label="Orbit camera"
+              label={t("variant.orbitCamera")}
               first
               meta={
                 <span>
-                  Yaw <b style={{ color: "rgba(255,255,255,0.7)" }}>{summarizeYaw(cfg.yaw)}</b>
+                  {t("variant.yaw")} <b style={{ color: "rgba(255,255,255,0.7)" }}>{summarizeYawUi(cfg.yaw, language)}</b>
                   <span style={{ opacity: 0.35, margin: "0 5px" }}>·</span>
-                  Pitch <b style={{ color: "rgba(255,255,255,0.7)" }}>{summarizePitch(cfg.pitch)}</b>
+                  {t("variant.pitch")} <b style={{ color: "rgba(255,255,255,0.7)" }}>{summarizePitchUi(cfg.pitch, language)}</b>
                 </span>
               }
             >
@@ -795,27 +833,30 @@ export function ChangeAngleModal({
                     }))
                   }
                   disabled={applying}
+                  labels={{ top: t("variant.top"), bottom: t("variant.bottom") }}
                 />
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
                   <BiSlider
-                    label="Yaw"
+                    label={t("variant.yaw")}
                     value={cfg.yaw}
                     min={-YAW_MAX}
                     max={YAW_MAX}
                     endLabels={["L", "R"]}
                     onChange={(v) => setCfg((p) => ({ ...p, yaw: clamp(v, -YAW_MAX, YAW_MAX) }))}
                     disabled={applying}
-                    summary={summarizeYaw(cfg.yaw)}
+                    summary={summarizeYawUi(cfg.yaw, language)}
+                    resetTitle={t("variant.doubleClickResetTitle")}
                   />
                   <BiSlider
-                    label="Pitch"
+                    label={t("variant.pitch")}
                     value={cfg.pitch}
                     min={-PITCH_MAX}
                     max={PITCH_MAX}
-                    endLabels={["Down", "Up"]}
+                    endLabels={[t("variant.down"), t("variant.up")]}
                     onChange={(v) => setCfg((p) => ({ ...p, pitch: clamp(v, -PITCH_MAX, PITCH_MAX) }))}
                     disabled={applying}
-                    summary={summarizePitch(cfg.pitch)}
+                    summary={summarizePitchUi(cfg.pitch, language)}
+                    resetTitle={t("variant.doubleClickResetTitle")}
                   />
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                     {ORBIT_PRESETS.map((preset) => {
@@ -826,7 +867,7 @@ export function ChangeAngleModal({
                           key={preset.id}
                           onClick={() => setCfg((p) => ({ ...p, yaw: preset.yaw, pitch: preset.pitch }))}
                           disabled={applying}
-                          title={`${preset.label} (yaw ${preset.yaw}°, pitch ${preset.pitch}°)`}
+                          title={`${getOrbitPresetLabel(preset, language)} (${t("variant.yaw")} ${preset.yaw}°, ${t("variant.pitch")} ${preset.pitch}°)`}
                           className="hover:bg-white/[0.08] disabled:opacity-50"
                           style={{
                             padding: "4px 8px",
@@ -839,7 +880,7 @@ export function ChangeAngleModal({
                             fontFamily: "inherit",
                           }}
                         >
-                          {preset.label}
+                          {getOrbitPresetLabel(preset, language)}
                         </button>
                       );
                     })}
@@ -850,33 +891,34 @@ export function ChangeAngleModal({
 
             {/* Zoom */}
             <Section
-              label="Zoom"
+              label={t("variant.zoom")}
               meta={
                 <span>
-                  <b style={{ color: "rgba(255,255,255,0.7)" }}>{summarizeZoom(cfg.zoom)}</b>
+                  <b style={{ color: "rgba(255,255,255,0.7)" }}>{summarizeZoomUi(cfg.zoom, language)}</b>
                 </span>
               }
             >
               <BiSlider
-                label="Dolly"
+                label={t("variant.dolly")}
                 value={cfg.zoom}
                 min={-ZOOM_MAX}
                 max={ZOOM_MAX}
-                endLabels={["Pull back", "Push in"]}
+                endLabels={[t("variant.pullBack"), t("variant.pushIn")]}
                 onChange={(v) => setCfg((p) => ({ ...p, zoom: clamp(v, -ZOOM_MAX, ZOOM_MAX) }))}
                 disabled={applying}
-                summary={summarizeZoom(cfg.zoom)}
+                summary={summarizeZoomUi(cfg.zoom, language)}
+                resetTitle={t("variant.doubleClickResetTitle")}
               />
             </Section>
 
             {/* Additional notes */}
-            <Section label="Notes" meta="Optional">
+            <Section label={t("variant.notes")} meta={t("variant.optional")}>
               <textarea
                 value={cfg.customText}
                 onChange={(e) => setCfg((p) => ({ ...p, customText: e.target.value }))}
                 disabled={applying}
                 rows={2}
-                placeholder="anything else worth telling the model"
+                placeholder={t("variant.changeAngleNotesPlaceholder")}
                 style={{
                   width: "100%",
                   padding: "8px 10px",
@@ -934,13 +976,13 @@ export function ChangeAngleModal({
                 fontWeight: 500,
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               onClick={handleApply}
               style={{
                 padding: "7px 16px",
-                background: "#f9423a",
+                background: "hsl(var(--primary))",
                 border: "none",
                 color: "#fff",
                 cursor: "pointer",
@@ -952,9 +994,9 @@ export function ChangeAngleModal({
                 fontSize: 12,
                 fontWeight: 600,
               }}
-              title="Submit and close — generation continues on the scene card."
+              title={t("variant.submitAndCloseTitle")}
             >
-              Apply
+              {t("conti.apply")}
             </button>
           </div>
         </div>

@@ -35,6 +35,7 @@ import { AssetDetailModal } from "./assets/AssetDetailModal";
 import { FocalEditor } from "./assets/FocalEditor";
 import { SquareAvatar } from "./assets/SquareAvatar";
 import { UploadZone } from "./assets/UploadZone";
+import { useT } from "@/lib/uiLanguage";
 
 interface Props {
   projectId: string;
@@ -46,6 +47,7 @@ interface Props {
 ???????????????????????????????????????? */
 export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
   const { toast } = useToast();
+  const t = useT();
   const isMobile = useIsMobile();
 
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -86,7 +88,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
       if (error) {
         console.error("[AssetsTab] saveFocal update failed:", error);
         toast({
-          title: "Profile image adjustment was not saved",
+          title: t("assets.focalSaveFailed"),
           description: typeof error === "object" && error && "message" in error ? String((error as any).message) : String(error),
           variant: "destructive",
         });
@@ -94,7 +96,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
     } catch (e) {
       console.error("[AssetsTab] saveFocal threw:", e);
       toast({
-        title: "Profile image adjustment was not saved",
+        title: t("assets.focalSaveFailed"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -245,7 +247,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
 
   const handlePhotoFile = (file: File) => {
     if (file.size > 5 * 1024 * 1024) {
-      toast({ title: "Max file size is 5MB", variant: "destructive" });
+      toast({ title: t("assets.maxFileSize"), variant: "destructive" });
       return;
     }
     setPhotoFile(file);
@@ -271,12 +273,12 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
       if (assetType === "background" && result.description) setSpaceDescription(result.description);
       if (!result.outfit && !result.description)
         toast({
-          title: "No analysis result",
-          description: "Could not extract info from image.",
+          title: t("assets.noAnalysisResult"),
+          description: t("assets.noAnalysisDesc"),
           variant: "destructive",
         });
     } catch (e: any) {
-      toast({ title: "Image analysis failed", description: e.message, variant: "destructive" });
+      toast({ title: t("assets.imageAnalysisFailed"), description: e.message, variant: "destructive" });
     } finally {
       setIsAnalyzing(false);
     }
@@ -299,7 +301,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
       });
       setAiDescription(data.content[0].text);
     } catch (err: any) {
-      toast({ title: "AI description failed", description: err.message, variant: "destructive" });
+      toast({ title: t("assets.aiDescriptionFailed"), description: err.message, variant: "destructive" });
     } finally {
       setIsGenerating(false);
     }
@@ -323,7 +325,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
       if (data?.error) throw new Error(data.error?.message ?? "Image generation failed");
       setGeneratedPortraitUrl(data.publicUrl);
     } catch (e: any) {
-      toast({ title: "Image generation failed", description: e.message, variant: "destructive" });
+      toast({ title: t("assets.imageGenerationFailed"), description: e.message, variant: "destructive" });
     } finally {
       setIsGeneratingImage(false);
     }
@@ -368,9 +370,9 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
       setModalOpen(false);
       resetForm();
       await fetchAssets();
-      toast({ title: editingAsset ? "Updated" : `${TYPE_META[assetType].label} registered` });
+      toast({ title: editingAsset ? t("assets.updatedToast") : t("assets.registeredToast", { type: t(`assets.${assetType}`) }) });
     } catch (err: any) {
-      toast({ title: "Save failed", description: err.message, variant: "destructive" });
+      toast({ title: t("assets.saveFailed"), description: err.message, variant: "destructive" });
     } finally {
       setIsSaving(false);
     }
@@ -389,7 +391,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
     await supabase.from("assets").delete().eq("id", id);
     await deleteStoredFiles(urls);
     await fetchAssets();
-    toast({ title: "Deleted" });
+    toast({ title: t("assets.deleteToast") });
     setDeleteTarget(null);
   };
 
@@ -431,7 +433,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
     const count = sceneCounts[tagName] ?? 0;
     return (
       <span className="text-[10px] text-muted-foreground/40">
-        {count} {count === 1 ? "Scene" : "Scenes"}
+        {count} {t(count === 1 ? "assets.scene" : "assets.scenes")}
       </span>
     );
   };
@@ -458,7 +460,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 }}
                 className="absolute bottom-2 left-1/2 -translate-x-1/2 w-5 h-5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md z-10"
                 style={{ background: KR }}
-                title="Adjust focal point"
+                title={t("assets.adjustFocalPoint")}
               >
                 <Move className="w-2.5 h-2.5 text-white" />
               </button>
@@ -488,7 +490,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
               </div>
             )}
             {!asset.role_description && !asset.outfit_description && (
-              <p className="text-[11px] text-muted-foreground/30">No outfit info</p>
+              <p className="text-[11px] text-muted-foreground/30">{t("assets.noOutfitInfo")}</p>
             )}
             {renderActions(asset)}
           </div>
@@ -523,7 +525,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
             {asset.ai_description ? (
               <p className="text-[11px] text-muted-foreground leading-snug line-clamp-1">{asset.ai_description}</p>
             ) : (
-              <p className="text-[11px] text-muted-foreground/30">No description</p>
+              <p className="text-[11px] text-muted-foreground/30">{t("assets.noDescription")}</p>
             )}
             {renderActions(asset)}
           </div>
@@ -584,8 +586,8 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 }}
                 title={
                   variationCount === 0
-                    ? "Click to generate camera framings"
-                    : `${variationCount} framing${variationCount === 1 ? "" : "s"} generated`
+                    ? t("assets.clickGenerateFramings")
+                    : t("assets.framingsGenerated", { count: variationCount })
                 }
               >
                 <Camera
@@ -611,7 +613,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
           {asset.space_description ? (
             <p className="text-[11px] text-muted-foreground leading-snug line-clamp-1">{asset.space_description}</p>
           ) : (
-            <p className="text-[11px] text-muted-foreground/30">No description</p>
+            <p className="text-[11px] text-muted-foreground/30">{t("assets.noDescription")}</p>
           )}
           {renderActions(asset)}
         </div>
@@ -629,12 +631,12 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
       <div className="flex items-center justify-between border-b border-white/[0.08] px-5 pt-4">
         {/* ?? ? */}
         <div className="flex items-stretch gap-0">
-          {(["character", "item", "background"] as AssetType[]).map((t) => {
-            const isActive = activeType === t;
+          {(["character", "item", "background"] as AssetType[]).map((type) => {
+            const isActive = activeType === type;
             return (
               <button
-                key={t}
-                onClick={() => setActiveType(t)}
+                key={type}
+                onClick={() => setActiveType(type)}
                 className="flex items-center gap-1.5 px-4 py-2 text-[11px] font-medium tracking-wider transition-colors"
                 style={{
                   background: "transparent",
@@ -644,8 +646,8 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                   boxShadow: isActive ? `inset 0 -2px 0 ${KR}` : "none",
                 }}
               >
-                {TYPE_META[t].icon}
-                {TYPE_META[t].label}
+                {TYPE_META[type].icon}
+                {t(`assets.${type}`)}
                 <span
                   className="font-mono text-[9px] px-1.5 py-0.5 ml-0.5"
                   style={{
@@ -654,7 +656,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                     color: isActive ? KR : "rgba(255,255,255,0.3)",
                   }}
                 >
-                  {typeCounts[t]}
+                  {typeCounts[type]}
                 </span>
               </button>
             );
@@ -668,7 +670,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
             style={{ background: filteredAssets.length === 0 ? "rgba(255,255,255,0.06)" : KR, color: filteredAssets.length === 0 ? "rgba(255,255,255,0.35)" : "#fff", borderRadius: 0 }}
           >
             <Plus className="w-3.5 h-3.5" />
-            {TYPE_META[activeType].addLabel}
+            {t(activeType === "character" ? "assets.addCharacter" : activeType === "item" ? "assets.addItem" : "assets.addBackground")}
           </Button>
           {onSwitchToAgent && (() => {
             const hasAssets = assets.length > 0;
@@ -691,7 +693,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                       }
                 }
               >
-                Go to Ideation
+                {t("assets.goToIdeation")}
                 <ArrowRight className="w-3 h-3" />
               </Button>
             );
@@ -705,10 +707,10 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
           <div className="flex flex-col items-center justify-center min-h-[300px]">
             {TYPE_META[activeType].emptyIcon}
             <p className="text-[12px] font-bold tracking-wider text-muted-foreground/40 mt-2">
-              No {activeType === "character" ? "Characters" : activeType === "item" ? "Items" : "Backgrounds"}
+              {t(activeType === "character" ? "assets.noCharacters" : activeType === "item" ? "assets.noItems" : "assets.noBackgrounds")}
             </p>
             <p className="font-mono text-[10px] text-muted-foreground/25 mt-1 text-center max-w-[320px]">
-              {TYPE_META[activeType].emptyText}
+              {t(activeType === "character" ? "assets.emptyCharacter" : activeType === "item" ? "assets.emptyItem" : "assets.emptyBackground")}
             </p>
             <Button
               onClick={openCreateModal}
@@ -716,7 +718,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
               style={{ background: KR, borderRadius: 0 }}
             >
               <Plus className="w-3.5 h-3.5" />
-              {TYPE_META[activeType].addLabel}
+              {t(activeType === "character" ? "assets.addCharacter" : activeType === "item" ? "assets.addItem" : "assets.addBackground")}
             </Button>
           </div>
         ) : (
@@ -789,35 +791,35 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
         >
           <DialogHeader>
             <DialogTitle className="text-[15px] font-semibold text-foreground">
-              {editingAsset ? "Edit Asset" : "New Asset"}
+              {editingAsset ? t("assets.editAsset") : t("assets.newAsset")}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-5">
             {!editingAsset && (
               <div>
-                <label className="label-meta text-muted-foreground mb-1.5 block">Type</label>
+                <label className="label-meta text-muted-foreground mb-1.5 block">{t("assets.type")}</label>
                 <div className="flex gap-2">
-                  {(["character", "item", "background"] as AssetType[]).map((t) => (
+                  {(["character", "item", "background"] as AssetType[]).map((type) => (
                     <button
-                      key={t}
-                      onClick={() => setAssetType(t)}
+                      key={type}
+                      onClick={() => setAssetType(type)}
                       className="flex-1 flex items-center justify-center gap-1.5 py-2 border text-[11px] font-medium tracking-wider transition-colors"
                       style={{
                         borderRadius: 0,
-                        borderColor: assetType === t ? KR : "rgba(255,255,255,0.07)",
-                        background: assetType === t ? "rgba(249,66,58,0.08)" : "transparent",
-                        color: assetType === t ? KR : "rgba(255,255,255,0.4)",
+                        borderColor: assetType === type ? KR : "rgba(255,255,255,0.07)",
+                        background: assetType === type ? "rgba(249,66,58,0.08)" : "transparent",
+                        color: assetType === type ? KR : "rgba(255,255,255,0.4)",
                       }}
                     >
-                      {TYPE_META[t].icon}
-                      {TYPE_META[t].label}
+                      {TYPE_META[type].icon}
+                      {t(`assets.${type}`)}
                     </button>
                   ))}
                 </div>
               </div>
             )}
             <div>
-              <label className="label-meta text-muted-foreground mb-1.5 block">Tag Name</label>
+              <label className="label-meta text-muted-foreground mb-1.5 block">{t("assets.tagName")}</label>
               <div className="flex items-center">
                 <span
                   className="h-10 px-3 flex items-center border border-r-0 border-input text-sm font-semibold"
@@ -828,26 +830,26 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 <Input value={tagName} onChange={(e) => setTagName(e.target.value)} className="rounded-l-none" />
               </div>
               <p className="text-[11px] text-muted-foreground/60 mt-1">
-                Tag as @{tagName || "name"} in chat and scene descriptions
+                {t("assets.tagUsage", { tag: tagName || "name" })}
               </p>
             </div>
 
             {assetType === "character" && (
               <div>
-                <label className="text-xs text-muted-foreground mb-1.5 block">Visual Source</label>
+                <label className="text-xs text-muted-foreground mb-1.5 block">{t("assets.visualSource")}</label>
                 <div className="flex flex-col gap-2">
                   {[
                     {
                       mode: "upload" as const,
                       icon: <Camera className="w-4 h-4 shrink-0" />,
-                      label: "Upload Photo",
-                      sub: "Best for consistent portrayal",
+                      label: t("assets.uploadPhoto"),
+                      sub: t("assets.uploadPhotoDesc"),
                     },
                     {
                       mode: "ai" as const,
                       icon: <Sparkles className="w-4 h-4 shrink-0" />,
-                      label: "AI Generated",
-                      sub: "Create instantly",
+                      label: t("assets.aiGenerated"),
+                      sub: t("assets.aiGeneratedDesc"),
                     },
                   ].map(({ mode, icon, label, sub }) => (
                     <button
@@ -909,11 +911,11 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                         <Wand2 className="w-3.5 h-3.5" />
                       )}
                       {isAnalyzing
-                        ? "Analyzing..."
+                        ? t("assets.analyzing")
                         : {
-                            character: "Auto-analyze outfit from image",
-                            item: "Auto-analyze item from image",
-                            background: "Auto-analyze location from image",
+                            character: t("assets.autoAnalyzeOutfit"),
+                            item: t("assets.autoAnalyzeItem"),
+                            background: t("assets.autoAnalyzeLocation"),
                           }[assetType]}
                     </Button>
                   </div>
@@ -926,11 +928,11 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
             {assetType === "character" && sourceMode === "ai" && (
               <div className="space-y-3">
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1.5 block">Description Input</label>
+                  <label className="text-xs text-muted-foreground mb-1.5 block">{t("assets.descriptionInput")}</label>
                   <Textarea
                     value={aiInput}
                     onChange={(e) => setAiInput(e.target.value)}
-                    placeholder="Describe the character's appearance"
+                    placeholder={t("assets.characterAppearancePlaceholder")}
                     rows={3}
                   />
                 </div>
@@ -942,13 +944,13 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                   className="gap-1.5"
                 >
                   <Sparkles className="w-4 h-4" />
-                  {isGenerating ? "Generating AI description..." : "Generate AI Description"}
+                  {isGenerating ? t("assets.generatingAiDescription") : t("assets.generateAiDescription")}
                 </Button>
                 {aiDescription && (
                   <>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1.5 block">
-                        Appearance Description (English, editable)
+                        {t("assets.appearanceDescription")}
                       </label>
                       <Textarea
                         value={aiDescription}
@@ -971,7 +973,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                           ) : (
                             <Sparkles className="w-4 h-4" />
                           )}
-                          {isGeneratingImage ? "Generating image..." : "Generate Character Image"}
+                          {isGeneratingImage ? t("assets.generatingImage") : t("assets.generateCharacterImage")}
                         </Button>
                         {generatedPortraitUrl && (
                           <Button
@@ -982,7 +984,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                             className="gap-1 text-xs"
                           >
                             <RefreshCw className="w-3.5 h-3.5" />
-                            Regenerate
+                            {t("studio.regenerate")}
                           </Button>
                         )}
                       </div>
@@ -1006,7 +1008,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                             ) : (
                               <Wand2 className="w-3.5 h-3.5" />
                             )}
-                            {isAnalyzing ? "Analyzing outfit..." : "Auto-analyze outfit from image"}
+                            {isAnalyzing ? t("assets.analyzingOutfit") : t("assets.autoAnalyzeOutfit")}
                           </Button>
                         </div>
                       )}
@@ -1021,27 +1023,27 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 <>
                   <div>
                     <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
-                      <User className="w-3 h-3" /> Role / Relationship{" "}
-                      <span className="text-muted-foreground/40">(optional)</span>
+                      <User className="w-3 h-3" /> {t("assets.roleRelationship")}{" "}
+                      <span className="text-muted-foreground/40">({t("assets.optional")})</span>
                     </label>
                     <Input
                       value={roleDescription}
                       onChange={(e) => setRoleDescription(e.target.value)}
-                      placeholder="Character's role and personality"
+                      placeholder={t("assets.rolePlaceholder")}
                     />
                     <p className="text-[11px] text-muted-foreground/50 mt-1">
-                      Used as character relationship context when composing stories with the agent
+                      {t("assets.roleHelp")}
                     </p>
                   </div>
                   <div>
                     <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
-                      <Shirt className="w-3 h-3" /> Outfit / Style{" "}
-                      <span className="text-muted-foreground/40">(optional)</span>
+                      <Shirt className="w-3 h-3" /> {t("assets.outfitStyle")}{" "}
+                      <span className="text-muted-foreground/40">({t("assets.optional")})</span>
                     </label>
                     <Input
                       value={outfitDescription}
                       onChange={(e) => setOutfitDescription(e.target.value)}
-                      placeholder="Outfit and styling details"
+                      placeholder={t("assets.outfitPlaceholder")}
                     />
                   </div>
                 </>
@@ -1049,28 +1051,28 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
               {assetType === "item" && (
                 <div>
                   <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
-                    <Package className="w-3 h-3" /> Item Detail{" "}
-                    <span className="text-muted-foreground/40">(optional ? auto-analyzable)</span>
+                    <Package className="w-3 h-3" /> {t("assets.itemDetail")}{" "}
+                    <span className="text-muted-foreground/40">({t("assets.optionalAuto")})</span>
                   </label>
                   <Textarea
                     value={itemDescription}
                     onChange={(e) => setItemDescription(e.target.value)}
                     rows={3}
-                    placeholder="Describe the item in detail"
+                    placeholder={t("assets.itemPlaceholder")}
                   />
                 </div>
               )}
               {assetType === "background" && (
                 <div>
                   <label className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1.5">
-                    <MapPin className="w-3 h-3" /> Location Description{" "}
-                    <span className="text-muted-foreground/40">(optional ? auto-analyzable)</span>
+                    <MapPin className="w-3 h-3" /> {t("assets.locationDescription")}{" "}
+                    <span className="text-muted-foreground/40">({t("assets.optionalAuto")})</span>
                   </label>
                   <Textarea
                     value={spaceDescription}
                     onChange={(e) => setSpaceDescription(e.target.value)}
                     rows={3}
-                    placeholder="Describe the location and atmosphere"
+                    placeholder={t("assets.locationPlaceholder")}
                   />
                 </div>
               )}
@@ -1085,7 +1087,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
                 resetForm();
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button
               onClick={handleSave}
@@ -1093,7 +1095,7 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
               className="text-white text-[13px] h-9"
               style={{ background: KR }}
             >
-              {isSaving ? "Saving..." : "Save"}
+              {isSaving ? t("assets.saving") : t("common.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1104,21 +1106,21 @@ export const AssetsTab = ({ projectId, onSwitchToAgent }: Props) => {
         <Dialog open onOpenChange={(o) => !o && setDeleteTarget(null)}>
           <DialogContent className="max-w-[360px] bg-card border-border" style={{ borderRadius: 0 }}>
             <DialogHeader>
-              <DialogTitle className="text-[15px] font-semibold">Delete Asset</DialogTitle>
+              <DialogTitle className="text-[15px] font-semibold">{t("assets.deleteAsset")}</DialogTitle>
             </DialogHeader>
             <p className="text-[13px] text-muted-foreground">
-              Are you sure you want to delete this asset? This action cannot be undone.
+              {t("assets.deleteAssetDesc")}
             </p>
             <DialogFooter className="gap-2">
               <Button variant="ghost" className="text-[13px] h-9" onClick={() => setDeleteTarget(null)}>
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button
                 className="text-white text-[13px] h-9"
                 style={{ background: "#dc2626" }}
                 onClick={() => handleDelete(deleteTarget)}
               >
-                Delete
+                {t("common.delete")}
               </Button>
             </DialogFooter>
           </DialogContent>

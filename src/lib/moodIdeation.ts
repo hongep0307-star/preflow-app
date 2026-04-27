@@ -56,6 +56,9 @@ export interface MoodGenerateOptions {
   //                       실제 캐릭터/배경의 외형을 반영 (callGptVisionGenerate 경로).
   //   - "nano-banana-2": Vertex NB2. 에셋 이미지 레퍼런스 기반 생성.
   model?: MoodImageModel;
+  /** Sketches can opt into reference images for gpt-image-1.5 while Mood Ideation
+   *  keeps 1.5 as a fast text-only batch model. */
+  forceAssetRefs?: boolean;
 }
 
 export type MoodImageModel = "gpt-image-1.5" | "gpt-image-2" | "nano-banana-2";
@@ -69,6 +72,14 @@ export const MOOD_MODEL_USES_ASSET_REFS: Record<MoodImageModel, boolean> = {
   "gpt-image-2": true,
   "nano-banana-2": true,
 };
+
+const SAFETY_REJECTION_ERROR = "SAFETY_FILTER_REJECTED";
+const ALL_GENERATIONS_FAILED_ERROR = "ALL_IMAGE_GENERATIONS_FAILED";
+
+function isSafetyRejection(reason: unknown): boolean {
+  const message = reason instanceof Error ? reason.message : String(reason ?? "");
+  return /safety system|safety filter|rejected by the safety/i.test(message);
+}
 
 /* ━━━━━ Legacy 랜덤 풀 (폴백용 보존) ━━━━━ */
 
@@ -670,7 +681,7 @@ async function generateCineShotDescriptions(
 ): Promise<CineShotDescription[] | null> {
   try {
     const model = opts.model ?? MOOD_IMAGE_MODEL_DEFAULT;
-    const isAssetMode = MOOD_MODEL_USES_ASSET_REFS[model];
+    const isAssetMode = opts.forceAssetRefs || MOOD_MODEL_USES_ASSET_REFS[model];
     const isSingleSceneMode = opts.targetSceneNumber != null;
     const systemPrompt = buildSystemPrompt(isAssetMode, opts.videoFormat, isSingleSceneMode);
 
@@ -975,7 +986,7 @@ export const generateMoodImages = async (
   const count = opts.count ?? 9;
   const imageSize = SIZE_MAP[opts.videoFormat] ?? SIZE_MAP.horizontal;
   const model = opts.model ?? MOOD_IMAGE_MODEL_DEFAULT;
-  const usesAssetRefs = MOOD_MODEL_USES_ASSET_REFS[model];
+  const usesAssetRefs = opts.forceAssetRefs || MOOD_MODEL_USES_ASSET_REFS[model];
 
   // Pre-assign every shot to exactly one scene. This is the single
   // source of truth for the whole generation: Claude sees each
@@ -1025,8 +1036,8 @@ export const generateMoodImages = async (
     };
 
     // 모델별 라우팅:
-    //   gpt-image-1.5  → text-only GPT. 에셋 이미지 레퍼런스 없이 묘사문만 사용.
-    //                     9장 배치에도 충분히 빠름(한 장당 ~20–30s). Mood 의 기본값.
+    //   gpt-image-1.5  → Mood 기본값은 text-only. 단, Sketches 처럼 forceAssetRefs
+    //                     를 켠 호출은 edits 경로로 에셋 이미지를 함께 전달.
     //   gpt-image-2    → vision-aware GPT. 에셋 포토를 레퍼런스로 넘겨서
     //                     api-handlers 의 callGptVisionGenerate 경로로 흐름.
     //   nano-banana-2  → Vertex NB2. 에셋 레퍼런스 기반 생성.
@@ -1036,7 +1047,7 @@ export const generateMoodImages = async (
     } else {
       body.model = "gpt";
       body.gptModel = model;
-      if (model === "gpt-image-2" && shotRefUrls.length > 0) {
+      if ((model === "gpt-image-2" || opts.forceAssetRefs) && shotRefUrls.length > 0) {
         body.assetImageUrls = shotRefUrls;
       }
     }
@@ -1053,6 +1064,7 @@ export const generateMoodImages = async (
   };
 
   const urls: string[] = [];
+  const failures: unknown[] = [];
 
   // NB2 는 Vertex quota 특성상 병렬 3개 이상은 429 가 빈번 → 기존처럼 batch=3.
   // GPT 계열은 OpenAI 쪽이 동시성 허용폭이 넉넉하므로 full parallel 유지.
@@ -1074,7 +1086,11 @@ export const generateMoodImages = async (
       urls.push(...batchUrls);
       batchResults
         .filter((r) => r.status === "rejected")
-        .forEach((r) => console.warn(`[Mood] NB2 batch image failed:`, (r as PromiseRejectedResult).reason));
+        .forEach((r) => {
+          const reason = (r as PromiseRejectedResult).reason;
+          failures.push(reason);
+          console.warn(`[Mood] NB2 batch image failed:`, reason);
+        });
       if (i + BATCH_SIZE < count) await new Promise((r) => setTimeout(r, 1000));
     }
   } else {
@@ -1088,11 +1104,16 @@ export const generateMoodImages = async (
     );
     for (const r of results) {
       if (r.status === "fulfilled") urls.push(r.value);
-      else console.warn(`[Mood] ${model} image failed:`, r.reason);
+      else {
+        failures.push(r.reason);
+        console.warn(`[Mood] ${model} image failed:`, r.reason);
+      }
     }
   }
 
-  if (!urls.length) throw new Error("All image generations failed");
+  if (!urls.length) {
+    throw new Error(failures.some(isSafetyRejection) ? SAFETY_REJECTION_ERROR : ALL_GENERATIONS_FAILED_ERROR);
+  }
 
   // NOTE: 여기서 DB 에 직접 append 하지 않는다.
   //       MoodIdeationPanel 쪽의 persistMoodGenResultToDB 가

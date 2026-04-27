@@ -1,6 +1,6 @@
-import { MoreHorizontal, ChevronRight, Edit2, Trash2, Crop, ImageIcon } from "lucide-react";
+import { MoreHorizontal, Edit2, Trash2, Crop, ImageIcon } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { format } from "date-fns";
+import { format, isValid } from "date-fns";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,6 +23,7 @@ import { useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { ThumbnailCropModal, type CropSettings } from "@/components/ThumbnailCropModal";
 import type { Project, SceneStats } from "@/pages/DashboardPage";
+import { useT } from "@/lib/uiLanguage";
 
 interface ProjectCardProps {
   project: Project;
@@ -34,6 +35,7 @@ interface ProjectCardProps {
 export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectCardProps) => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const t = useT();
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showCropModal, setShowCropModal] = useState(false);
 
@@ -54,9 +56,8 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
         .update({ thumbnail_crop: crop } as any)
         .eq("id", project.id);
       if (error) throw error;
-      project.thumbnail_crop = crop;
       setShowCropModal(false);
-      toast({ title: "Thumbnail adjusted" });
+      toast({ title: t("dashboard.thumbnailAdjusted") });
       onRefresh();
     } catch (e: any) {
       toast({ variant: "destructive", title: "Save failed", description: e.message });
@@ -66,25 +67,26 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
   const isCompleted = project.status === "completed";
   const crop = project.thumbnail_crop as CropSettings | null;
 
-  /* 마감일 포맷 */
-  const deadlineStr = project.deadline ? format(new Date(project.deadline), "MMM dd yyyy") : "—";
+  const deadlineDate = project.deadline ? new Date(project.deadline) : null;
+  const hasValidDeadline = !!deadlineDate && isValid(deadlineDate);
+  const deadlineStr = hasValidDeadline ? format(deadlineDate, "MMM dd yyyy") : "—";
 
   /* 마감 임박 (3일 이내) */
   const isUrgent = (() => {
-    if (!project.deadline) return false;
-    const diff = Math.ceil((new Date(project.deadline).getTime() - Date.now()) / 86400000);
+    if (!deadlineDate || !hasValidDeadline) return false;
+    const diff = Math.ceil((deadlineDate.getTime() - Date.now()) / 86400000);
     return diff >= 0 && diff <= 3;
   })();
 
-  /* 비율 + 이름 표기 */
+  /* 비율 표기 */
   const formatLabel = (() => {
     switch ((project.video_format ?? "").toLowerCase()) {
       case "vertical":
-        return "9:16 · Vertical";
+        return "9:16";
       case "horizontal":
-        return "16:9 · Horizontal";
+        return "16:9";
       case "square":
-        return "1:1 · Square";
+        return "1:1";
       default:
         return project.video_format?.toUpperCase() ?? null;
     }
@@ -92,11 +94,7 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
 
   return (
     <>
-      {/* ━━━ 2열 그리드용 카드 — 썸네일(좌) + 수직 스택(우) ━━━
-       *  [썸네일 180x스트레치]
-       *  [● 제목 ........................... ]
-       *  [진척 바 ........................ n/m]
-       *  [포맷 · owner · deadline ···  →]  */}
+      {/* ━━━ 썸네일 중심 카드 ━━━ */}
       <div
         onClick={() => {
           // 라우팅 우선순위:
@@ -111,23 +109,20 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
           }
           navigate(target);
         }}
-        className="group flex items-stretch bg-card border border-border hover:border-primary/25 hover:bg-surface-elevated cursor-pointer transition-all duration-150 min-h-[124px]"
+        className="group flex h-full min-w-0 flex-col bg-card border border-border hover:border-primary/25 hover:bg-surface-elevated cursor-pointer transition-all duration-150"
         style={{ borderRadius: 0 }}
       >
-        {/* ── 썸네일 — 프로젝트 video_format 과 무관하게 16:9 고정.
-         *  explicit height 를 주면 flex items-stretch 가 무시되므로 카드
-         *  우측 패널이 길어져도 썸네일은 늘어나지 않음. */}
+        {/* ── 썸네일 — 프로젝트 video_format 과 무관하게 16:9 고정. */}
         <div
-          className="flex-shrink-0 self-start bg-background border-r border-border flex items-center justify-center overflow-hidden relative group/thumb"
-          style={{ width: 220, height: 124, borderRadius: 0 }}
-          onClick={(e) => {
-            if (project.thumbnail_url) {
-              e.stopPropagation();
-              setShowCropModal(true);
-            }
-          }}
-          title={project.thumbnail_url ? "Click to adjust thumbnail position" : undefined}
+          className="relative aspect-video w-full overflow-hidden bg-background border-b border-border flex items-center justify-center group/thumb"
+          style={{ borderRadius: 0 }}
         >
+          {formatLabel && (
+            <span className="absolute left-2 top-2 z-10 bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white">
+              {formatLabel}
+            </span>
+          )}
+
           {project.thumbnail_url ? (
             <>
               <img
@@ -139,33 +134,75 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
                   objectPosition: crop ? `${crop.x}% ${crop.y}%` : "center",
                   transform: crop && crop.scale > 1 ? `scale(${crop.scale})` : undefined,
                   transformOrigin: crop ? `${crop.x}% ${crop.y}%` : undefined,
-                }} decoding="async" />
-              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center">
-                <Crop className="w-4 h-4 text-white/80" />
-              </div>
+                }}
+                decoding="async"
+              />
             </>
           ) : (
-            <ImageIcon className="w-6 h-6 text-muted-foreground/15" />
+            <ImageIcon className="w-8 h-8 text-muted-foreground/15" />
           )}
         </div>
 
-        {/* ── 우측: 3 행 수직 스택 (제목 / 진척 / 메타) ── */}
-        <div className="flex-1 min-w-0 flex flex-col justify-center gap-2 px-4 py-3">
-          {/* Row 1: dot + 제목 */}
+        {/* ── 하단 정보: 제목 / 진척 / 메타 ── */}
+        <div className="flex min-h-[78px] flex-1 flex-col justify-between gap-2 px-3 py-2.5">
           <div className="flex items-center gap-2 min-w-0">
             <span
               className="w-[7px] h-[7px] rounded-full flex-shrink-0"
               style={{ background: isCompleted ? "rgba(52,211,153,0.9)" : "#f9423a" }}
             />
             <h3
-              className="text-[14px] font-bold truncate tracking-wide group-hover:text-primary transition-colors"
+              className="min-w-0 flex-1 truncate text-[13px] font-bold tracking-wide group-hover:text-primary transition-colors"
               style={{ color: isCompleted ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.9)" }}
             >
               {project.title}
             </h3>
+
+            {/* ··· 드롭다운 */}
+            <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  onClick={(e) => e.stopPropagation()}
+                  className="p-1 hover:bg-secondary transition-colors"
+                  style={{ borderRadius: 0 }}
+                >
+                  <MoreHorizontal className="w-3.5 h-3.5 text-muted-foreground/50 hover:text-muted-foreground transition-colors" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="bg-card border-border min-w-[110px]">
+                  {project.thumbnail_url && (
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowCropModal(true);
+                      }}
+                      className="text-[12px] gap-2 cursor-pointer"
+                    >
+                      <Crop className="w-3 h-3" /> {t("dashboard.editThumbnail")}
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEdit(project);
+                    }}
+                    className="text-[12px] gap-2 cursor-pointer"
+                  >
+                    <Edit2 className="w-3 h-3" /> {t("common.edit")}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowDeleteDialog(true);
+                    }}
+                    className="text-[12px] gap-2 text-destructive focus:text-destructive cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" /> {t("common.delete")}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
 
-          {/* Row 2: 진척 바 + ratio — sceneStats 가 없어도 자리 유지.
+          {/* 진척 바 + ratio — sceneStats 가 없어도 자리 유지.
            *  진행도는 유저가 수동으로 final 처리한 씬 수(sceneStats.finalCount) 기준.
            *  이미지 유무(conti_image_url)는 더 이상 진행도에 반영되지 않음 — 유저가
            *  "이 컷 최종" 이라고 명시 체크해야 카운트됨. */}
@@ -199,20 +236,10 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
             </span>
           </div>
 
-          {/* Row 3: 메타 배지 + ··· + 화살표 */}
           <div className="flex items-center gap-1.5 min-w-0">
-            {project.video_format && (
-              <span
-                className="text-[11px] font-mono tracking-wide px-1.5 py-0.5 border border-white/[0.1] text-white/35 shrink-0 whitespace-nowrap"
-                style={{ borderRadius: 0 }}
-              >
-                {formatLabel}
-              </span>
-            )}
-
             {project.client && (
               <span
-                className="text-[11px] font-mono tracking-wide px-1.5 py-0.5 border border-white/[0.1] text-white/35 truncate min-w-0 max-w-[110px]"
+                className="inline-block max-w-[62%] truncate border border-white/[0.1] px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-white/35"
                 style={{ borderRadius: 0 }}
               >
                 {project.client}
@@ -220,60 +247,25 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
             )}
 
             <span
-              className="text-[11px] font-mono tracking-wide px-1.5 py-0.5 border shrink-0 whitespace-nowrap"
+              className="shrink-0 whitespace-nowrap border px-1.5 py-0.5 font-mono text-[10px] tracking-wide"
               style={{
                 borderRadius: 0,
-                borderColor: project.deadline
+                borderColor: hasValidDeadline
                   ? isUrgent
                     ? "rgba(249,66,58,0.5)"
                     : "rgba(255,255,255,0.1)"
                   : "rgba(255,255,255,0.06)",
-                color: project.deadline
+                color: hasValidDeadline
                   ? isUrgent
                     ? "#f9423a"
                     : "rgba(255,255,255,0.35)"
                   : "rgba(255,255,255,0.22)",
               }}
             >
-              {project.deadline ? deadlineStr : "No Deadline"}
+              {hasValidDeadline ? deadlineStr : t("dashboard.noDeadline")}
             </span>
 
             <div className="flex-1" />
-
-            {/* ··· 드롭다운 */}
-            <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  onClick={(e) => e.stopPropagation()}
-                  className="p-1 hover:bg-secondary transition-colors"
-                  style={{ borderRadius: 0 }}
-                >
-                  <MoreHorizontal className="w-3.5 h-3.5 text-muted-foreground/50 hover:text-muted-foreground transition-colors" />
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="bg-card border-border min-w-[110px]">
-                  <DropdownMenuItem
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onEdit(project);
-                    }}
-                    className="text-[12px] gap-2 cursor-pointer"
-                  >
-                    <Edit2 className="w-3 h-3" /> Edit
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowDeleteDialog(true);
-                    }}
-                    className="text-[12px] gap-2 text-destructive focus:text-destructive cursor-pointer"
-                  >
-                    <Trash2 className="w-3 h-3" /> Delete
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-
-            <ChevronRight className="w-4 h-4 text-muted-foreground/15 group-hover:text-muted-foreground/40 transition-colors duration-150 flex-shrink-0" />
           </div>
         </div>
       </div>
@@ -292,18 +284,18 @@ export const ProjectCard = ({ project, onRefresh, onEdit, sceneStats }: ProjectC
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <AlertDialogContent className="bg-card border-border max-w-sm" style={{ borderRadius: 0 }}>
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-[15px] font-semibold">Delete this project?</AlertDialogTitle>
+            <AlertDialogTitle className="text-[15px] font-semibold">{t("dashboard.deleteProjectTitle")}</AlertDialogTitle>
             <AlertDialogDescription className="text-[13px]">
-              All data will be permanently deleted.
+              {t("dashboard.deleteProjectDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="border-border hover:bg-secondary h-9 text-[13px]">Cancel</AlertDialogCancel>
+            <AlertDialogCancel className="border-border hover:bg-secondary h-9 text-[13px]">{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDelete}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90 h-9 text-[13px]"
             >
-              Delete
+              {t("common.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

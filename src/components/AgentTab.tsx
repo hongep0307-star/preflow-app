@@ -89,12 +89,12 @@ import {
   buildAssetUsageReminder,
   buildSystemPrompt,
   buildBriefContextString,
-  WELCOME_NO_BRIEF,
   isBriefAnalysisMsg,
 } from "./agent/prompts";
 import { MessageContent } from "./agent/MessageContent";
 import { AgentChatInput } from "./agent/AgentChatInput";
 import { EmptyState } from "@/components/ui/empty-state";
+import { useT } from "@/lib/uiLanguage";
 
 // ══════════════════════════════════════════════════════════
 //   MAIN — AgentTab
@@ -109,6 +109,7 @@ interface Props {
 
 export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onSwitchToContiTab }: Props) => {
   const { toast } = useToast();
+  const t = useT();
   const isMobile = useIsMobile();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -442,7 +443,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
     ) => {
       if (!payload?.url) return;
       await handleAttachMoodToScene(payload.url, sceneId, payload.moodImageId, sceneNumber);
-      toast({ title: "Mood attached", description: `Scene ${sceneNumber} updated.` });
+      toast({ title: t("mood.attachedToast", { scene: sceneNumber }) });
     },
     [handleAttachMoodToScene, toast],
   );
@@ -560,7 +561,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       const toInsert = storyScenes.map((s: any, i: number) => ({
         project_id: projectId,
         scene_number: i + 1,
-        title: s.title ?? `씬 ${i + 1}`,
+        title: s.title ?? `Scene ${i + 1}`,
         description: s.description ?? "",
         camera_angle: s.camera_angle ?? "",
         location: s.location ?? "",
@@ -573,9 +574,9 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       const { data } = await supabase.from("scenes").insert(toInsert).select();
       if (data) setScenes(data as Scene[]);
       setPendingScenes([]);
-      toast({ title: "Version loaded. Keep growing with Agent." });
+      toast({ title: t("agent.versionLoaded") });
     },
-    [projectId, setPendingScenes, toast],
+    [projectId, setPendingScenes, t, toast],
   );
 
   const saveScenesToDB = useCallback(
@@ -613,7 +614,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
           return {
             project_id: projectId,
             scene_number: s.scene_number,
-            title: s.title ?? `씬 ${s.scene_number}`,
+            title: s.title ?? `Scene ${s.scene_number}`,
             description: s.description ?? "",
             camera_angle: s.camera_angle ?? "",
             location: s.location ?? "",
@@ -627,7 +628,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
         await supabase.from("scenes").delete().eq("project_id", projectId).eq("source", "agent");
         const { error } = await supabase.from("scenes").insert(newScenes.map((s) => ({ ...s, source: "agent" })));
         if (error) {
-          toast({ title: "Failed to save scenes", description: error.message, variant: "destructive" });
+          toast({ title: t("agent.failedSaveScenes"), description: error.message, variant: "destructive" });
           return;
         }
       } else {
@@ -642,13 +643,13 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
           .from("scenes")
           .insert(newScenes.map((s, i) => ({ ...s, scene_number: offset + i + 1, source: "agent" })));
         if (error) {
-          toast({ title: "Failed to save scenes", description: error.message, variant: "destructive" });
+          toast({ title: t("agent.failedSaveScenes"), description: error.message, variant: "destructive" });
           return;
         }
       }
       await fetchScenes();
     },
-    [projectId, fetchScenes, projectAssets, toast],
+    [projectId, fetchScenes, projectAssets, t, toast],
   );
 
   const handleConfirmScenes = useCallback(
@@ -656,9 +657,9 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       if (!pendingScenes.length) return;
       await saveScenesToDB(pendingScenes, mode);
       setPendingScenes([]);
-      toast({ title: `${pendingScenes.length} scene${pendingScenes.length > 1 ? "s" : ""} confirmed.` });
+      toast({ title: t("agent.scenesConfirmed", { count: pendingScenes.length }) });
     },
-    [pendingScenes, saveScenesToDB, toast, setPendingScenes],
+    [pendingScenes, saveScenesToDB, t, toast, setPendingScenes],
   );
 
   const handleClickConfirm = useCallback(() => {
@@ -1017,7 +1018,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       }
     } catch (err: any) {
       if (mountedRef.current) {
-        toast({ title: "Failed to send message", description: err.message, variant: "destructive" });
+        toast({ title: t("agent.failedSendMessage"), description: err.message, variant: "destructive" });
       }
     } finally {
       if (mountedRef.current) {
@@ -1045,8 +1046,8 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
     await Promise.all(
       reordered.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
-    pendingOrderNotice.current = `[씬 순서 변경]\n${reordered.map((s) => `${s.scene_number}. ${s.title || `Scene ${s.scene_number}`}`).join("\n")}\n\n스토리 흐름이 자연스러운지 확인해주세요.`;
-    toast({ title: "Scene order updated." });
+    pendingOrderNotice.current = `[Scene order changed]\n${reordered.map((s) => `${s.scene_number}. ${s.title || `Scene ${s.scene_number}`}`).join("\n")}\n\nPlease check whether the story flow still feels natural.`;
+    toast({ title: t("agent.sceneOrderUpdated") });
   };
 
   const handleDeleteScene = async (id: string) => {
@@ -1084,7 +1085,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       .select()
       .single();
     if (error || !data) {
-      toast({ title: "Failed to add scene", description: error?.message, variant: "destructive" });
+      toast({ title: t("agent.failedAddScene"), description: error?.message, variant: "destructive" });
       return;
     }
     const updated = [...scenes, data as Scene];
@@ -1125,7 +1126,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       .select()
       .single();
     if (error || !data) {
-      toast({ title: "Failed to insert scene", description: error?.message, variant: "destructive" });
+      toast({ title: t("agent.failedInsertScene"), description: error?.message, variant: "destructive" });
       return;
     }
     const updated = [...scenes];
@@ -1151,7 +1152,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
 
   const displayMessages: ChatLog[] =
     initialLoaded && !chatHistory.length && !isLoading
-      ? [{ project_id: projectId, role: "assistant", content: WELCOME_NO_BRIEF, created_at: new Date().toISOString() }]
+      ? [{ project_id: projectId, role: "assistant", content: t("agent.welcomeNoBrief"), created_at: new Date().toISOString() }]
       : chatHistory.map((m) =>
           m.role === "user" && isBriefAnalysisMsg(m.content) ? { ...m, role: "assistant" as const } : m,
         );
@@ -1217,7 +1218,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
         {!isMobile && (
           <button
             onClick={() => setChatCollapsed(true)}
-            title="Collapse chat"
+            title={t("agent.collapseChat")}
             style={{
               width: 24,
               height: 24,
@@ -1302,7 +1303,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                   />
                 ))}
               </div>
-              <div className="text-[11px] text-muted-foreground mt-1">Agent is crafting your scenario...</div>
+              <div className="text-[11px] text-muted-foreground mt-1">{t("agent.craftingScenario")}</div>
             </div>
           </div>
         )}
@@ -1331,7 +1332,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
           {chatImages.length < 4 && (
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="shrink-0 flex flex-col items-center justify-center rounded-none border border-dashed border-border text-muted-foreground/50 hover:border-[#f9423a] hover:text-[#f9423a] transition-colors"
+              className="shrink-0 flex flex-col items-center justify-center rounded-none border border-dashed border-border text-muted-foreground/50 hover:border-primary hover:text-primary transition-colors"
               style={{ width: 52, height: 52, background: "transparent" }}
             >
               <Plus className="w-4 h-4" />
@@ -1380,7 +1381,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       >
         <div
           role="tablist"
-          aria-label="Right panel"
+          aria-label={t("agent.rightPanel")}
           style={{
             display: splitView ? "none" : "inline-flex",
             gap: 4,
@@ -1394,7 +1395,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
           {(["scenes", "mood"] as RightPanel[]).map((p) => {
             const active = !splitView && rightPanel === p;
             const Icon = p === "scenes" ? Layers : Palette;
-            const label = p === "scenes" ? "Scene Composition" : "Mood Ideation";
+            const label = p === "scenes" ? t("agent.sceneComposition") : t("agent.moodIdeation");
             const count = p === "scenes" ? scenes.length : moodImages.length;
             return (
               <button
@@ -1457,7 +1458,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
         {!isMobile && (
           <button
             onClick={() => setSplitView((v) => !v)}
-            title={splitView ? "Switch to single view" : "Show Scene + Mood side by side"}
+            title={splitView ? t("agent.singleViewTitle") : t("agent.splitViewTitle")}
             aria-pressed={splitView}
             style={{
               display: "inline-flex",
@@ -1491,7 +1492,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
             }}
           >
             <Columns2 style={{ width: 13, height: 13 }} />
-            <span>{splitView ? "Split On" : "Split"}</span>
+            <span>{splitView ? t("agent.splitOn") : t("agent.split")}</span>
           </button>
         )}
       </div>
@@ -1520,7 +1521,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                     color: "hsl(var(--muted-foreground))",
                   }}
                 >
-                  Total {scenes.reduce((a, s) => a + (s.duration_sec ?? 0), 0)}s
+                  {t("agent.totalSeconds", { seconds: scenes.reduce((a, s) => a + (s.duration_sec ?? 0), 0) })}
                 </span>
               )}
             </div>
@@ -1529,10 +1530,10 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                 onClick={() => setShowImages((v) => !v)}
                 title={
                   panelTooNarrowForImage
-                    ? "Image column is auto-collapsed because the panel is too narrow"
+                    ? t("agent.imageColumnCollapsed")
                     : showImages
-                      ? "Hide images"
-                      : "Show images"
+                      ? t("agent.hideImages")
+                      : t("agent.showImages")
                 }
                 disabled={panelTooNarrowForImage}
                 className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1569,7 +1570,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                 onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
               >
                 <RotateCcw style={{ width: 12, height: 12 }} />
-                Load Version
+                {t("agent.loadVersion")}
               </button>
               <div style={{ width: 1, height: 16, background: "hsl(var(--border))" }} />
               <button
@@ -1594,7 +1595,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                 onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
               >
                 <Plus style={{ width: 12, height: 12 }} />
-                Add Scene
+                {t("agent.addScene")}
               </button>
               <button
                 onClick={() => setShowSendModal(true)}
@@ -1616,7 +1617,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                 }}
               >
                 <Send style={{ width: 12, height: 12 }} />
-                Send to Conti
+                {t("agent.sendToConti")}
               </button>
             </div>
           </div>
@@ -1637,9 +1638,9 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                 >
                   <div className="flex items-center gap-2">
                     <span className="text-[12px] font-bold" style={{ color: KR }}>
-                      {pendingScenes.length} DRAFT SCENES
+                      {t("agent.draftScenes", { count: pendingScenes.length })}
                     </span>
-                    <span className="text-[11px] text-muted-foreground">Click to edit</span>
+                    <span className="text-[11px] text-muted-foreground">{t("agent.clickToEdit")}</span>
                   </div>
                   <button
                     onClick={() => setPendingScenes([])}
@@ -1665,7 +1666,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                     className="w-full flex items-center justify-center gap-2 py-2 rounded-none text-[13px] font-semibold text-white transition-opacity hover:opacity-90"
                     style={{ background: KR, border: "none", cursor: "pointer" }}
                   >
-                    <Check className="w-4 h-4" />Create scene cards from this draft
+                    <Check className="w-4 h-4" />{t("agent.createSceneCardsFromDraft")}
                   </button>
                 </div>
               </div>
@@ -1673,7 +1674,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
             {!scenes.length && !pendingScenes.length ? (
               <EmptyState
                 icon={<Clapperboard className="w-10 h-10" />}
-                title="No scenes yet"
+                title={t("agent.noScenesYet")}
                 // Empty-state copy after the plan's Phase 3 Send-to-Conti fix:
                 //   · Users arriving here a second time (after Send to Conti
                 //     cleared the drafts) should know that their story is
@@ -1682,7 +1683,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                 //     redirect users who came looking for mood/composition
                 //     iteration to the Conti tab instead of telling them to
                 //     re-chat with Agent from scratch.
-                description="Chat with Agent to start building scenes. If you already sent a version to Conti, use Load Version to bring it back. Scene sketches live per-scene inside the Conti tab now."
+                description={t("agent.noScenesDesc")}
                 action={
                   versions.length > 0 ? (
                     <button
@@ -1704,7 +1705,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                       }}
                     >
                       <RotateCcw style={{ width: 12, height: 12 }} />
-                      Load Version
+                      {t("agent.loadVersion")}
                     </button>
                   ) : undefined
                 }
@@ -1716,7 +1717,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
                   {pendingScenes.length > 0 && (
                     <div className="flex items-center gap-2 py-1">
                       <div className="flex-1 h-px bg-border/50" />
-                      <span className="text-[10px] text-muted-foreground/50">Confirmed scenes</span>
+                      <span className="text-[10px] text-muted-foreground/50">{t("agent.confirmedScenes")}</span>
                       <div className="flex-1 h-px bg-border/50" />
                     </div>
                   )}
@@ -1805,13 +1806,13 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
             <AlertDialog open={!!deleteConfirmId} onOpenChange={(open) => !open && setDeleteConfirmId(null)}>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>Delete Scene</AlertDialogTitle>
+                  <AlertDialogTitle>{t("agent.deleteScene")}</AlertDialogTitle>
                   <AlertDialogDescription>
                     Are you sure you want to delete this scene? This action cannot be undone.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
                   <AlertDialogAction
                     onClick={() => {
                       if (deleteConfirmId) {
@@ -1848,7 +1849,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       if (splitView && !isMobile) {
         const renderSplitHeader = (kind: RightPanel) => {
           const Icon = kind === "scenes" ? Layers : Palette;
-          const label = kind === "scenes" ? "Scene Composition" : "Mood Ideation";
+          const label = kind === "scenes" ? t("agent.sceneComposition") : t("agent.moodIdeation");
           const count = kind === "scenes" ? scenes.length : moodImages.length;
           return (
             <div
@@ -1941,7 +1942,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
         <Dialog open onOpenChange={(o) => !o && setReplaceConfirmBuffer(null)}>
           <DialogContent className="max-w-[400px] bg-card border-border">
             <DialogHeader>
-              <DialogTitle>Replace with new draft?</DialogTitle>
+              <DialogTitle>{t("agent.replaceDraftTitle")}</DialogTitle>
             </DialogHeader>
             <p className="text-[13px] text-muted-foreground leading-relaxed">
               Agent has proposed <strong className="text-foreground">{replaceConfirmBuffer.length}</strong> new
@@ -1952,15 +1953,15 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
             </p>
             <div className="flex items-start gap-2 text-[11px] text-muted-foreground/60 bg-muted rounded-none px-3 py-2 mt-1">
               <Lightbulb className="w-3.5 h-3.5 shrink-0 mt-px" strokeWidth={1.75} />
-              <span>Final commit happens when you turn the draft into scene cards.</span>
+              <span>{t("agent.finalCommitHint")}</span>
             </div>
             <DialogFooter className="gap-2 mt-1">
               <Button variant="ghost" onClick={() => setReplaceConfirmBuffer(null)}>
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button onClick={handleReplaceConfirm} className="gap-1.5 text-white" style={{ background: KR }}>
                 <Check className="w-3.5 h-3.5" />
-                Replace
+                {t("agent.replace")}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -2014,7 +2015,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       {/* 상단: 우측 패널 탭 바(60px) 와 높이 정렬 */}
       <button
         onClick={() => setChatCollapsed(false)}
-        title="Expand chat"
+        title={t("agent.expandChat")}
         style={{
           width: "100%",
           height: 60,
@@ -2042,7 +2043,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       {/* 중단: 채팅 히스토리 인디케이터 — 클릭 시 채팅 펼치기 */}
       <button
         onClick={() => setChatCollapsed(false)}
-        title="Expand chat"
+        title={t("agent.expandChat")}
         style={{
           flex: 1,
           width: "100%",

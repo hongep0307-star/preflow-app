@@ -12,6 +12,7 @@ import { format, parse } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import type { Project, Folder as FolderType } from "@/pages/DashboardPage";
+import { useT } from "@/lib/uiLanguage";
 
 type VideoFormat = "vertical" | "horizontal" | "square";
 
@@ -58,6 +59,7 @@ export const ProjectModal = ({
   // 마감일 달력 팝오버 — 날짜 선택 시 자동으로 닫기 위해 controlled 로 운영.
   const [deadlineOpen, setDeadlineOpen] = useState(false);
   const { toast } = useToast();
+  const t = useT();
 
   const [formData, setFormData] = useState({
     title: "",
@@ -75,10 +77,11 @@ export const ProjectModal = ({
       const {
         data: { user },
       } = await supabase.auth.getUser();
+      const styleFilter = user ? `is_default.eq.true,user_id.eq.${user.id}` : "is_default.eq.true";
       const { data } = await supabase
         .from("style_presets")
         .select("id, name, description, thumbnail_url, is_default")
-        .or(`is_default.eq.true,user_id.eq.${user?.id}`)
+        .or(styleFilter)
         .order("is_default", { ascending: false })
         .order("created_at", { ascending: true });
       if (data) {
@@ -157,21 +160,21 @@ export const ProjectModal = ({
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="bg-card border-border max-w-[480px] max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-[15px] font-semibold">
-            {editProject ? "Edit Project" : "Create Project"}
+            {editProject ? t("projectModal.editTitle") : t("projectModal.createTitle")}
           </DialogTitle>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-5 mt-4">
           {/* 프로젝트명 */}
           <div className="space-y-2">
-            <Label className="text-muted-foreground text-[13px]">Project Name *</Label>
+            <Label className="text-muted-foreground text-[13px]">{t("projectModal.projectName")}</Label>
             <Input
               required
-              placeholder="Project name"
+              placeholder={t("projectModal.projectNamePlaceholder")}
               className="bg-background border-border placeholder:text-muted-foreground/30 text-[13px]"
               value={formData.title}
               onChange={(e) => setFormData({ ...formData, title: e.target.value })}
@@ -180,9 +183,9 @@ export const ProjectModal = ({
 
           {/* 요청 부서 */}
           <div className="space-y-2">
-            <Label className="text-muted-foreground text-[13px]">Department</Label>
+            <Label className="text-muted-foreground text-[13px]">{t("projectModal.department")}</Label>
             <Input
-              placeholder="Department name"
+              placeholder={t("projectModal.departmentPlaceholder")}
               className="bg-background border-border placeholder:text-muted-foreground/30 text-[13px]"
               value={formData.client}
               onChange={(e) => setFormData({ ...formData, client: e.target.value })}
@@ -192,7 +195,7 @@ export const ProjectModal = ({
           {/* 마감일 + 상태 */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label className="text-muted-foreground text-[13px]">Deadline</Label>
+              <Label className="text-muted-foreground text-[13px]">{t("projectModal.deadline")}</Label>
               <Popover open={deadlineOpen} onOpenChange={setDeadlineOpen}>
                 <PopoverTrigger asChild>
                   <Button
@@ -205,7 +208,7 @@ export const ProjectModal = ({
                     <CalendarIcon className="mr-2 h-4 w-4" />
                     {formData.deadline
                       ? format(parse(formData.deadline, "yyyy-MM-dd", new Date()), "MMM d, yyyy")
-                      : "Pick a date"}
+                      : t("projectModal.pickDate")}
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="w-auto p-0" align="start">
@@ -225,17 +228,17 @@ export const ProjectModal = ({
               </Popover>
             </div>
             <div className="space-y-2">
-              <Label className="text-muted-foreground text-[13px]">Status</Label>
+              <Label className="text-muted-foreground text-[13px]">{t("projectModal.status")}</Label>
               <Select value={formData.status} onValueChange={(v) => setFormData({ ...formData, status: v })}>
                 <SelectTrigger className="bg-background border-border text-[13px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent className="bg-card border-border">
                   <SelectItem value="active" className="text-[13px]">
-                    In Progress
+                    {t("projectModal.inProgress")}
                   </SelectItem>
                   <SelectItem value="completed" className="text-[13px]">
-                    Completed
+                    {t("projectModal.completed")}
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -245,7 +248,7 @@ export const ProjectModal = ({
           {/* 폴더 선택 — 폴더가 1개 이상일 때만 표시 */}
           {folders.length > 0 && (
             <div className="space-y-2">
-              <Label className="text-muted-foreground text-[13px]">Folder</Label>
+              <Label className="text-muted-foreground text-[13px]">{t("projectModal.folder")}</Label>
               <Select
                 value={formData.folder_id ?? "ungrouped"}
                 onValueChange={(v) => setFormData({ ...formData, folder_id: v === "ungrouped" ? null : v })}
@@ -255,7 +258,7 @@ export const ProjectModal = ({
                 </SelectTrigger>
                 <SelectContent className="bg-card border-border">
                   <SelectItem value="ungrouped" className="text-[13px]">
-                    Ungrouped
+                    {t("common.ungrouped")}
                   </SelectItem>
                   {folders.map((folder) => (
                     <SelectItem key={folder.id} value={folder.id} className="text-[13px]">
@@ -269,7 +272,7 @@ export const ProjectModal = ({
 
           {/* 영상 포맷 */}
           <div className="space-y-2">
-            <Label className="text-muted-foreground text-[13px]">Video Format</Label>
+            <Label className="text-muted-foreground text-[13px]">{t("projectModal.format")}</Label>
             <div className="grid grid-cols-3 gap-3">
               {FORMAT_OPTIONS.map((opt) => {
                 const selected = formData.video_format === opt.value;
@@ -331,10 +334,10 @@ export const ProjectModal = ({
           {/* 액션 버튼 */}
           <div className="flex justify-end gap-3 mt-8">
             <Button type="button" variant="ghost" onClick={onClose} className="hover:bg-secondary text-[13px] h-9">
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button disabled={loading} className="bg-primary hover:bg-primary/85 min-w-[120px] text-[13px] h-9">
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : editProject ? "Save" : "Create"}
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : editProject ? t("common.save") : t("common.create")}
             </Button>
           </div>
         </form>

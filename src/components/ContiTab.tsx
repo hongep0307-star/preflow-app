@@ -48,6 +48,8 @@ import {
   Eye,
   EyeOff,
   FileText,
+  ArrowRightLeft,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -118,6 +120,7 @@ import { ChangeAngleModal, type ChangeAngleSubmit } from "@/components/conti/Cha
 import { StyleTransferConfirmModal } from "@/components/conti/StyleTransferConfirmModal";
 import { GenerateAllModal } from "@/components/conti/GenerateAllModal";
 import { SceneImageCropModal } from "@/components/conti/SceneImageCropModal";
+import { useT } from "@/lib/uiLanguage";
 
 // ─── 모듈 레벨 상태 ────────────────────────────────────────────
 // 탭 이동(ContiTab unmount → remount)에도 진행 중인 generation 의 로딩 상태가 보존되도록
@@ -284,7 +287,7 @@ const VersionCompareModal = ({
                       className="text-[10px] px-1.5 py-0.5 rounded-none font-semibold"
                       style={{ background: KR_BG, color: KR }}
                     >
-                      현재
+                      Current
                     </span>
                   )}
                 </div>
@@ -333,7 +336,7 @@ const VersionCompareModal = ({
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
-            닫기
+            Close
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -445,6 +448,7 @@ const NewVersionModal = ({
   projectId: string;
 }) => {
   const { toast } = useToast();
+  const t = useT();
   const [name, setName] = useState("");
   const [createMethod, setCreateMethod] = useState<"copy" | "fresh">("copy");
   const [isCreating, setIsCreating] = useState(false);
@@ -452,29 +456,29 @@ const NewVersionModal = ({
     {
       id: "copy" as const,
       Icon: Copy,
-      title: "Copy current scenes",
-      desc: "Duplicate scene structure, regenerate conti",
+      title: t("conti.copyCurrentScenes"),
+      desc: t("conti.copyCurrentScenesDesc"),
     },
     {
       id: "fresh" as const,
       Icon: Sparkles,
-      title: "Start fresh",
-      desc: "Develop a new scenario from Ideation tab",
+      title: t("conti.startFresh"),
+      desc: t("conti.startFreshDesc"),
     },
   ];
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-[420px] bg-card border-border">
         <DialogHeader>
-          <DialogTitle className="text-[15px] font-semibold">New Version</DialogTitle>
+          <DialogTitle className="text-[15px] font-semibold">{t("conti.newVersion")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
           <div>
-            <label className="text-xs text-muted-foreground mb-1.5 block">Version name</label>
+            <label className="text-xs text-muted-foreground mb-1.5 block">{t("conti.versionName")}</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="" autoFocus />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground mb-2 block">Start method</label>
+            <label className="text-xs text-muted-foreground mb-2 block">{t("conti.startMethod")}</label>
             <div className="space-y-2">
               {methods.map((m) => {
                 const isSelected = createMethod === m.id;
@@ -505,7 +509,7 @@ const NewVersionModal = ({
         </div>
         <DialogFooter>
           <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button
             disabled={isCreating}
@@ -533,17 +537,17 @@ const NewVersionModal = ({
                   })
                   .select("id")
                   .single();
-                toast({ title: `"${versionName}" created` });
+                toast({ title: t("conti.createdToast", { name: versionName }) });
                 onCreated(inserted?.id ?? "");
                 onClose();
               } catch (err: any) {
-                toast({ title: "Creation failed", description: err.message, variant: "destructive" });
+                toast({ title: t("conti.creationFailed"), description: err.message, variant: "destructive" });
               } finally {
                 setIsCreating(false);
               }
             }}
           >
-            {isCreating ? "Creating..." : "Create Version"}
+            {isCreating ? t("conti.creating") : t("conti.createVersion")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -575,17 +579,20 @@ const ExportModal = ({
   videoFormat: string;
   projectTitle: string;
   onClose: () => void;
-  onExportPdf: (v: { label: string; scenes: Scene[] }[], includeInfo: boolean) => void;
+  onExportPdf: (v: { label: string; scenes: Scene[] }[], includeInfo: boolean, cardsPerRow: number) => void;
   onExportPng: (
     v: { label: string; scenes: Scene[] }[],
     scale: number,
     mode: "page" | "individual",
     includeInfo: boolean,
+    cardsPerRow: number,
   ) => void;
 }) => {
+  const t = useT();
   const [exportFormat, setExportFormat] = useState<"pdf" | "png" | "ae">("pdf");
   const [pngScale, setPngScale] = useState<1 | 2 | 3>(2);
   const [pngMode, setPngMode] = useState<"page" | "individual">("page");
+  const [cardsPerRow, setCardsPerRow] = useState<3 | 4 | 5 | 6>(5);
   const [includeInfo, setIncludeInfo] = useState(showInfo);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => {
     if (activeVersionId && versions.some((v) => v.id === activeVersionId)) {
@@ -601,7 +608,7 @@ const ExportModal = ({
     });
   const buildSelected = () => {
     const result: { label: string; scenes: Scene[] }[] = [];
-    if (selectedIds.has("current")) result.push({ label: "Current", scenes: currentScenes });
+    if (selectedIds.has("current")) result.push({ label: t("export.currentWork"), scenes: currentScenes });
     for (const v of versions)
       if (selectedIds.has(v.id)) {
         const isActive = v.id === activeVersionId;
@@ -614,9 +621,9 @@ const ExportModal = ({
     const selected = buildSelected();
     onClose();
     if (exportFormat === "pdf") {
-      onExportPdf(selected, includeInfo);
+      onExportPdf(selected, includeInfo, cardsPerRow);
     } else if (exportFormat === "png") {
-      onExportPng(selected, pngScale, pngMode, includeInfo);
+      onExportPng(selected, pngScale, pngMode, includeInfo, cardsPerRow);
     }
   };
 
@@ -625,16 +632,22 @@ const ExportModal = ({
     { value: 2, label: "2x", detail: "3200px" },
     { value: 3, label: "3x", detail: "4800px" },
   ];
+  const cardRowOptions: { value: 3 | 4 | 5 | 6; label: string }[] = [
+    { value: 3, label: "3" },
+    { value: 4, label: "4" },
+    { value: 5, label: "5" },
+    { value: 6, label: "6" },
+  ];
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-[480px] bg-card border-border">
         <DialogHeader>
-          <DialogTitle className="text-[15px] font-semibold">Export</DialogTitle>
+          <DialogTitle className="text-[15px] font-semibold">{t("export.title")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-5">
           <div>
-            <label className="text-xs text-muted-foreground mb-2 block">Format</label>
+            <label className="text-xs text-muted-foreground mb-2 block">{t("export.format")}</label>
             <div className="grid grid-cols-3 gap-2">
               {FORMAT_OPTIONS.map((opt) => {
                 const Icon = opt.icon;
@@ -670,7 +683,7 @@ const ExportModal = ({
           </div>
 
           <div>
-            <label className="text-xs text-muted-foreground mb-2 block">Version</label>
+            <label className="text-xs text-muted-foreground mb-2 block">{t("export.version")}</label>
             <div className="space-y-2 max-h-[30vh] overflow-y-auto">
               {versions.length === 0 && (
                 <label
@@ -682,7 +695,7 @@ const ExportModal = ({
                 >
                   <Checkbox checked={selectedIds.has("current")} onCheckedChange={() => toggle("current")} />
                   <div className="flex-1">
-                    <div className="text-foreground text-[13px] font-semibold">Current work</div>
+                    <div className="text-foreground text-[13px] font-semibold">{t("export.currentWork")}</div>
                     <div className="text-muted-foreground/60 text-[11px]">{currentScenes.length} scenes</div>
                   </div>
                 </label>
@@ -724,7 +737,7 @@ const ExportModal = ({
           {exportFormat === "png" && (
             <>
               <div>
-                <label className="text-xs text-muted-foreground mb-2 block">Resolution</label>
+                <label className="text-xs text-muted-foreground mb-2 block">{t("export.resolution")}</label>
                 <div className="flex gap-2">
                   {scaleOptions.map((opt) => (
                     <button
@@ -753,11 +766,11 @@ const ExportModal = ({
               </div>
 
               <div>
-                <label className="text-xs text-muted-foreground mb-2 block">Export mode</label>
+                <label className="text-xs text-muted-foreground mb-2 block">{t("export.exportMode")}</label>
                 <div className="flex gap-2">
                   {[
-                    { value: "page" as const, label: "Page layout", desc: "Same 5×2 layout as the PDF" },
-                    { value: "individual" as const, label: "Individual scenes", desc: "Per-scene PNG files" },
+                    { value: "page" as const, label: t("export.pageLayout"), desc: t("export.pageLayoutDesc") },
+                    { value: "individual" as const, label: t("export.individualScenes"), desc: t("export.individualScenesDesc") },
                   ].map((opt) => (
                     <button
                       key={opt.value}
@@ -786,18 +799,46 @@ const ExportModal = ({
             </>
           )}
 
+          {(exportFormat === "pdf" || (exportFormat === "png" && pngMode === "page")) && (
+            <div>
+              <label className="text-xs text-muted-foreground mb-2 block">{t("export.cardsPerRow")}</label>
+              <div className="flex gap-2">
+                {cardRowOptions.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setCardsPerRow(opt.value)}
+                    className="flex-1 py-2 text-center transition-all"
+                    style={{
+                      background: cardsPerRow === opt.value ? "rgba(249,66,58,0.06)" : "rgba(255,255,255,0.03)",
+                      border: `1px solid ${cardsPerRow === opt.value ? KR : "rgba(255,255,255,0.08)"}`,
+                      borderRadius: 0,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <span
+                      className="text-[13px] font-semibold"
+                      style={{ color: cardsPerRow === opt.value ? KR : "rgba(255,255,255,0.7)" }}
+                    >
+                      {opt.label}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {(exportFormat === "pdf" || exportFormat === "png") && (
             <label className="flex items-center gap-2 cursor-pointer">
               <Checkbox checked={includeInfo} onCheckedChange={(v) => setIncludeInfo(!!v)} />
               <span className="text-[12px] text-muted-foreground">
-                Include metadata (title, camera, mood, location, runtime)
+                {t("export.includeMetadata")}
               </span>
             </label>
           )}
         </div>
         <DialogFooter>
           <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button
             onClick={handleExport}
@@ -805,7 +846,7 @@ const ExportModal = ({
             className="text-white text-[13px] h-9"
             style={{ background: KR }}
           >
-            Export {exportFormat.toUpperCase()} ({selectedIds.size})
+            {t("export.exportCta", { format: exportFormat.toUpperCase(), count: selectedIds.size })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -825,6 +866,7 @@ const StylePickerModal = ({
   onChanged: (p: StylePreset | null) => void;
 }) => {
   const { toast } = useToast();
+  const t = useT();
   const [presets, setPresets] = useState<StylePreset[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -865,7 +907,7 @@ const StylePickerModal = ({
       toast({ title: `"${preset.name}" style deleted.` });
       setPendingDeletePreset(null);
     } catch (err: any) {
-      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+      toast({ title: t("conti.deleteFailed"), description: err.message, variant: "destructive" });
     } finally {
       setDeletingStyle(false);
     }
@@ -918,9 +960,9 @@ const StylePickerModal = ({
       const newPreset = inserted as StylePreset;
       setPresets((prev) => [...prev, newPreset]);
       setSelected(newPreset.id);
-      toast({ title: `"${newPreset.name}" style uploaded.` });
+      toast({ title: t("conti.styleUploaded", { name: newPreset.name }) });
     } catch (err: any) {
-      toast({ title: "Upload failed", description: err.message, variant: "destructive" });
+      toast({ title: t("conti.uploadFailed"), description: err.message, variant: "destructive" });
     } finally {
       setUploading(false);
       if (uploadRef.current) uploadRef.current.value = "";
@@ -934,17 +976,17 @@ const StylePickerModal = ({
         const { error } = await supabase.from("projects").update({ conti_style_id: null }).eq("id", projectId);
         if (error) throw error;
         onChanged(null);
-        toast({ title: "Style removed." });
+        toast({ title: t("conti.styleRemoved") });
       } else {
         const preset = presets.find((p) => p.id === selected) ?? null;
         const { error } = await supabase.from("projects").update({ conti_style_id: selected }).eq("id", projectId);
         if (error) throw error;
         onChanged(preset);
-        toast({ title: `"${preset?.name}" style applied.` });
+        toast({ title: t("conti.styleApplied", { name: preset?.name ?? t("projectModal.style") }) });
       }
       onClose();
     } catch (err: any) {
-      toast({ title: "Style change failed", description: err.message, variant: "destructive" });
+      toast({ title: t("conti.styleChangeFailed"), description: err.message, variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -954,7 +996,7 @@ const StylePickerModal = ({
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-[720px] bg-card border-border" style={{ borderRadius: 0 }}>
         <DialogHeader>
-          <DialogTitle className="text-[15px] font-semibold">Style Select</DialogTitle>
+          <DialogTitle className="text-[15px] font-semibold">{t("conti.styleSelect")}</DialogTitle>
         </DialogHeader>
         {loading ? (
           <div className="flex items-center justify-center py-10">
@@ -999,10 +1041,10 @@ const StylePickerModal = ({
                   className="text-[11px] font-bold"
                   style={{ color: selected === NONE_ID ? KR : "#f0f0f0" }}
                 >
-                  None
+                  {t("conti.none")}
                 </div>
                 <div className="text-[10px] mt-0.5 line-clamp-2" style={{ color: "rgba(255,255,255,0.3)" }}>
-                  Default photorealistic
+                  {t("conti.defaultPhotorealistic")}
                 </div>
               </div>
             </div>
@@ -1052,7 +1094,7 @@ const StylePickerModal = ({
                           className="absolute bottom-1 left-1 font-mono text-[8px] font-bold uppercase px-1.5 py-0.5"
                           style={{ background: "rgba(0,0,0,0.65)", color: "#fff", borderRadius: 2 }}
                         >
-                          DEFAULT
+                          {t("mood.default")}
                         </div>
                       )}
                     </div>
@@ -1105,7 +1147,7 @@ const StylePickerModal = ({
                   handleUploadStyle(file);
                 } else {
                   toast({
-                    title: "Only image files can be uploaded.",
+                    title: t("conti.onlyImageFiles"),
                     variant: "destructive",
                   });
                 }
@@ -1146,10 +1188,10 @@ const StylePickerModal = ({
                   className="text-[11px] font-bold"
                   style={{ color: dragOver ? KR : "#f0f0f0" }}
                 >
-                  {uploading ? "Uploading..." : dragOver ? "Drop image" : "Upload"}
+                  {uploading ? t("conti.uploading") : dragOver ? t("conti.dropImage") : t("conti.upload")}
                 </div>
                 <div className="text-[10px] mt-0.5 line-clamp-2" style={{ color: "rgba(255,255,255,0.3)" }}>
-                  {dragOver ? "Release to upload" : "Drag & drop or click"}
+                  {dragOver ? t("conti.releaseToUpload") : t("conti.dragDropClick")}
                 </div>
               </div>
             </div>
@@ -1157,7 +1199,7 @@ const StylePickerModal = ({
         )}
         <DialogFooter>
           <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button
             disabled={saving}
@@ -1166,7 +1208,7 @@ const StylePickerModal = ({
             onClick={handleApply}
           >
             {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-            Apply
+            {t("conti.apply")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1182,11 +1224,11 @@ const StylePickerModal = ({
         >
           <AlertDialogHeader>
             <AlertDialogTitle className="text-[15px] font-semibold">
-              Delete custom style?
+              {t("conti.deleteCustomStyle")}
             </AlertDialogTitle>
             <AlertDialogDescription className="text-[13px] text-muted-foreground">
               {pendingDeletePreset
-                ? `"${pendingDeletePreset.name}" will be permanently removed. Projects using this style will fall back to the default.`
+                ? t("conti.deleteCustomStyleDesc", { name: pendingDeletePreset.name })
                 : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -1195,7 +1237,7 @@ const StylePickerModal = ({
               className="text-[13px] h-9"
               disabled={deletingStyle}
             >
-              Cancel
+              {t("common.cancel")}
             </AlertDialogCancel>
             <AlertDialogAction
               className="text-white text-[13px] h-9"
@@ -1209,7 +1251,7 @@ const StylePickerModal = ({
               {deletingStyle ? (
                 <Loader2 className="w-3 h-3 animate-spin mr-1.5" />
               ) : null}
-              Delete
+              {t("common.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1228,12 +1270,13 @@ const RenameVersionModal = ({
   onRenamed: () => void;
 }) => {
   const { toast } = useToast();
+  const t = useT();
   const [name, setName] = useState(version.version_name || "");
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-[360px] bg-card border-border">
         <DialogHeader>
-          <DialogTitle className="text-[15px] font-semibold">Rename Version</DialogTitle>
+          <DialogTitle className="text-[15px] font-semibold">{t("conti.renameVersion")}</DialogTitle>
         </DialogHeader>
         <Input
           value={name}
@@ -1253,19 +1296,19 @@ const RenameVersionModal = ({
         />
         <DialogFooter>
           <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button
             className="text-white text-[13px] h-9"
             style={{ background: KR }}
             onClick={async () => {
               await supabase.from("scene_versions").update({ version_name: name.trim() }).eq("id", version.id);
-              toast({ title: "Renamed." });
+              toast({ title: t("conti.renamed") });
               onRenamed();
               onClose();
             }}
           >
-            Save
+            {t("common.save")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1275,6 +1318,7 @@ const RenameVersionModal = ({
 
 const AddSceneCard = ({ onClick }: { onClick: () => void }) => {
   const [hover, setHover] = useState(false);
+  const t = useT();
   return (
     <div
       onClick={onClick}
@@ -1307,7 +1351,7 @@ const AddSceneCard = ({ onClick }: { onClick: () => void }) => {
           className="font-mono text-[10px] font-bold tracking-wider"
           style={{ color: hover ? KR : "rgba(255,255,255,0.3)", transition: "color 0.15s" }}
         >
-          Add Scene
+          {t("conti.addScene")}
         </span>
       </div>
     </div>
@@ -1327,6 +1371,7 @@ const InsertSceneButton = ({
   const [popOpen, setPopOpen] = useState(false);
   const popRef = useRef<HTMLDivElement>(null);
   const [flipRight, setFlipRight] = useState(false);
+  const t = useT();
 
   useEffect(() => {
     if (!popOpen) return;
@@ -1450,7 +1495,7 @@ const InsertSceneButton = ({
             }}
           >
             <Plus style={{ width: 13, height: 13, flexShrink: 0 }} />
-            Add Scene
+            {t("conti.addScene")}
           </button>
           <button
             onClick={(e) => {
@@ -1460,7 +1505,7 @@ const InsertSceneButton = ({
               onAddTransition();
             }}
             disabled={!canTransition}
-            title={!canTransition ? "Both scenes need images" : "Insert transition between scenes"}
+            title={!canTransition ? t("conti.transitionNeedsImages") : t("conti.insertTransitionTitle")}
             style={{
               display: "flex",
               alignItems: "center",
@@ -1497,7 +1542,7 @@ const InsertSceneButton = ({
               <path d="M18 8L22 12L18 16" />
               <path d="M2 12H22" />
             </svg>
-            Add Transition
+            {t("conti.addTransition")}
           </button>
         </div>
       )}
@@ -1531,6 +1576,7 @@ const SortableVersionTab = ({
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const { toast } = useToast();
+  const t = useT();
   const isMobile = useIsMobile();
 
   const [versions, setVersions] = useState<SceneVersion[]>([]);
@@ -2023,7 +2069,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const handleSaveCurrentAsVersion = async () => {
     const scenes = currentScenes.length > 0 ? currentScenes : ((await fetchCurrentScenes()) ?? []);
     if (scenes.length === 0) {
-      toast({ title: "No scenes to save", variant: "destructive" });
+      toast({ title: t("conti.noScenesToSave"), variant: "destructive" });
       return;
     }
     const num = versions.length + 1;
@@ -2292,12 +2338,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const handleAddScene = async () => {
     const snapshot = getSceneState(projectId)?.scenes ?? activeScenes;
     const tempNumber = 90000 + (Date.now() % 10000);
+    const nextSceneTitleNumber = snapshot.filter((s) => !s.is_transition).length + 1;
     const { data, error } = await supabase
       .from("scenes")
       .insert({
         project_id: projectId,
         scene_number: tempNumber,
-        title: `Scene ${snapshot.length + 1}`,
+        title: `Scene ${nextSceneTitleNumber}`,
         description: null,
         camera_angle: null,
         location: null,
@@ -2323,13 +2370,15 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   };
 
   const handleInsertSceneAt = async (insertIdx: number) => {
+    const snapshot = getSceneState(projectId)?.scenes ?? activeScenes;
+    const nextSceneTitleNumber = snapshot.slice(0, insertIdx).filter((s) => !s.is_transition).length + 1;
     const tempNumber = 90000 + (Date.now() % 10000);
     const { data, error } = await supabase
       .from("scenes")
       .insert({
         project_id: projectId,
         scene_number: tempNumber,
-        title: `Scene ${insertIdx + 1}`,
+        title: `Scene ${nextSceneTitleNumber}`,
         description: null,
         camera_angle: null,
         location: null,
@@ -2625,8 +2674,8 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const [showModelMenu, setShowModelMenu] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const MODEL_OPTIONS: { id: ContiModel; name: string; desc: string }[] = [
-    { id: "nano-banana-2", name: "Nano Banana 2", desc: "Consistency + composition (default)" },
-    { id: "gpt", name: "GPT Image 2", desc: "General purpose" },
+    { id: "nano-banana-2", name: "Nano Banana 2", desc: t("conti.modelNanoDesc") },
+    { id: "gpt", name: "GPT Image 2", desc: t("conti.modelGptDesc") },
   ];
   useEffect(() => {
     if (!showModelMenu) return;
@@ -2980,18 +3029,21 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       // "OPENAI_API_KEY not set" / "invalid size" / etc. without having
       // to dig through devtools.
       if (failedScenes.length === 0) {
-        toast({ title: "Style transfer complete!" });
+        toast({ title: t("conti.styleTransferComplete") });
       } else if (failedScenes.length === targetScenes.length) {
         toast({
           variant: "destructive",
-          title: "Style transfer failed",
+          title: t("conti.styleTransferFailed"),
           description: failedScenes[0].reason,
         });
       } else {
         toast({
           variant: "destructive",
-          title: `Style transfer: ${failedScenes.length} of ${targetScenes.length} scenes failed`,
-          description: `Scene ${failedScenes[0].sceneNumber}: ${failedScenes[0].reason}`,
+          title: t("conti.styleTransferPartialFailed", { failed: failedScenes.length, total: targetScenes.length }),
+          description: t("conti.sceneFailureReason", {
+            scene: failedScenes[0].sceneNumber,
+            reason: failedScenes[0].reason,
+          }),
         });
       }
     }
@@ -3059,9 +3111,88 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     return { wPct, hPct, leftPct: 50 - wPct / 2 + x, topPct: 50 - hPct / 2 + y };
   }
 
+  function getExportSceneLabel(scene: Scene, scenes: Scene[]) {
+    if (scene.is_transition) return "TR";
+    let counter = 0;
+    for (const s of scenes) {
+      if (!s.is_transition) counter++;
+      if (s.id === scene.id) break;
+    }
+    return `S${String(counter).padStart(2, "0")}`;
+  }
+
+  function getExportTransitionInfo(scene: Scene, scenes: Scene[]) {
+    const idx = scenes.findIndex((s) => s.id === scene.id);
+    const realLabelAt = (index: number) => {
+      let counter = 0;
+      for (let i = 0; i <= index; i++) {
+        if (!scenes[i]?.is_transition) counter++;
+      }
+      return `S${String(counter).padStart(2, "0")}`;
+    };
+    let prevIdx = -1;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (!scenes[i].is_transition) {
+        prevIdx = i;
+        break;
+      }
+    }
+    const nextOffset = scenes.slice(idx + 1).findIndex((s) => !s.is_transition);
+    const nextIdx = nextOffset >= 0 ? idx + 1 + nextOffset : -1;
+    const key = normalizeTransitionKey(scene.transition_type ?? null);
+    return {
+      flow: prevIdx >= 0 && nextIdx >= 0 ? `${realLabelAt(prevIdx)} → ${realLabelAt(nextIdx)}` : "",
+      type: key ? TRANSITION_MAP[key].label : "Transition",
+    };
+  }
+
+  function appendExportImage(
+    imgWrap: HTMLDivElement,
+    scene: Scene,
+    renderMode: "page" | "individual" = "page",
+  ) {
+    const exportCrop = getExportCrop(scene.conti_image_crop, videoFormat);
+    const createBgEl = (cssText: string) => {
+      const bgEl = document.createElement("div");
+      bgEl.style.cssText = cssText;
+      imgWrap.appendChild(bgEl);
+    };
+
+    if (exportCrop) {
+      const containerAspect = videoFormat === "vertical" ? 9 / 16 : videoFormat === "square" ? 1 : 16 / 9;
+      const ia = exportCrop.ia ?? containerAspect;
+      const layout = computeExportImageLayout(
+        ia,
+        containerAspect,
+        exportCrop.scale,
+        exportCrop.x,
+        exportCrop.y,
+      );
+      createBgEl(
+        `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`,
+      );
+      return;
+    }
+
+    if (renderMode === "individual") {
+      const imgEl = document.createElement("img");
+      imgEl.crossOrigin = "anonymous";
+      imgEl.src = scene.conti_image_url!;
+      imgEl.style.cssText =
+        "position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;display:block;";
+      imgWrap.appendChild(imgEl);
+      return;
+    }
+
+    createBgEl(
+      `position:absolute;top:0;left:0;width:100%;height:100%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;`,
+    );
+  }
+
   const exportToPDFWithVersions = async (
     selectedVersions: { label: string; scenes: Scene[] }[],
     includeInfoParam: boolean = true,
+    cardsPerRow: number = 5,
   ) => {
     setIsExporting(true);
     try {
@@ -3073,7 +3204,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       const pageW = pdf.internal.pageSize.getWidth();
       const pageH = pdf.internal.pageSize.getHeight();
       const margin = 12;
-      const cols = 5;
+      const cols = Math.min(6, Math.max(3, Math.round(cardsPerRow)));
       const aspectMap: Record<string, string> = { vertical: "9/16", horizontal: "16/9", square: "1/1" };
       const aspect = aspectMap[videoFormat] ?? "9/16";
       const renderW = 2400;
@@ -3084,13 +3215,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       const stripAt = (s: string) => s.replace(/@/g, "");
       const escHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       const getSceneLabel = (scene: Scene, scenes: Scene[]) => {
-        if (scene.is_transition) return "TR";
-        let counter = 0;
-        for (const s of scenes) {
-          if (!s.is_transition) counter++;
-          if (s.id === scene.id) break;
-        }
-        return `S${String(counter).padStart(2, "0")}`;
+        return getExportSceneLabel(scene, scenes);
       };
       const buildMetaRow = (label: string, value: string | null | undefined) => {
         const v = value || "—";
@@ -3123,32 +3248,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               const imgWrap = document.createElement("div");
               imgWrap.style.cssText = `position:relative; width:100%; aspect-ratio:${aspect}; background:#2a2a2a; overflow:hidden; border-radius:0; flex-shrink:0;`;
               if (scene.conti_image_url) {
-                const exportCrop = getExportCrop(scene.conti_image_crop, videoFormat);
-                // NOTE: html2canvas mis-renders `<img object-fit:cover/fill>` on
-                // images whose intrinsic aspect ratio doesn't match the card's
-                // (e.g. a 1024x1024 GPT image inside a 16:9 card), forcing the
-                // image to stretch to fill the box. Using a <div> with
-                // background-image + background-size:cover sidesteps that bug
-                // and matches SortableContiCard.tsx's on-screen renderer 1:1
-                // (it uses the same div+backgroundImage approach).
-                if (exportCrop) {
-                  const containerAspect = videoFormat === "vertical" ? 9 / 16 : videoFormat === "square" ? 1 : 16 / 9;
-                  const ia = exportCrop.ia ?? containerAspect;
-                  const layout = computeExportImageLayout(
-                    ia,
-                    containerAspect,
-                    exportCrop.scale,
-                    exportCrop.x,
-                    exportCrop.y,
-                  );
-                  const bgEl = document.createElement("div");
-                  bgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
-                  imgWrap.appendChild(bgEl);
-                } else {
-                  const bgEl = document.createElement("div");
-                  bgEl.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;`;
-                  imgWrap.appendChild(bgEl);
-                }
+                appendExportImage(imgWrap, scene);
               } else if (scene.is_transition) {
                 const flow = document.createElement("div");
                 flow.style.cssText =
@@ -3202,6 +3302,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               sceneLabel.style.cssText = `font-size:17px; font-weight:700; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
               sceneLabel.textContent = getSceneLabel(scene, scenes);
               titleRow.appendChild(sceneLabel);
+              if (scene.is_transition) {
+                const info = getExportTransitionInfo(scene, scenes);
+                const title = document.createElement("div");
+                title.style.cssText =
+                  "font-size:17px; font-weight:600; color:#d1d5db; word-break:break-word; line-height:1.3; flex:1;";
+                title.textContent = info.flow || info.type;
+                titleRow.appendChild(title);
+              }
               if (includeInfoParam && !scene.is_transition) {
                 const title = document.createElement("div");
                 title.style.cssText =
@@ -3213,19 +3321,21 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               if (includeInfoParam) {
                 const metaWrap = document.createElement("div");
                 metaWrap.style.cssText = "display:flex; flex-direction:column; gap:3px;";
-                metaWrap.innerHTML = [
-                  buildMetaRow("Camera", scene.camera_angle ? stripAt(scene.camera_angle) : null),
-                  buildMetaRow("Mood", scene.mood ? stripAt(scene.mood) : null),
-                  buildMetaRow("Location", scene.location ? stripAt(scene.location) : null),
-                  buildMetaRow("Duration", scene.duration_sec ? `${scene.duration_sec}s` : null),
-                ].join("");
+                metaWrap.innerHTML = scene.is_transition
+                  ? [buildMetaRow("Type", getExportTransitionInfo(scene, scenes).type)].join("")
+                  : [
+                      buildMetaRow("Camera", scene.camera_angle ? stripAt(scene.camera_angle) : null),
+                      buildMetaRow("Mood", scene.mood ? stripAt(scene.mood) : null),
+                      buildMetaRow("Location", scene.location ? stripAt(scene.location) : null),
+                      buildMetaRow("Duration", scene.duration_sec ? `${scene.duration_sec}s` : null),
+                    ].join("");
                 textArea.appendChild(metaWrap);
               }
               if (scene.description) {
                 const desc = document.createElement("div");
                 desc.style.cssText =
                   "font-size:14px; color:#999; line-height:1.5; margin-top:5px; white-space:pre-wrap; word-break:break-word;";
-                desc.textContent = stripAt(scene.description);
+                desc.textContent = scene.is_transition ? `Beat: ${stripAt(scene.description)}` : stripAt(scene.description);
                 textArea.appendChild(desc);
               }
               card.appendChild(textArea);
@@ -3293,6 +3403,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     scale: number,
     mode: "page" | "individual",
     includeInfo: boolean,
+    cardsPerRow: number = 5,
   ) => {
     setIsExporting(true);
     try {
@@ -3304,13 +3415,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       const escHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9가-힣_-]/g, "_").slice(0, 30);
       const getSceneLabel = (scene: Scene, scenes: Scene[]) => {
-        if (scene.is_transition) return "TR";
-        let counter = 0;
-        for (const s of scenes) {
-          if (!s.is_transition) counter++;
-          if (s.id === scene.id) break;
-        }
-        return `S${String(counter).padStart(2, "0")}`;
+        return getExportSceneLabel(scene, scenes);
       };
       const buildMetaRow = (label: string, value: string | null | undefined, large = false) => {
         const v = value || "—";
@@ -3323,7 +3428,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       };
 
       if (mode === "page") {
-        const cols = 5;
+        const cols = Math.min(6, Math.max(3, Math.round(cardsPerRow)));
         const renderW = 2400;
         const padX = 24;
         const gapPx = 8;
@@ -3351,30 +3456,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 const imgWrap = document.createElement("div");
                 imgWrap.style.cssText = `position:relative; width:100%; aspect-ratio:${aspect}; background:#2a2a2a; overflow:hidden; flex-shrink:0;`;
                 if (scene.conti_image_url) {
-                  const exportCrop = getExportCrop(scene.conti_image_crop, videoFormat);
-                  // See note in exportToPDFWithVersions: html2canvas mis-renders
-                  // <img object-fit:*> when the image's intrinsic aspect ratio
-                  // doesn't match the box (e.g. 1:1 GPT image inside a 16:9 card)
-                  // and stretches it. Use div + background-size:cover instead so
-                  // PNG export matches the on-screen scene card.
-                  if (exportCrop) {
-                    const containerAspect = videoFormat === "vertical" ? 9 / 16 : videoFormat === "square" ? 1 : 16 / 9;
-                    const ia = exportCrop.ia ?? containerAspect;
-                    const layout = computeExportImageLayout(
-                      ia,
-                      containerAspect,
-                      exportCrop.scale,
-                      exportCrop.x,
-                      exportCrop.y,
-                    );
-                    const bgEl = document.createElement("div");
-                    bgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
-                    imgWrap.appendChild(bgEl);
-                  } else {
-                    const bgEl = document.createElement("div");
-                    bgEl.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;background-image:url("${scene.conti_image_url}");background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#111;`;
-                    imgWrap.appendChild(bgEl);
-                  }
+                  appendExportImage(imgWrap, scene);
                 } else if (scene.is_transition) {
                   const flow = document.createElement("div");
                   flow.style.cssText =
@@ -3430,6 +3512,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 sceneLabel.style.cssText = `font-size:17px; font-weight:700; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
                 sceneLabel.textContent = getSceneLabel(scene, scenes);
                 titleRow.appendChild(sceneLabel);
+                if (scene.is_transition) {
+                  const info = getExportTransitionInfo(scene, scenes);
+                  const title = document.createElement("div");
+                  title.style.cssText =
+                    "font-size:17px; font-weight:600; color:#d1d5db; word-break:break-word; line-height:1.3; flex:1;";
+                  title.textContent = info.flow || info.type;
+                  titleRow.appendChild(title);
+                }
                 if (includeInfo && !scene.is_transition) {
                   const title = document.createElement("div");
                   title.style.cssText =
@@ -3441,19 +3531,21 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 if (includeInfo) {
                   const metaWrap = document.createElement("div");
                   metaWrap.style.cssText = "display:flex; flex-direction:column; gap:3px;";
-                  metaWrap.innerHTML = [
-                    buildMetaRow("Camera", scene.camera_angle ? stripAt(scene.camera_angle) : null),
-                    buildMetaRow("Mood", scene.mood ? stripAt(scene.mood) : null),
-                    buildMetaRow("Location", scene.location ? stripAt(scene.location) : null,),
-                    buildMetaRow("Duration", scene.duration_sec ? `${scene.duration_sec}s` : null),
-                  ].join("");
+                  metaWrap.innerHTML = scene.is_transition
+                    ? [buildMetaRow("Type", getExportTransitionInfo(scene, scenes).type)].join("")
+                    : [
+                        buildMetaRow("Camera", scene.camera_angle ? stripAt(scene.camera_angle) : null),
+                        buildMetaRow("Mood", scene.mood ? stripAt(scene.mood) : null),
+                        buildMetaRow("Location", scene.location ? stripAt(scene.location) : null),
+                        buildMetaRow("Duration", scene.duration_sec ? `${scene.duration_sec}s` : null),
+                      ].join("");
                   textArea.appendChild(metaWrap);
                 }
                 if (scene.description) {
                   const desc = document.createElement("div");
                   desc.style.cssText =
                     "font-size:14px; color:#999; line-height:1.5; margin-top:5px; white-space:pre-wrap; word-break:break-word;";
-                  desc.textContent = stripAt(scene.description);
+                  desc.textContent = scene.is_transition ? `Beat: ${stripAt(scene.description)}` : stripAt(scene.description);
                   textArea.appendChild(desc);
                 }
                 card.appendChild(textArea);
@@ -3505,30 +3597,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             const imgWrap = document.createElement("div");
             imgWrap.style.cssText = `position:relative; width:100%; aspect-ratio:${aspect}; background:#2a2a2a; overflow:hidden;`;
             if (scene.conti_image_url) {
-              const exportCrop = getExportCrop(scene.conti_image_crop, videoFormat);
-              if (exportCrop) {
-                const containerAspect = videoFormat === "vertical" ? 9 / 16 : videoFormat === "square" ? 1 : 16 / 9;
-                const ia = exportCrop.ia ?? containerAspect;
-                const layout = computeExportImageLayout(
-                  ia,
-                  containerAspect,
-                  exportCrop.scale,
-                  exportCrop.x,
-                  exportCrop.y,
-                );
-                const imgEl = document.createElement("img");
-                imgEl.crossOrigin = "anonymous";
-                imgEl.src = scene.conti_image_url;
-                imgEl.style.cssText = `position:absolute;width:${layout.wPct}%;height:${layout.hPct}%;left:${layout.leftPct}%;top:${layout.topPct}%;object-fit:fill;display:block;background-color:#111;${exportCrop.rotate ? `transform:rotate(${exportCrop.rotate}deg);transform-origin:center center;` : ""}`;
-                imgWrap.appendChild(imgEl);
-              } else {
-                const imgEl = document.createElement("img");
-                imgEl.crossOrigin = "anonymous";
-                imgEl.src = scene.conti_image_url;
-                imgEl.style.cssText =
-                  "position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;display:block;";
-                imgWrap.appendChild(imgEl);
-              }
+              appendExportImage(imgWrap, scene, "individual");
             } else if (scene.is_transition) {
               const flow = document.createElement("div");
               flow.style.cssText =
@@ -3619,6 +3688,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             indSceneLabel.style.cssText = `font-size:20px; font-weight:700; color:${scene.is_transition ? "#6b7280" : "#f9423a"}; line-height:1.3; flex-shrink:0;`;
             indSceneLabel.textContent = getSceneLabel(scene, scenes);
             indTitleRow.appendChild(indSceneLabel);
+            if (scene.is_transition) {
+              const info = getExportTransitionInfo(scene, scenes);
+              const indTitleEl = document.createElement("span");
+              indTitleEl.style.cssText =
+                "font-size:20px; font-weight:600; color:#d1d5db; line-height:1.3; word-break:break-word;";
+              indTitleEl.textContent = info.flow || info.type;
+              indTitleRow.appendChild(indTitleEl);
+            }
             if (includeInfo && !scene.is_transition) {
               const indTitleEl = document.createElement("span");
               indTitleEl.style.cssText =
@@ -3638,11 +3715,17 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               ].join("");
               textArea.appendChild(indMetaWrap);
             }
+            if (includeInfo && scene.is_transition) {
+              const indMetaWrap = document.createElement("div");
+              indMetaWrap.style.cssText = "display:flex; flex-direction:column; gap:4px;";
+              indMetaWrap.innerHTML = [buildMetaRow("Type", getExportTransitionInfo(scene, scenes).type, true)].join("");
+              textArea.appendChild(indMetaWrap);
+            }
             if (scene.description) {
               const indDesc = document.createElement("div");
               indDesc.style.cssText =
                 "font-size:16px; color:#999; line-height:1.55; white-space:pre-wrap; word-break:break-word;";
-              indDesc.textContent = stripAt(scene.description);
+              indDesc.textContent = scene.is_transition ? `Beat: ${stripAt(scene.description)}` : stripAt(scene.description);
               textArea.appendChild(indDesc);
             }
             container.appendChild(textArea);
@@ -3704,6 +3787,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const assetMap: Record<string, Asset> = {};
   for (const a of assets) assetMap[a.tag_name.replace(/^@/, "")] = a;
 
+  const realSceneCount = activeScenes.filter((s) => !s.is_transition).length;
   const gridClass = viewMode === "single" ? "grid-cols-1" : viewMode === "grid2" ? "grid-cols-2" : "";
   const gridStyle: React.CSSProperties =
     viewMode === "auto" ? { gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))` } : {};
@@ -3749,7 +3833,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                             className="font-mono text-[9px] font-bold px-1.5 py-0.5 text-white shrink-0"
                             style={{ background: isActive ? KR : "rgba(255,255,255,0.15)", borderRadius: 0 }}
                           >
-                            {`ver.${idx + 1}`}
+                            {t("conti.versionShort", { num: idx + 1 })}
                           </span>
                           <span className="tracking-wide">{v.version_name || `v${v.version_number}`}</span>
                         </button>
@@ -3782,7 +3866,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.25)" }}
             >
               <Plus className="w-2.5 h-2.5" />
-              New
+              {t("conti.new")}
             </button>
             <div className="flex-1" />
           </div>
@@ -3811,7 +3895,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             >
               {[
                 {
-                  label: "Rename",
+                  label: t("common.rename"),
                   fn: () => {
                     const v = versions.find((x) => x.id === menuId);
                     if (v) {
@@ -3821,7 +3905,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                   },
                 },
                 {
-                  label: "Delete",
+                  label: t("common.delete"),
                   fn: () => {
                     setTabMenuAnchor(null);
                     handleDeleteVersion(menuId);
@@ -3861,22 +3945,25 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         style={{ background: "#0d0d0d", borderBottom: "1px solid rgba(255,255,255,0.06)" }}
       >
         <span className="text-[10px] font-mono tracking-wide" style={{ color: "rgba(255,255,255,0.35)" }}>
-          Sc {activeScenes.filter((s) => !s.is_transition).length} · Img {scenesWithImages}/
-          {activeScenes.filter((s) => !s.is_transition).length}
+          {t("conti.sceneCountShort", { count: realSceneCount })} ·{" "}
+          {t("conti.imageCountShort", {
+            done: scenesWithImages,
+            total: realSceneCount,
+          })}
         </span>
         {noDescriptionCount > 0 && !generatingAll && (
           <span className="text-[10px] font-mono" style={{ color: "#d97706" }}>
-            ⚠ {noDescriptionCount} no desc
+            ⚠ {t("conti.noDescriptionShort", { count: noDescriptionCount })}
           </span>
         )}
         {generateProgress && (
           <span className="text-[10px] font-mono font-bold" style={{ color: KR }}>
-            GEN {generateProgress.done}/{generateProgress.total}
+            {t("conti.generateProgressShort", { done: generateProgress.done, total: generateProgress.total })}
           </span>
         )}
         {styleTransferProgress && (
           <span className="text-[10px] font-mono font-bold" style={{ color: KR }}>
-            STY {styleTransferProgress.done}/{styleTransferProgress.total}
+            {t("conti.styleProgressShort", { done: styleTransferProgress.done, total: styleTransferProgress.total })}
           </span>
         )}
         <div className="flex-1" />
@@ -3927,99 +4014,6 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             </div>
           )}
         </div>
-
-        <div
-          className="flex items-stretch h-8"
-          style={{
-            background: currentStyle ? KR_BG : "rgba(255,255,255,0.04)",
-            border: currentStyle ? `1px solid ${KR_BORDER2}` : "1px solid rgba(255,255,255,0.08)",
-            borderRadius: 0,
-          }}
-        >
-          <button
-            onClick={() => setShowStyleModal(true)}
-            className="flex items-center gap-1.5 px-3 text-[11px] font-medium tracking-wide transition-colors"
-            style={{
-              background: "transparent",
-              color: currentStyle ? KR : "rgba(255,255,255,0.35)",
-              border: "none",
-              cursor: "pointer",
-              borderRadius: 0,
-            }}
-          >
-            <Palette className="w-3.5 h-3.5" />
-            {currentStyle ? currentStyle.name : "Style"}
-          </button>
-          {currentStyle && (
-            <button
-              onClick={async (e) => {
-                e.stopPropagation();
-                // 옵티미스틱: 클라이언트 state 먼저 비움 → 즉시 칩 사라짐.
-                setCurrentStyle(null);
-                setProjectInfo((prev) => ({ ...prev, conti_style_id: null }));
-                // DB 도 같이 비워야 탭 이동 후 재로드 시 다시 적용되지 않는다.
-                // (StylePickerModal 의 handleApply(NONE) 와 동일한 영속화)
-                try {
-                  const { error } = await supabase
-                    .from("projects")
-                    .update({ conti_style_id: null })
-                    .eq("id", projectId);
-                  if (error) throw error;
-                  toast({ title: "Style removed." });
-                } catch (err: any) {
-                  toast({ title: "Style remove failed", description: err.message, variant: "destructive" });
-                }
-              }}
-              title="Clear style"
-              className="flex items-center justify-center px-1.5 transition-colors"
-              style={{
-                background: "transparent",
-                color: KR,
-                border: "none",
-                borderLeft: `1px solid ${KR_BORDER2}`,
-                cursor: "pointer",
-                borderRadius: 0,
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(249,66,58,0.18)")}
-              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-            >
-              <X className="w-3 h-3" />
-            </button>
-          )}
-        </div>
-
-        {/* ── Selection chip (only when something is checked) ──────────
-         * Selection state used to REPLACE the entire main toolbar (model
-         * picker / Generate All / Transfer / Info / Export). That meant
-         * the moment a user ticked a card they lost the ability to see or
-         * change the current generator model — making "Transfer" feel
-         * like it ignored the model selector even though it was plumbed
-         * correctly downstream (ContiTab → styleTransfer → openai-image
-         * handler). We now render the main toolbar unconditionally and
-         * only prepend/append selection-specific chips here.
-         */}
-        {selectedSceneIds.size > 0 && (
-          <>
-            <div className="w-px h-5 mx-1" style={{ background: "rgba(255,255,255,0.08)" }} />
-            <span className="text-[10px] font-mono font-medium tracking-wide" style={{ color: "#f0f0f0" }}>
-              {selectedSceneIds.size} Selected
-            </span>
-            <button
-              onClick={() => setSelectedSceneIds(new Set())}
-              className="w-6 h-6 flex items-center justify-center hover:text-foreground transition-colors"
-              style={{
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                color: "rgba(255,255,255,0.3)",
-                borderRadius: 0,
-              }}
-              title="Clear selection"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </>
-        )}
 
         {/* ── Model picker (always visible) ──────────────────────────── */}
         <div className="relative" ref={modelMenuRef}>
@@ -4077,54 +4071,89 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           )}
         </div>
 
-        {/* ── Generate All (always visible) ──────────────────────────── */}
-        <button
-          onClick={() => setShowGenerateAllModal(true)}
-          disabled={generatingAll || activeScenes.length === 0}
-          className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-opacity disabled:opacity-40"
-          style={{ background: KR, border: "none", cursor: "pointer", borderRadius: 0 }}
+        <div
+          className="flex items-stretch h-8"
+          style={{
+            background: currentStyle ? KR_BG : "rgba(255,255,255,0.04)",
+            border: currentStyle ? `1px solid ${KR_BORDER2}` : "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 0,
+          }}
         >
-          {generatingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-          Generate All
-        </button>
-
-        {/* ── Transfer (always visible when a style is picked and there's
-         * at least one scene to apply it to) ────────────────────────────
-         * Used to only appear under `selectedSceneIds.size > 0`, which
-         * hid it whenever no card was checked. The StyleTransferConfirmModal
-         * already offers both "Transfer All (N)" and "Selected (M)"
-         * buttons based on the `selectedCount` prop, so this button can
-         * legitimately drive the whole UX from the always-visible state.
-         */}
-        {currentStyle && transferableSceneCount > 0 && (
           <button
-            onClick={() => setShowStyleTransferModal(true)}
-            disabled={styleTransferring || generatingAll}
-            className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-opacity disabled:opacity-40"
-            style={{ background: KR, border: "none", cursor: "pointer", borderRadius: 0 }}
+            onClick={() => setShowStyleModal(true)}
+            className="flex items-center gap-1.5 px-3 text-[11px] font-medium tracking-wide transition-colors"
+            style={{
+              background: "transparent",
+              color: currentStyle ? KR : "rgba(255,255,255,0.35)",
+              border: "none",
+              cursor: "pointer",
+              borderRadius: 0,
+            }}
           >
-            {styleTransferring ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Wand2 className="w-3.5 h-3.5" />
-            )}
-            Transfer
+            <Palette className="w-3.5 h-3.5" />
+            {currentStyle ? currentStyle.name : t("projectModal.style")}
           </button>
-        )}
+          {currentStyle && (
+            <button
+              onClick={async (e) => {
+                e.stopPropagation();
+                // 옵티미스틱: 클라이언트 state 먼저 비움 → 즉시 칩 사라짐.
+                setCurrentStyle(null);
+                setProjectInfo((prev) => ({ ...prev, conti_style_id: null }));
+                // DB 도 같이 비워야 탭 이동 후 재로드 시 다시 적용되지 않는다.
+                // (StylePickerModal 의 handleApply(NONE) 와 동일한 영속화)
+                try {
+                  const { error } = await supabase
+                    .from("projects")
+                    .update({ conti_style_id: null })
+                    .eq("id", projectId);
+                  if (error) throw error;
+                  toast({ title: t("conti.styleRemoved") });
+                } catch (err: any) {
+                  toast({ title: t("conti.styleChangeFailed"), description: err.message, variant: "destructive" });
+                }
+              }}
+              title={t("conti.clearStyle")}
+              className="flex items-center justify-center px-1.5 transition-colors"
+              style={{
+                background: "transparent",
+                color: KR,
+                border: "none",
+                borderLeft: `1px solid ${KR_BORDER2}`,
+                cursor: "pointer",
+                borderRadius: 0,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(249,66,58,0.18)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+          {currentStyle && transferableSceneCount > 0 && (
+            <button
+              onClick={() => setShowStyleTransferModal(true)}
+              disabled={styleTransferring || generatingAll}
+              className="flex items-center gap-1.5 px-3 text-[11px] font-medium tracking-wide transition-opacity disabled:opacity-40"
+              style={{
+                background: "rgba(249,66,58,0.14)",
+                color: KR,
+                border: "none",
+                borderLeft: `1px solid ${KR_BORDER2}`,
+                cursor: "pointer",
+                borderRadius: 0,
+              }}
+            >
+              {styleTransferring ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <ArrowRightLeft className="w-3.5 h-3.5" />
+              )}
+              {t("conti.transfer")}
+            </button>
+          )}
+        </div>
 
-        {/* ── Delete (only when selection > 0) ───────────────────────── */}
-        {selectedSceneIds.size > 0 && (
-          <button
-            onClick={bulkDeleteScenes}
-            className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-colors"
-            style={{ background: "#dc2626", border: "none", cursor: "pointer", borderRadius: 0 }}
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            Delete ({selectedSceneIds.size})
-          </button>
-        )}
-
-        {/* ── Info / Export / New (always visible) ───────────────────── */}
+        {/* ── Info / Generate / Export / New (always visible) ────────── */}
         <button
           onClick={() => setShowInfo((p) => !p)}
           className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide transition-colors"
@@ -4137,7 +4166,17 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           }}
         >
           {showInfo ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-          Info
+          {t("conti.info")}
+        </button>
+
+        <button
+          onClick={() => setShowGenerateAllModal(true)}
+          disabled={generatingAll || activeScenes.length === 0}
+          className="flex items-center gap-1.5 px-3 h-8 text-[11px] font-medium tracking-wide text-white transition-opacity disabled:opacity-40"
+          style={{ background: KR, border: "none", cursor: "pointer", borderRadius: 0 }}
+        >
+          {generatingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+          {t("conti.generateAll")}
         </button>
 
         <button
@@ -4153,7 +4192,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           }}
         >
           {isExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-          Export
+          {t("conti.export")}
         </button>
 
         {versions.length === 0 && activeScenes.length > 0 && (
@@ -4169,10 +4208,53 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             }}
           >
             <Plus className="w-3.5 h-3.5" />
-            New
+            {t("conti.new")}
           </button>
         )}
       </div>
+
+      {selectedSceneIds.size > 0 && (
+        <div
+          className="flex items-center gap-2 px-3 py-1.5 shrink-0"
+          style={{
+            background: KR_BG,
+            borderBottom: `0.5px solid ${KR_BORDER2}`,
+          }}
+        >
+          <Check className="w-3.5 h-3.5" style={{ color: KR }} />
+          <span className="text-[12px] font-medium tracking-wide" style={{ color: KR }}>
+            {t("conti.selected", { count: selectedSceneIds.size })}
+          </span>
+          <button
+            onClick={() => setSelectedSceneIds(new Set())}
+            className="h-7 px-2.5 text-[11px] font-medium transition-colors"
+            style={{
+              background: "transparent",
+              color: "hsl(var(--muted-foreground))",
+              border: "0.5px solid hsl(var(--border))",
+              cursor: "pointer",
+              borderRadius: 0,
+            }}
+          >
+            {t("conti.clearSelection")}
+          </button>
+          <div className="flex-1" />
+          <button
+            onClick={bulkDeleteScenes}
+            className="h-7 px-3 inline-flex items-center gap-1.5 text-[11px] font-medium transition-colors"
+            style={{
+              background: "rgba(220,38,38,0.08)",
+              color: "#dc2626",
+              border: "0.5px solid rgba(220,38,38,0.45)",
+              cursor: "pointer",
+              borderRadius: 0,
+            }}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            {t("common.delete")} ({selectedSceneIds.size})
+          </button>
+        </div>
+      )}
 
       {versions.length === 0 && activeScenes.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
@@ -4196,10 +4278,10 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           >
             <Plus className="w-8 h-8" style={{ color: "rgba(255,255,255,0.3)" }} />
             <span className="text-[13px] font-medium" style={{ color: "rgba(255,255,255,0.4)" }}>
-              New Version
+              {t("conti.newVersion")}
             </span>
             <span className="text-[11px]" style={{ color: "rgba(255,255,255,0.2)" }}>
-              Create scene or start new version
+              {t("conti.emptyHint")}
             </span>
           </button>
         </div>
@@ -4684,14 +4766,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         <Dialog open onOpenChange={(o) => !o && setDeleteVersionTarget(null)}>
           <DialogContent className="max-w-[360px] bg-card border-border" style={{ borderRadius: 0 }}>
             <DialogHeader>
-              <DialogTitle className="text-[15px] font-semibold">Delete Version</DialogTitle>
+              <DialogTitle className="text-[15px] font-semibold">{t("conti.deleteVersion")}</DialogTitle>
             </DialogHeader>
             <p className="text-[13px] text-muted-foreground">
-              Are you sure you want to delete "{deleteVersionTarget.name}"? This action cannot be undone.
+              {t("conti.deleteVersionDesc", { name: deleteVersionTarget.name })}
             </p>
             <DialogFooter className="gap-2">
               <Button variant="ghost" className="text-[13px] h-9" onClick={() => setDeleteVersionTarget(null)}>
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button
                 className="text-white text-[13px] h-9"
@@ -4701,7 +4783,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                   setDeleteVersionTarget(null);
                 }}
               >
-                Delete
+                {t("common.delete")}
               </Button>
             </DialogFooter>
           </DialogContent>

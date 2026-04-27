@@ -31,6 +31,7 @@ import { useMemo, useRef, useState, useEffect } from "react";
 import { ChevronDown, ChevronUp, Lightbulb, X, Palette as PaletteIcon } from "lucide-react";
 import type { Scene } from "./contiTypes";
 import { IMAGE_SIZE_MAP } from "@/lib/conti";
+import { useT, useUiLanguage, type UiLanguage } from "@/lib/uiLanguage";
 
 type VideoFormat = keyof typeof IMAGE_SIZE_MAP;
 
@@ -366,6 +367,36 @@ const QUICK_PRESETS: QuickPreset[] = [
   },
 ];
 
+const RELIGHT_PRESET_LABEL_KO: Record<string, string> = {
+  golden_hour: "골든아워",
+  blue_hour: "블루아워",
+  neon_night: "네온 나이트",
+  backlit_rim: "역광 림라이트",
+  softbox: "스튜디오 소프트박스",
+  moonlight: "달빛",
+};
+
+const COLOR_SWATCH_LABEL_KO: Record<string, string> = {
+  candle: "촛불 1900K",
+  tungsten: "텅스텐 2800K",
+  halogen: "할로겐 3200K",
+  golden: "골든아워",
+  daylight: "주광 5600K",
+  overcast: "흐린 날 6500K",
+  shade: "블루아워 8000K",
+  moonlight: "달빛",
+  neon_pink: "네온 핑크",
+  neon_cyan: "네온 시안",
+  neon_violet: "네온 바이올렛",
+  lime: "애시드 그린",
+};
+
+const getRelightPresetLabel = (preset: QuickPreset, language: UiLanguage) =>
+  language === "ko" ? (RELIGHT_PRESET_LABEL_KO[preset.id] ?? preset.label) : preset.label;
+
+const getColorSwatchLabel = (swatch: ColorSwatch, language: UiLanguage) =>
+  language === "ko" ? (COLOR_SWATCH_LABEL_KO[swatch.id] ?? swatch.label) : swatch.label;
+
 /* ━━━ Polar Pad ━━━
  * PAD_SIZE 는 SVG 외곽 크기(방위 라벨까지 포함한 여유 공간).
  * PAD_RADIUS 는 실제 드래그 가능한 원의 반지름. 라벨이 잘리지 않도록 충분한 여백을 둔다. */
@@ -377,9 +408,13 @@ interface PolarPadProps {
   elevation: number;
   onChange: (next: { azimuth: number; elevation: number }) => void;
   disabled?: boolean;
+  labels: {
+    back: string;
+    front: string;
+  };
 }
 
-const PolarPad = ({ azimuth, elevation, onChange, disabled }: PolarPadProps) => {
+const PolarPad = ({ azimuth, elevation, onChange, disabled, labels }: PolarPadProps) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const draggingRef = useRef(false);
 
@@ -498,7 +533,7 @@ const PolarPad = ({ azimuth, elevation, onChange, disabled }: PolarPadProps) => 
         fontSize={9}
         style={labelStyle}
       >
-        Back
+        {labels.back}
       </text>
       <text
         x={cx + PAD_RADIUS + 6}
@@ -518,7 +553,7 @@ const PolarPad = ({ azimuth, elevation, onChange, disabled }: PolarPadProps) => 
         fontSize={9}
         style={labelStyle}
       >
-        Front
+        {labels.front}
       </text>
       <text
         x={cx - PAD_RADIUS - 6}
@@ -531,7 +566,7 @@ const PolarPad = ({ azimuth, elevation, onChange, disabled }: PolarPadProps) => 
         L
       </text>
       {/* draggable dot */}
-      <circle cx={cx + dotX} cy={cy + dotY} r={6} fill="#f9423a" stroke="#fff" strokeWidth={1.5} />
+      <circle cx={cx + dotX} cy={cy + dotY} r={6} fill="hsl(var(--primary))" stroke="#fff" strokeWidth={1.5} />
     </svg>
   );
 };
@@ -582,7 +617,7 @@ const LabeledSlider = ({
       value={value}
       onChange={(e) => onChange(Number(e.target.value))}
       disabled={disabled}
-      style={{ width: "100%", accentColor: "#f9423a", cursor: disabled ? "default" : "pointer" }}
+      style={{ width: "100%", accentColor: "hsl(var(--primary))", cursor: disabled ? "default" : "pointer" }}
     />
   </div>
 );
@@ -678,15 +713,15 @@ const BACKDROP_STYLE: React.CSSProperties = {
   position: "fixed",
   inset: 0,
   zIndex: 100,
-  background: "rgba(0,0,0,0.65)",
+  background: "rgba(0,0,0,0.78)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   padding: 24,
 };
 const PANEL_STYLE: React.CSSProperties = {
-  background: "#121212",
-  border: "1px solid rgba(255,255,255,0.08)",
+  background: "hsl(var(--card))",
+  border: "1px solid hsl(var(--border-subtle))",
   width: "min(960px, 100%)",
   maxHeight: "min(92vh, 780px)",
   display: "grid",
@@ -695,6 +730,8 @@ const PANEL_STYLE: React.CSSProperties = {
 };
 
 export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit }: RelightModalProps) {
+  const t = useT();
+  const { language } = useUiLanguage();
   const sourceUrl = scene.conti_image_url;
   const [cfg, setCfg] = useState<RelightConfig>(DEFAULT_CONFIG);
   /** With generation hoisted to the parent, the modal no longer carries
@@ -710,6 +747,10 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
   const applying = false;
 
   const prompt = useMemo(() => buildRelightPrompt(cfg), [cfg]);
+  const selectedSwatch = COLOR_SWATCHES.find((sw) => cfg.colorLabel === sw.descriptor);
+  const lightColorMeta = selectedSwatch
+    ? getColorSwatchLabel(selectedSwatch, language)
+    : t("variant.customHex", { hex: cfg.colorHex.toUpperCase() });
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -734,7 +775,7 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
 
   const handleApply = () => {
     if (!sourceUrl) {
-      setError("No source image for this scene.");
+      setError(t("variant.noSourceImage"));
       return;
     }
     const body: Record<string, unknown> = {
@@ -760,7 +801,7 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
     return (
       <div style={BACKDROP_STYLE} onClick={onClose}>
         <div style={{ ...PANEL_STYLE, gridTemplateColumns: "1fr", padding: 24 }} onClick={(e) => e.stopPropagation()}>
-          <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>No source image for this scene.</div>
+          <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>{t("variant.noSourceImage")}</div>
         </div>
       </div>
     );
@@ -811,14 +852,14 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
                 letterSpacing: 0.1,
               }}
             >
-              Relight
+              {t("conti.relight")}
             </div>
             <button
               onClick={onClose}
               disabled={applying}
               className="text-white/60 hover:text-white/90 disabled:opacity-40"
               style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}
-              title="Close (Esc)"
+              title={t("variant.closeEsc")}
             >
               <X className="w-4 h-4" />
             </button>
@@ -828,11 +869,11 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
           <div style={{ padding: "4px 20px 6px", overflow: "auto", flex: 1 }}>
             {/* Direction + sliders */}
             <Section
-              label="Direction"
+              label={t("variant.direction")}
               first
               meta={
                 <span>
-                  Az {Math.round(cfg.azimuth)}° <span style={{ opacity: 0.35, margin: "0 4px" }}>·</span> Elev{" "}
+                  {t("variant.azimuth")} {Math.round(cfg.azimuth)}° <span style={{ opacity: 0.35, margin: "0 4px" }}>·</span> {t("variant.elevation")}{" "}
                   {Math.round(cfg.elevation)}°
                 </span>
               }
@@ -850,27 +891,28 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
                   elevation={cfg.elevation}
                   onChange={({ azimuth, elevation }) => setCfg((p) => ({ ...p, azimuth, elevation }))}
                   disabled={applying}
+                  labels={{ back: t("variant.back"), front: t("variant.front") }}
                 />
                 <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
                   <LabeledSlider
-                    label="Intensity"
+                    label={t("variant.intensity")}
                     value={cfg.intensity}
                     onChange={(v) => setCfg((p) => ({ ...p, intensity: v }))}
                     disabled={applying}
                   />
                   <LabeledSlider
-                    label="Softness"
+                    label={t("variant.softness")}
                     value={cfg.softness}
                     onChange={(v) => setCfg((p) => ({ ...p, softness: v }))}
                     disabled={applying}
-                    rightLabel={cfg.softness < 40 ? "hard" : cfg.softness < 70 ? "medium" : "soft"}
+                    rightLabel={cfg.softness < 40 ? t("variant.hard") : cfg.softness < 70 ? t("variant.medium") : t("variant.soft")}
                   />
                   <LabeledSlider
-                    label="Ambient fill"
+                    label={t("variant.ambientFill")}
                     value={cfg.ambient}
                     onChange={(v) => setCfg((p) => ({ ...p, ambient: v }))}
                     disabled={applying}
-                    rightLabel={cfg.ambient < 35 ? "deep shadows" : cfg.ambient < 70 ? "balanced" : "flat"}
+                    rightLabel={cfg.ambient < 35 ? t("variant.deepShadows") : cfg.ambient < 70 ? t("variant.balanced") : t("variant.flat")}
                   />
                 </div>
               </div>
@@ -878,9 +920,9 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
 
             {/* Color */}
             <Section
-              label="Light color"
+              label={t("variant.lightColor")}
               icon={<PaletteIcon className="w-3 h-3" />}
-              meta={cfg.colorLabel ?? `Custom ${cfg.colorHex.toUpperCase()}`}
+              meta={lightColorMeta}
             >
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {COLOR_SWATCHES.map((sw) => {
@@ -890,12 +932,12 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
                       key={sw.id}
                       onClick={() => pickSwatch(sw)}
                       disabled={applying}
-                      title={sw.label}
+                      title={getColorSwatchLabel(sw, language)}
                       style={{
                         width: 24,
                         height: 24,
                         background: sw.hex,
-                        border: active ? "2px solid #f9423a" : "1px solid rgba(255,255,255,0.18)",
+                        border: active ? "2px solid hsl(var(--primary))" : "1px solid rgba(255,255,255,0.18)",
                         cursor: applying ? "default" : "pointer",
                         padding: 0,
                         boxShadow: active ? "0 0 0 2px rgba(249,66,58,0.25)" : "none",
@@ -906,14 +948,14 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
                 })}
                 {/* 자유 색상 선택 */}
                 <label
-                  title="Custom color"
+                  title={t("variant.customColor")}
                   style={{
                     width: 24,
                     height: 24,
                     background: cfg.colorLabel ? "rgba(255,255,255,0.04)" : cfg.colorHex,
                     border: cfg.colorLabel
                       ? "1px dashed rgba(255,255,255,0.35)"
-                      : "2px solid #f9423a",
+                      : "2px solid hsl(var(--primary))",
                     cursor: applying ? "default" : "pointer",
                     display: "inline-flex",
                     alignItems: "center",
@@ -945,7 +987,7 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
             </Section>
 
             {/* Quick presets */}
-            <Section label="Quick preset" meta="Overwrites controls">
+            <Section label={t("variant.quickPreset")} meta={t("variant.overwritesControls")}>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {QUICK_PRESETS.map((p) => (
                   <button
@@ -963,20 +1005,20 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
                       transition: "background 120ms ease",
                     }}
                   >
-                    {p.label}
+                    {getRelightPresetLabel(p, language)}
                   </button>
                 ))}
               </div>
             </Section>
 
             {/* Additional notes */}
-            <Section label="Additional notes" meta="Optional">
+            <Section label={t("variant.additionalNotes")} meta={t("variant.optional")}>
               <textarea
                 value={cfg.customText}
                 onChange={(e) => setCfg((p) => ({ ...p, customText: e.target.value }))}
                 disabled={applying}
                 rows={2}
-                placeholder="e.g. practical lamps visible in background, subtle haze, film grain..."
+                placeholder={t("variant.relightNotesPlaceholder")}
                 style={{
                   width: "100%",
                   padding: "8px 10px",
@@ -1008,7 +1050,7 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
                 }}
               >
                 {showPrompt ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                {showPrompt ? "Hide" : "Show"} generated prompt
+                {showPrompt ? t("variant.hideGeneratedPrompt") : t("variant.showGeneratedPrompt")}
               </button>
               {showPrompt && (
                 <pre
@@ -1072,14 +1114,14 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
                 fontWeight: 500,
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               onClick={handleApply}
               disabled={applying}
               style={{
                 padding: "7px 16px",
-                background: "#f9423a",
+                background: "hsl(var(--primary))",
                 border: "none",
                 color: "#fff",
                 cursor: applying ? "default" : "pointer",
@@ -1093,7 +1135,7 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
                 opacity: applying ? 0.6 : 1,
               }}
             >
-              Apply
+              {t("conti.apply")}
             </button>
           </div>
         </div>

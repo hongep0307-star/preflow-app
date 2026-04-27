@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { ZoomIn, ZoomOut, RotateCcw, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { Scene } from "./contiTypes";
+import { useT } from "@/lib/uiLanguage";
 
 export interface CropState {
   x: number;
@@ -25,6 +26,7 @@ const KR = "#F9423A";
 const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 
 export const SceneImageCropModal = ({ scene, onClose, onSaved }: Props) => {
+  const t = useT();
   const initial = (scene.conti_image_crop as CropState | null) ?? { x: 50, y: 50, scale: 1 };
   const [crop, setCrop] = useState<CropState>(initial);
   const dragging = useRef(false);
@@ -105,7 +107,7 @@ export const SceneImageCropModal = ({ scene, onClose, onSaved }: Props) => {
       >
         {/* Header */}
         <div className="flex items-center justify-between">
-          <span className="text-sm font-semibold text-foreground">Adjust Image</span>
+          <span className="text-sm font-semibold text-foreground">{t("conti.adjustImage")}</span>
           <button onClick={onClose} className="p-1 hover:bg-white/10 transition-colors">
             <X className="w-4 h-4 text-muted-foreground" />
           </button>
@@ -164,7 +166,7 @@ export const SceneImageCropModal = ({ scene, onClose, onSaved }: Props) => {
 
           <div className="w-px h-4 bg-white/10" />
 
-          <button onClick={reset} className="p-1.5 hover:bg-white/10 transition-colors" title="Reset">
+          <button onClick={reset} className="p-1.5 hover:bg-white/10 transition-colors" title={t("conti.reset")}>
             <RotateCcw className="w-4 h-4 text-muted-foreground" />
           </button>
         </div>
@@ -175,7 +177,7 @@ export const SceneImageCropModal = ({ scene, onClose, onSaved }: Props) => {
             onClick={onClose}
             className="px-4 h-8 text-xs font-medium text-muted-foreground hover:bg-white/5 border border-white/10 transition-colors"
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             onClick={handleApply}
@@ -183,7 +185,7 @@ export const SceneImageCropModal = ({ scene, onClose, onSaved }: Props) => {
             className="px-4 h-8 text-xs font-medium text-white hover:opacity-90 transition-colors disabled:opacity-50"
             style={{ background: KR }}
           >
-            {saving ? "Saving..." : "Apply"}
+            {saving ? t("common.saving") : t("conti.apply")}
           </button>
         </div>
       </div>

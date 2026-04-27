@@ -78,6 +78,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { useT } from "@/lib/uiLanguage";
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -2748,6 +2749,7 @@ const LangToggle = ({
 /* ━━━━━ Main Component ━━━━━ */
 export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props) => {
   const { toast } = useToast();
+  const t = useT();
   const isMobile = useIsMobile();
 
   const getInitialDraft = useCallback((): DraftState => {
@@ -3602,7 +3604,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
         <textarea
           value={briefText}
           onChange={(e) => setBriefText(e.target.value.slice(0, 5000))}
-          placeholder="Enter your brief — production goals, target audience, key message, references, etc."
+          placeholder={t("brief.briefPlaceholder")}
           className={`w-full border-none outline-none resize-none text-[12px] font-[inherit] text-foreground bg-transparent px-3 pt-3 pb-2 leading-relaxed placeholder:text-muted-foreground/40 ${isCollapsedMode ? "h-[100px]" : "h-[140px]"}`}
         />
         <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-border bg-input">
@@ -3610,14 +3612,14 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             <path d="M3 10l3-3 3 3M9 7l3-3 3 3" />
             <path d="M1 13h14" />
           </svg>
-          <span className="font-mono text-[10px] text-muted-foreground/40">IMG · PDF DROP</span>
+          <span className="font-mono text-[10px] text-muted-foreground/40">{t("brief.attachHint")}</span>
           <span className="ml-auto font-mono text-[10px] text-muted-foreground/30">{briefText.length} / 5000</span>
         </div>
       </div>
 
       {briefImages.length > 0 && (
         <div className="border border-border p-2" style={{ borderRadius: 0 }}>
-          <p className="label-meta text-muted-foreground mb-1.5">BRIEF_IMAGES</p>
+          <p className="label-meta text-muted-foreground mb-1.5">{t("brief.briefImages")}</p>
           <div className="flex gap-2 flex-wrap">
             {briefImages.map((img, i) => (
               <div key={i} className="relative group">
@@ -3641,7 +3643,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                 className="h-[56px] w-[56px] border border-dashed border-border flex flex-col items-center justify-center gap-0.5"
                 style={{ borderRadius: 0 }}
               >
-                <span className="font-mono text-[9px] text-muted-foreground/30">+DROP</span>
+                <span className="font-mono text-[9px] text-muted-foreground/30">{t("brief.drop")}</span>
               </div>
             )}
           </div>
@@ -3679,9 +3681,9 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
           style={{ borderRadius: 0, background: "rgba(249,66,58,0.06)", borderColor: "rgba(249,66,58,0.2)" }}
         >
           <AlertCircle className="w-4 h-4 text-primary shrink-0" />
-          <p className="font-mono text-[10px] text-primary flex-1">PDF_EXTRACT_FAILED — SCAN IMG NOT SUPPORTED</p>
+          <p className="font-mono text-[10px] text-primary flex-1">{t("brief.pdfExtractFailed")}</p>
           <button onClick={resetPdf} className="text-[11px] text-primary underline shrink-0">
-            닫기
+            {t("common.close")}
           </button>
         </div>
       )}
@@ -3693,8 +3695,8 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       ? "image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm"
       : "image/jpeg,image/png,image/webp";
     const dropHintLabel = supportsVideoFrames
-      ? "DRAG OR CLICK · IMG / VIDEO · MAX 8"
-      : "DRAG OR CLICK · IMG ONLY · MAX 8";
+      ? t("brief.refDropVideo")
+      : t("brief.refDropImageOnly");
     const slotsLeft = REF_TOTAL_LIMIT - refItems.length;
 
     const renderTile = (item: RefItem) => {
@@ -3738,7 +3740,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             />
             {ignored && (
               <span className="absolute bottom-0 left-0 right-0 text-center font-mono text-[8px] text-white bg-black/60">
-                IGNORED
+                {t("brief.ignored")}
               </span>
             )}
             {overlayControls}
@@ -3777,7 +3779,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
               <span className="absolute top-0 left-0 px-1 py-[1px] font-mono text-[8px] text-white bg-red-600/90">YT</span>
               {ignored && (
                 <span className="absolute bottom-0 left-0 right-0 text-center font-mono text-[8px] text-white bg-black/60">
-                  IGNORED
+                  {t("brief.ignored")}
                 </span>
               )}
             </a>
@@ -3814,7 +3816,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             <span className="absolute top-0 left-0 px-1 py-[1px] font-mono text-[8px] text-white bg-blue-600/90">VID</span>
             {ignored && (
               <span className="absolute bottom-0 left-0 right-0 text-center font-mono text-[8px] text-white bg-black/60">
-                IGNORED
+                {t("brief.ignored")}
               </span>
             )}
           </div>
@@ -3864,7 +3866,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                   }
                 }
               }}
-              placeholder="Paste YouTube URL & press Enter"
+              placeholder={t("brief.youtubePlaceholder")}
               className="flex-1 min-w-0 bg-transparent border-none outline-none text-[11px] text-foreground placeholder:text-muted-foreground/30"
             />
             {refUrlInput.trim() && (
@@ -3877,7 +3879,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                 }}
                 className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
               >
-                ADD
+                {t("brief.add")}
               </button>
             )}
           </div>
@@ -3885,14 +3887,14 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
           <div
             className="flex items-center gap-1.5 px-2 py-1 mb-2 border border-dashed overflow-hidden"
             style={{ borderRadius: 0, borderColor: "rgba(255,255,255,0.07)" }}
-            title="Switch to GPT-5.x in the header to enable links & video uploads"
+            title={t("brief.imageOnlyModeTitle")}
           >
             <EyeOff className="w-3 h-3 text-muted-foreground/30 shrink-0" />
             {/* 컨테이너가 좁으면 2줄로 깨지던 문구. whitespace-nowrap + truncate
              *  로 항상 한 줄에 유지하고, 폭이 부족하면 말줄임표로 축약.
              *  원문 title 로 전체 문구는 hover 툴팁에서 읽을 수 있음. */}
             <span className="font-mono text-[10px] text-muted-foreground/40 whitespace-nowrap truncate min-w-0">
-              IMG-ONLY MODE · CHANGE MODEL FOR LINK / VIDEO
+              {t("brief.imageOnlyMode")}
             </span>
           </div>
         )}
@@ -3947,7 +3949,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                   onClick={() => refFileInputRef.current?.click()}
                   className="h-[54px] w-[54px] border border-dashed border-border hover:border-primary/40 flex flex-col items-center justify-center gap-0.5 transition-colors"
                   style={{ borderRadius: 0 }}
-                  title="Add more references"
+                  title={t("brief.addMoreReferences")}
                 >
                   <Plus className="w-3.5 h-3.5 text-muted-foreground/30" />
                 </button>
@@ -3955,7 +3957,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             </div>
             {refCounts.ignored > 0 && (
               <p className="font-mono text-[9px] text-muted-foreground/50 mt-1.5">
-                {refCounts.ignored} ITEM(S) IGNORED — UNSUPPORTED BY CURRENT MODEL
+                {t("brief.ignoredByModel", { count: refCounts.ignored })}
               </p>
             )}
           </div>
@@ -3972,7 +3974,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       <textarea
         value={ideaNote}
         onChange={(e) => setIdeaNote(e.target.value.slice(0, 2000))}
-        placeholder="Scenes, moods, and references — feel free to share."
+        placeholder={t("brief.ideaPlaceholder")}
         className="w-full h-[60px] border-none outline-none resize-none text-[11px] font-[inherit] text-foreground bg-transparent px-3 py-2 leading-relaxed placeholder:text-muted-foreground/30"
       />
     </div>
@@ -4002,7 +4004,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
            *  min-w-0 + truncate 로 필요하면 줄여서 토글 잘림을 방지. */}
           <div className="px-4 pt-4 pb-3 border-b border-border flex items-center gap-2">
             <h2 className="text-[13px] font-bold tracking-wider text-foreground min-w-0 truncate">
-              Creative Input
+              {t("brief.creativeInput")}
             </h2>
             <div className="flex items-center gap-2 min-w-0 flex-1 justify-end">
               <div className="min-w-0 flex-shrink">
@@ -4024,13 +4026,13 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
           <div className="flex flex-col flex-1 px-5 pt-3 pb-4 gap-4 overflow-y-auto">
             {isCollapsedMode ? (
               <>
-                <CollapsibleSection title="Brief Text" preview={briefTextPreview}>
+                <CollapsibleSection title={t("brief.briefText")} preview={briefTextPreview}>
                   {renderBriefTextContent()}
                 </CollapsibleSection>
-                <CollapsibleSection title="Reference" preview={moodboardPreview}>
+                <CollapsibleSection title={t("brief.reference")} preview={moodboardPreview}>
                   {renderMoodboardContent()}
                 </CollapsibleSection>
-                <CollapsibleSection title="Idea Note" preview={ideaNotePreview}>
+                <CollapsibleSection title={t("brief.ideaNote")} preview={ideaNotePreview}>
                   {renderIdeaNoteContent()}
                 </CollapsibleSection>
                 <button
@@ -4040,22 +4042,22 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                   style={{ borderRadius: 0 }}
                 >
                   <RefreshCw className="w-3 h-3" />
-                  Re-analyze
+                  {t("brief.reAnalyze")}
                 </button>
               </>
             ) : (
               <>
                 <div>
-                  <p className="label-meta text-primary mb-1">Brief Text</p>
+                  <p className="label-meta text-primary mb-1">{t("brief.briefText")}</p>
                   {renderBriefTextContent()}
                 </div>
                 <div>
-                  <p className="label-meta text-primary mb-1">Reference</p>
+                  <p className="label-meta text-primary mb-1">{t("brief.reference")}</p>
                   {renderMoodboardContent()}
                 </div>
                 <div>
                   <p className="label-meta text-primary mb-1">
-                    Idea Note <span className="font-normal opacity-50">(Optional)</span>
+                    {t("brief.ideaNote")} <span className="font-normal opacity-50">({t("brief.optional")})</span>
                   </p>
                   {renderIdeaNoteContent()}
                 </div>
@@ -4074,7 +4076,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                     (e.currentTarget as HTMLElement).style.background = analyzing ? "rgba(249,66,58,0.4)" : "#f9423a";
                   }}
                 >
-                  {analyzing ? "Analyzing..." : "✦ Execute Analysis"}
+                  {analyzing ? t("brief.analyzing") : `✦ ${t("brief.executeAnalysis")}`}
                 </button>
               </>
             )}
@@ -4090,7 +4092,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
               className="flex items-center gap-2 px-4 py-3 border-b border-border shrink-0"
               style={{ background: "rgba(249,66,58,0.06)" }}
             >
-              <h2 className="text-[13px] font-bold tracking-wider text-foreground">Strategy Manifesto</h2>
+              <h2 className="text-[13px] font-bold tracking-wider text-foreground">{t("brief.strategyManifesto")}</h2>
               {showEditHint && (
                 <span
                   className="text-[10px] px-2 py-0.5 rounded-none animate-fade-in"
@@ -4176,13 +4178,13 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
               className="flex items-center gap-2 px-4 py-3 border-b border-border shrink-0"
               style={{ background: "rgba(249,66,58,0.06)" }}
             >
-              <h2 className="text-[13px] font-bold tracking-wider text-foreground">Strategy Manifesto</h2>
+              <h2 className="text-[13px] font-bold tracking-wider text-foreground">{t("brief.strategyManifesto")}</h2>
             </div>
             <div className="flex-1 overflow-y-auto bg-background/60 p-4">
               <div className="flex flex-col items-center justify-center h-full min-h-[360px]">
                 <BarChart3 className="w-8 h-8 text-muted-foreground/20 mb-3" />
-                <p className="text-[13px] font-bold tracking-wider text-muted-foreground/40">No Analysis Yet</p>
-                <p className="font-mono text-[10px] text-muted-foreground/25 mt-1">Input brief → Execute Analysis</p>
+                <p className="text-[13px] font-bold tracking-wider text-muted-foreground/40">{t("brief.noAnalysisYet")}</p>
+                <p className="font-mono text-[10px] text-muted-foreground/25 mt-1">{t("brief.inputBriefExecute")}</p>
               </div>
             </div>
           </div>
@@ -4206,7 +4208,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
-                  <span className="text-[11px] font-medium text-emerald-400">Analysis Complete</span>
+                  <span className="text-[11px] font-medium text-emerald-400">{t("brief.analysisComplete")}</span>
                   {analyzedAt && (
                     <span className="font-mono text-[10px] text-muted-foreground/50 ml-auto">
                       {formatDate(analyzedAt)}
@@ -4224,7 +4226,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                     (e.currentTarget as HTMLElement).style.background = "#f9423a";
                   }}
                 >
-                  Execute Strategy →
+                  {t("brief.executeStrategy")} →
                 </button>
                 <div className="flex items-center gap-3">
                   <button
@@ -4232,7 +4234,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                     className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <Copy className="w-3 h-3" />
-                    Copy
+                    {t("brief.copy")}
                   </button>
                   <button
                     onClick={handleAnalyze}
@@ -4240,7 +4242,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                     className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30"
                   >
                     <RefreshCw className="w-3 h-3" />
-                    Re-analyze
+                    {t("brief.reAnalyze")}
                   </button>
                 </div>
               </div>
@@ -4265,7 +4267,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
         <div className="w-[200px] shrink-0">
           <div className="bg-card/80 border border-border flex flex-col h-full" style={{ borderRadius: 0 }}>
             <div className="px-4 pt-4 pb-3 border-b border-border">
-              <h2 className="text-[13px] font-bold tracking-wider text-foreground">Next Step</h2>
+              <h2 className="text-[13px] font-bold tracking-wider text-foreground">{t("brief.nextStep")}</h2>
             </div>
             <div className="flex flex-col flex-1 px-3 pt-4 pb-4 gap-4">
               {analyzing ? (
@@ -4273,7 +4275,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
               ) : (
                 <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center">
                   <span className="font-mono text-[10px] text-muted-foreground/30 uppercase leading-relaxed">
-                    Run analysis first to proceed
+                    {t("brief.runAnalysisFirst")}
                   </span>
                 </div>
               )}

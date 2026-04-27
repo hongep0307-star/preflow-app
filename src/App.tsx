@@ -5,6 +5,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import AuroraBackground from '@/components/AuroraBackground';
+import { UiLanguageProvider } from '@/lib/uiLanguage';
 import Index from './pages/Index';
 import SettingsPage from './pages/SettingsPage';
 import DashboardPage from './pages/DashboardPage';
@@ -15,25 +16,27 @@ const queryClient = new QueryClient();
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <AuroraBackground />
-      <HashRouter>
-        <div style={{ position: "relative", zIndex: 1 }}>
-          <ErrorBoundary label="App">
-            <Routes>
-              <Route path="/" element={<Index />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route element={<ProtectedRoute />}>
-                <Route path="/dashboard" element={<DashboardPage />} />
-                <Route path="/project/:id" element={<ProjectPage />} />
-              </Route>
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </ErrorBoundary>
-        </div>
-      </HashRouter>
-    </TooltipProvider>
+    <UiLanguageProvider>
+      <TooltipProvider>
+        <Toaster />
+        <AuroraBackground />
+        <HashRouter>
+          <div style={{ position: "relative", zIndex: 1 }}>
+            <ErrorBoundary label="App">
+              <Routes>
+                <Route path="/" element={<Index />} />
+                <Route path="/settings" element={<SettingsPage />} />
+                <Route element={<ProtectedRoute />}>
+                  <Route path="/dashboard" element={<DashboardPage />} />
+                  <Route path="/project/:id" element={<ProjectPage />} />
+                </Route>
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </ErrorBoundary>
+          </div>
+        </HashRouter>
+      </TooltipProvider>
+    </UiLanguageProvider>
   </QueryClientProvider>
 );
 

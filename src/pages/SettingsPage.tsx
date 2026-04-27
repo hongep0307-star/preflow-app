@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Loader2, ArrowLeft, Check, Key } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -16,6 +16,15 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { LOCAL_SERVER_BASE_URL } from "@shared/constants";
 import ModelPicker from "@/components/common/ModelPicker";
 import { invalidateSettingsCache } from "@/lib/settingsCache";
+import { BrandLogo } from "@/components/common/BrandLogo";
+import { MetaPill, SectionLabel } from "@/components/common/ui-primitives";
+import { useUiLanguage, type UiLanguage } from "@/lib/uiLanguage";
+import {
+  DASHBOARD_CARDS_PER_ROW_OPTIONS,
+  readDashboardCardsPerRow,
+  saveDashboardCardsPerRow,
+  type DashboardCardsPerRow,
+} from "@/lib/dashboardPreferences";
 
 const settingsApi = {
   get: async () => {
@@ -32,21 +41,6 @@ const settingsApi = {
   },
 };
 
-const KR = "#f9423a";
-
-const FilmIconHero = () => (
-  <div className="relative w-12 h-[38px] mx-auto">
-    <div className="absolute bottom-0 right-0 w-[30px] h-[22px] rounded-[3px] border-2 border-white/10 bg-[#1a1a1a]" />
-    <div className="absolute bottom-[5px] right-[5px] w-[32px] h-[24px] rounded-[3px] border-2 border-[#5a2a2a] bg-[#1c1010]" />
-    <div className="absolute bottom-[10px] right-[9px] w-[34px] h-[26px] rounded-[3px] border-2 border-[#f9423a] bg-[#1f0f0f]">
-      <span className="absolute left-[3px] top-[28%] w-[4px] h-[4px] bg-[#f9423a] rounded-[1px]" />
-      <span className="absolute left-[3px] top-[58%] w-[4px] h-[4px] bg-[#f9423a] rounded-[1px]" />
-      <span className="absolute right-[3px] top-[28%] w-[4px] h-[4px] bg-[#f9423a] rounded-[1px]" />
-      <span className="absolute right-[3px] top-[58%] w-[4px] h-[4px] bg-[#f9423a] rounded-[1px]" />
-    </div>
-  </div>
-);
-
 interface SettingsState {
   anthropic_api_key: string;
   openai_api_key: string;
@@ -58,10 +52,9 @@ interface SettingsState {
 // flag is dead — we don't read or write it here anymore. Stored values in
 // existing user DBs are simply ignored by the new code path.
 
-const UI_LANG_KEY = "ff_ui_lang";
-
 const SettingsPage = () => {
   const navigate = useNavigate();
+  const { language, setLanguage, t } = useUiLanguage();
   const [settings, setSettings] = useState<SettingsState>({
     anthropic_api_key: "",
     openai_api_key: "",
@@ -71,10 +64,8 @@ const SettingsPage = () => {
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [uiLang, setUiLang] = useState<string>(() => {
-    if (typeof window === "undefined") return "ko";
-    return window.localStorage.getItem(UI_LANG_KEY) ?? "ko";
-  });
+  const [dashboardCardsPerRow, setDashboardCardsPerRow] =
+    useState<DashboardCardsPerRow>(readDashboardCardsPerRow);
 
   useEffect(() => {
     settingsApi.get().then((s: any) => {
@@ -100,17 +91,15 @@ const SettingsPage = () => {
 
   const toggle = (key: string) => setShowKeys(p => ({ ...p, [key]: !p[key] }));
 
-  const handleUiLangChange = useCallback((value: string) => {
-    setUiLang(value);
-    try {
-      window.localStorage.setItem(UI_LANG_KEY, value);
-    } catch {
-      /* ignore */
-    }
-  }, []);
+  const handleDashboardCardsPerRowChange = (value: string) => {
+    const next = Number(value) as DashboardCardsPerRow;
+    if (!DASHBOARD_CARDS_PER_ROW_OPTIONS.includes(next)) return;
+    setDashboardCardsPerRow(next);
+    saveDashboardCardsPerRow(next);
+  };
 
   const inputCls =
-    "h-9 bg-white/[0.05] border-white/[0.12] text-[12px] text-white/80 placeholder:text-white/25 focus-visible:ring-0 focus-visible:border-white/25 rounded-none font-mono";
+    "h-9 bg-surface-panel border-border-subtle text-[12px] text-foreground/80 placeholder:text-muted-foreground focus-visible:ring-0 focus-visible:border-primary/30 rounded-none font-mono";
 
   const keyWarning = (key: keyof SettingsState, value: string): string | null => {
     if (!value || value.length < 5) return null;
@@ -134,8 +123,7 @@ const SettingsPage = () => {
   // Cards live inside tab panels now — the panel itself doesn't need
   // an outer max-width because the parent tab container caps it. Keeping
   // the flat / rounded-none brand styling.
-  const cardCls = "w-full bg-white/[0.04] border border-white/[0.1] rounded-none p-6 space-y-5";
-  const sectionLabelCls = "text-[10px] font-mono uppercase tracking-[0.2em] text-white/35 mb-3 block";
+  const cardCls = "surface-panel w-full rounded-none p-6 space-y-5";
 
   // Container width — shared by tab list, tab panels, and action bar so
   // they line up vertically with the same gutter.
@@ -146,30 +134,60 @@ const SettingsPage = () => {
   // mono uppercase aesthetic. Matches the same visual language as
   // ContiTab / AgentTab tab strips.
   const tabsListCls =
-    "w-full grid grid-cols-2 h-9 p-0 bg-transparent rounded-none border-b border-white/[0.08]";
+    "w-full grid grid-cols-2 h-9 p-0 bg-transparent rounded-none border-b border-border-subtle";
   const tabTriggerCls =
     "h-9 rounded-none bg-transparent text-[11px] font-mono font-bold tracking-[0.2em] uppercase " +
-    "text-white/35 hover:text-white/60 " +
-    "data-[state=active]:bg-transparent data-[state=active]:text-white " +
+    "text-muted-foreground hover:text-text-secondary " +
+    "data-[state=active]:bg-transparent data-[state=active]:text-foreground " +
     "data-[state=active]:shadow-none " +
-    "data-[state=active]:border-b-2 data-[state=active]:border-[#f9423a] " +
+    "data-[state=active]:border-b-2 data-[state=active]:border-primary " +
     "transition-colors";
 
   return (
-    <div className="min-h-screen bg-[#0e0e0e] flex flex-col">
-      <div className="flex-1 flex flex-col items-center py-12 px-4 gap-6 overflow-y-auto">
-        <div className="flex flex-col items-center gap-4">
-          <FilmIconHero />
-          <div className="text-center">
-            <div className="text-[32px] font-extrabold tracking-tight leading-none select-none">
-              <span className="text-white">Pre</span>
-              <span style={{ color: KR }}>-Flow</span>
-            </div>
-            <p className="mt-2 font-mono text-[10px] tracking-[0.2em] text-white/25 uppercase">
-              Settings
-            </p>
-          </div>
+    <div className="min-h-screen bg-background flex flex-col">
+      <nav className="app-topbar justify-between px-8">
+        <button
+          onClick={() => navigate("/dashboard")}
+          className="flex items-center pr-8 border-r border-border-subtle hover:opacity-80 transition-opacity"
+        >
+          <BrandLogo />
+        </button>
+        <div className="flex items-baseline gap-3 min-w-0 flex-1 px-8">
+          <span className="text-[15px] font-bold text-foreground">{t("settings.title")}</span>
+          <MetaPill className="h-[20px] px-1.5 text-[9px] tracking-widest">{t("common.localMode")}</MetaPill>
         </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => navigate("/dashboard")}
+            className="h-9 text-[12px] font-bold tracking-wider bg-transparent border-border-subtle text-muted-foreground hover:text-foreground hover:border-primary/30 hover:bg-transparent gap-1.5 rounded-none"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            {t("common.dashboard")}
+          </Button>
+          <Button
+            onClick={handleSave}
+            disabled={loading}
+            className="h-9 min-w-[148px] text-[12px] font-bold tracking-wider rounded-none border-0 gap-1.5 bg-primary hover:bg-primary/85"
+          >
+            {loading ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : saved ? (
+              <>
+                <Check className="w-3.5 h-3.5" />
+                {t("common.saved")}
+              </>
+            ) : (
+              <>
+                <Key className="w-3.5 h-3.5" />
+                {t("settings.saveSettings")}
+              </>
+            )}
+          </Button>
+        </div>
+      </nav>
+
+      <div className="flex-1 flex flex-col items-center py-10 px-4 gap-6 overflow-y-auto">
 
         {/* ── Tabbed body ─────────────────────────────────────────────
               · "API Keys" — provider credentials only (high-frequency
@@ -180,27 +198,26 @@ const SettingsPage = () => {
             ──────────────────────────────────────────────────────────── */}
         <Tabs defaultValue="keys" className={colCls}>
           <TabsList className={tabsListCls}>
-            <TabsTrigger value="keys" className={tabTriggerCls}>API Keys</TabsTrigger>
-            <TabsTrigger value="models" className={tabTriggerCls}>Models &amp; Preferences</TabsTrigger>
+            <TabsTrigger value="keys" className={tabTriggerCls}>{t("settings.apiKeys")}</TabsTrigger>
+            <TabsTrigger value="models" className={tabTriggerCls}>{t("settings.modelsPrefs")}</TabsTrigger>
           </TabsList>
 
           {/* ── Tab 1: API Keys ───────────────────────────────────── */}
           <TabsContent value="keys" className="mt-5 space-y-6">
             <div className={cardCls}>
-              <span className={sectionLabelCls}>API Keys</span>
+              <SectionLabel>{t("settings.apiKeys")}</SectionLabel>
               {fields.map(f => {
                 const warning = keyWarning(f.key, settings[f.key]);
                 return (
                 <div key={f.key} className="space-y-1.5">
                   <div className="flex items-center gap-2">
-                    <Label className="text-[11px] text-white/60 font-bold tracking-wider uppercase">{f.label}</Label>
-                    {f.required && <span className="text-[9px] text-[#f9423a] font-mono">REQUIRED</span>}
+                    <Label className="text-[11px] text-text-secondary font-bold tracking-wider uppercase">{f.label}</Label>
+                    {f.required && <span className="text-[9px] text-primary font-mono">{t("settings.required")}</span>}
                   </div>
-                  <p className="text-[10px] text-white/25 font-mono">{f.desc}</p>
+                  <p className="text-[10px] text-muted-foreground font-mono">{f.desc}</p>
                   {f.multiline ? (
                     <Textarea
-                      className={`${inputCls} min-h-[80px] resize-y`}
-                      style={warning ? { borderColor: "#f59e0b" } : undefined}
+                      className={`${inputCls} min-h-[80px] resize-y ${warning ? "border-warning" : ""}`}
                       value={settings[f.key]}
                       onChange={e => setSettings(p => ({ ...p, [f.key]: e.target.value }))}
                       placeholder={f.placeholder}
@@ -209,8 +226,7 @@ const SettingsPage = () => {
                     <div className="relative">
                       <Input
                         type={showKeys[f.key] ? "text" : "password"}
-                        className={`${inputCls} pr-9`}
-                        style={warning ? { borderColor: "#f59e0b" } : undefined}
+                        className={`${inputCls} pr-9 ${warning ? "border-warning" : ""}`}
                         value={settings[f.key]}
                         onChange={e => setSettings(p => ({ ...p, [f.key]: e.target.value }))}
                         placeholder={f.placeholder}
@@ -218,14 +234,14 @@ const SettingsPage = () => {
                       <button
                         type="button"
                         onClick={() => toggle(f.key)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-white/25 hover:text-white/60 transition-colors"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
                       >
                         {showKeys[f.key] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                       </button>
                     </div>
                   )}
                   {warning && (
-                    <p className="text-[10px] font-mono" style={{ color: "#f59e0b" }}>{warning}</p>
+                    <p className="text-[10px] font-mono text-warning">{warning}</p>
                   )}
                 </div>
                 );
@@ -236,35 +252,57 @@ const SettingsPage = () => {
           {/* ── Tab 2: Models & Preferences ──────────────────────── */}
           <TabsContent value="models" className="mt-5 space-y-6">
             <div className={cardCls}>
-              <span className={sectionLabelCls}>Models</span>
+              <SectionLabel>{t("settings.models")}</SectionLabel>
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-white/60 font-bold tracking-wider uppercase">Brief Analysis Model</Label>
-                <p className="text-[10px] text-white/25 font-mono">Model used to analyze brief text + images/video. Takes effect from the next analysis.</p>
+                <Label className="text-[11px] text-text-secondary font-bold tracking-wider uppercase">{t("settings.briefModel")}</Label>
+                <p className="text-[10px] text-muted-foreground font-mono">{t("settings.briefModelDesc")}</p>
                 <ModelPicker stage="brief" variant="full" />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-white/60 font-bold tracking-wider uppercase">Agent Chat Model</Label>
-                <p className="text-[10px] text-white/25 font-mono">Model used in agent chat (storylines / storyboard). Takes effect from your next message.</p>
+                <Label className="text-[11px] text-text-secondary font-bold tracking-wider uppercase">{t("settings.agentModel")}</Label>
+                <p className="text-[10px] text-muted-foreground font-mono">{t("settings.agentModelDesc")}</p>
                 <ModelPicker stage="agent" variant="full" />
               </div>
             </div>
 
             <div className={cardCls}>
-              <span className={sectionLabelCls}>Preferences</span>
+              <SectionLabel>{t("settings.preferences")}</SectionLabel>
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-white/60 font-bold tracking-wider uppercase">UI Language</Label>
-                <p className="text-[10px] text-white/25 font-mono">
-                  This controls the app UI language, not the agent/brief analysis output (analysis language is chosen via the KO/EN toggle in the Brief tab).
-                  <br />
-                  <span className="text-amber-400/70">Coming soon — full UI translation ships in a later update.</span>
+                <Label className="text-[11px] text-text-secondary font-bold tracking-wider uppercase">{t("settings.uiLanguage")}</Label>
+                <p className="text-[10px] text-muted-foreground font-mono">
+                  {t("settings.uiLanguageDesc")}
                 </p>
-                <Select value={uiLang} onValueChange={handleUiLangChange}>
+                <Select value={language} onValueChange={(value) => setLanguage(value as UiLanguage)}>
                   <SelectTrigger className={`${inputCls} w-full`}>
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent className="bg-[#161616] border-white/10 text-white/80 rounded-none">
-                    <SelectItem value="ko" className="font-mono text-[12px]">한국어 (KO)</SelectItem>
-                    <SelectItem value="en" className="font-mono text-[12px]">English (EN)</SelectItem>
+                  <SelectContent className="bg-popover border-border-subtle text-foreground/80 rounded-none">
+                    <SelectItem value="ko" className="font-mono text-[12px]">{t("settings.korean")}</SelectItem>
+                    <SelectItem value="en" className="font-mono text-[12px]">{t("settings.english")}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-text-secondary font-bold tracking-wider uppercase">
+                  {t("settings.dashboardCardsPerRow")}
+                </Label>
+                <p className="text-[10px] text-muted-foreground font-mono">
+                  {t("settings.dashboardCardsPerRowDesc")}
+                </p>
+                <Select
+                  value={String(dashboardCardsPerRow)}
+                  onValueChange={handleDashboardCardsPerRowChange}
+                >
+                  <SelectTrigger className={`${inputCls} w-full`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-popover border-border-subtle text-foreground/80 rounded-none">
+                    {DASHBOARD_CARDS_PER_ROW_OPTIONS.map((value) => (
+                      <SelectItem key={value} value={String(value)} className="font-mono text-[12px]">
+                        {t("settings.dashboardCardsPerRowOption", { count: String(value) })}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -272,45 +310,11 @@ const SettingsPage = () => {
           </TabsContent>
         </Tabs>
 
-        {/* ── Action bar ──────────────────────────────────────────── */}
-        <div className="w-full max-w-[520px] flex gap-3">
-          <Button
-            variant="outline"
-            onClick={() => navigate("/dashboard")}
-            className="h-9 text-[12px] font-bold tracking-wider bg-transparent border-white/[0.1] text-white/40 hover:text-white/70 hover:border-white/20 hover:bg-transparent gap-1.5 rounded-none"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            Dashboard
-          </Button>
-          <Button
-            onClick={handleSave}
-            disabled={loading}
-            className="flex-1 h-9 text-[12px] font-bold tracking-wider rounded-none border-0 gap-1.5"
-            style={{ background: KR }}
-          >
-            {loading ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : saved ? (
-              <>
-                <Check className="w-3.5 h-3.5" />
-                Saved
-              </>
-            ) : (
-              <>
-                <Key className="w-3.5 h-3.5" />
-                Save Settings
-              </>
-            )}
-          </Button>
-        </div>
       </div>
 
-      <footer
-        className="flex items-center justify-between px-5 border-t border-white/[0.06] flex-shrink-0"
-        style={{ height: 28, background: "#060606" }}
-      >
-        <span className="font-mono text-[10px] text-white/40 uppercase tracking-wider">Local Mode</span>
-        <span className="font-mono text-[10px] text-white/20 uppercase tracking-wider">Pre-Flow Desktop v1.0</span>
+      <footer className="app-footer justify-between px-5">
+        <span className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider">{t("common.localMode")}</span>
+        <span className="font-mono text-[10px] text-text-tertiary uppercase tracking-wider">Pre-Flow Desktop v1.0</span>
       </footer>
     </div>
   );

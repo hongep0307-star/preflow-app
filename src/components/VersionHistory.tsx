@@ -18,6 +18,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { ModalTitle } from '@/components/common/ui-primitives';
 
 interface SceneVersion {
   id: string;
@@ -155,7 +156,9 @@ export const VersionSaveModal = ({
   <Dialog open={open} onOpenChange={o => !o && onClose()}>
     <DialogContent className="max-w-[400px] bg-card border-border">
       <DialogHeader>
-        <DialogTitle className="text-[15px] font-semibold">Save current version</DialogTitle>
+        <DialogTitle asChild>
+          <ModalTitle>Save current version</ModalTitle>
+        </DialogTitle>
       </DialogHeader>
       <div>
         <label className="text-xs text-muted-foreground mb-1.5 block">Version name</label>
@@ -195,11 +198,13 @@ export const VersionRestoreConfirm = ({
       style={{ borderRadius: 0 }}
     >
       <AlertDialogHeader>
-        <AlertDialogTitle className="text-[15px] font-semibold">
-          Restore to "{pendingRestore?.version_name ?? `v${pendingRestore?.version_number}`}"?
+        <AlertDialogTitle asChild>
+          <ModalTitle help="Save the current state first if you may need to come back to it.">
+            Restore to "{pendingRestore?.version_name ?? `v${pendingRestore?.version_number}`}"?
+          </ModalTitle>
         </AlertDialogTitle>
         <AlertDialogDescription className="text-[13px] text-muted-foreground leading-relaxed">
-          The current scene list will be replaced with this version. We recommend saving the current state first so you can come back to it.
+          This replaces the current scene list.
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>
@@ -207,8 +212,7 @@ export const VersionRestoreConfirm = ({
           Cancel
         </AlertDialogCancel>
         <AlertDialogAction
-          className="text-white text-[13px] h-9"
-          style={{ background: '#f9423a' }}
+          className="bg-primary text-white text-[13px] h-9 hover:bg-primary/85"
           disabled={isRestoring}
           onClick={(e) => {
             e.preventDefault();
@@ -283,8 +287,7 @@ export const VersionHistoryDrawer = ({
                 </div>
                 <button
                   onClick={() => onRestore(version)}
-                  className="flex items-center gap-1 text-[12px] px-2.5 py-1 rounded-md border transition-colors"
-                  style={{ color: '#f9423a', background: 'rgba(249,66,58,0.10)', borderColor: 'rgba(249,66,58,0.28)' }}
+                  className="flex items-center gap-1 text-[12px] px-2.5 py-1 rounded-none border border-primary/30 bg-primary/10 text-primary transition-colors hover:bg-primary/15"
                 >
                   <RotateCcw className="w-3 h-3" />Restore
                 </button>

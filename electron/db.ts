@@ -105,6 +105,7 @@ function createTables() {
       source TEXT DEFAULT 'agent',
       conti_image_crop TEXT,
       is_transition INTEGER DEFAULT 0,
+      is_final INTEGER DEFAULT 0,
       transition_type TEXT,
       sketches TEXT DEFAULT '[]',
       created_at TEXT DEFAULT (datetime('now')),
@@ -118,6 +119,12 @@ function createTables() {
   // Idempotent ALTER for legacy DBs created before this column existed.
   try {
     d.exec(`ALTER TABLE scenes ADD COLUMN sketches TEXT DEFAULT '[]'`);
+  } catch (_) { /* column already exists */ }
+
+  // is_final: user-confirmed completion marker for dashboard progress and
+  // automatic project status sync. Legacy local DBs need this migration.
+  try {
+    d.exec(`ALTER TABLE scenes ADD COLUMN is_final INTEGER DEFAULT 0`);
   } catch (_) { /* column already exists */ }
 
   d.exec(`

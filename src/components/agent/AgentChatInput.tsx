@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Send, ImagePlus } from "lucide-react";
 import { KR, type Asset, loadFocalMap } from "./agentTypes";
 import { MentionDropdown } from "./AgentSceneCards";
+import { useT } from "@/lib/uiLanguage";
 
 interface Props {
   assets: Asset[];
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export const AgentChatInput = ({ assets, projectId, disabled, hasImages, onSend, onAttach }: Props) => {
+  const t = useT();
   const [text, setText] = useState("");
   const [mentionState, setMentionState] = useState<{ query: string; startIdx: number } | null>(null);
   const [selIdx, setSelIdx] = useState(-1);
@@ -68,7 +70,7 @@ export const AgentChatInput = ({ assets, projectId, disabled, hasImages, onSend,
         onChange={handleChange}
         disabled={disabled}
         rows={1}
-        placeholder="Type a message... (@tag characters)"
+        placeholder={t("agent.chatPlaceholder")}
         className="placeholder:text-muted-foreground/35"
         onKeyDown={(e) => {
           if (suggestions.length > 0) {
@@ -142,7 +144,7 @@ export const AgentChatInput = ({ assets, projectId, disabled, hasImages, onSend,
       </button>
       <button
         onClick={onAttach}
-        title="Attach images (max 4)"
+        title={t("agent.attachImages")}
         style={{
           width: 36,
           height: 36,

@@ -1,6 +1,7 @@
 import { FileText, MessageSquare, Layers, Film, Check } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/uiLanguage";
 
 export type TabId = "brief" | "agent" | "assets" | "storyboard";
 
@@ -20,11 +21,11 @@ type NodeStatus = "completed" | "active" | "skipped" | "upcoming";
 type SegmentKind = "done" | "broken" | "future";
 
 /** 사이드바에 뜨는 순서. ProjectPage 의 탭 구성과 일치시킨다. */
-const tabs: { id: TabId; icon: typeof FileText; label: string }[] = [
-  { id: "brief", icon: FileText, label: "Brief" },
-  { id: "assets", icon: Layers, label: "Assets" },
-  { id: "agent", icon: MessageSquare, label: "Ideation" },
-  { id: "storyboard", icon: Film, label: "Conti" },
+const tabs: { id: TabId; icon: typeof FileText; labelKey: string }[] = [
+  { id: "brief", icon: FileText, labelKey: "tabs.brief" },
+  { id: "assets", icon: Layers, labelKey: "tabs.assets" },
+  { id: "agent", icon: MessageSquare, labelKey: "tabs.agent" },
+  { id: "storyboard", icon: Film, labelKey: "tabs.conti" },
 ];
 
 /* ── 디자인 상수 (v2 "트랙 분리형" 스펙) ── */
@@ -39,15 +40,14 @@ const SEG_TOP_BASE = NODE_TOP + NODE_SIZE; // 39
 const SEG_HEIGHT = TAB_HEIGHT - NODE_SIZE; // 50
 
 const COLOR = {
-  kr: "#f9423a",
-  krBg: "rgba(249,66,58,0.10)",
-  green: "#10b981",
-  grayLine: "rgba(255,255,255,0.10)",
-  grayLine2: "rgba(255,255,255,0.18)",
-  textDim: "rgba(255,255,255,0.32)",
-  textDim2: "rgba(255,255,255,0.55)",
-  textBright: "rgba(255,255,255,0.92)",
-  sidebarBg: "#0d0d0d",
+  kr: "hsl(var(--primary))",
+  krBg: "hsl(var(--primary) / 0.10)",
+  green: "hsl(var(--success))",
+  grayLine: "hsl(var(--border-subtle))",
+  grayLine2: "hsl(var(--foreground) / 0.18)",
+  textDim: "hsl(var(--foreground) / 0.32)",
+  textDim2: "hsl(var(--foreground) / 0.55)",
+  sidebarBg: "hsl(var(--surface-sidebar))",
 };
 
 /** 노드/세그먼트 상태 계산.
@@ -128,12 +128,12 @@ const DEFAULT_COMPLETION: TabCompletion = {
 
 export const ProjectSidebar = ({ activeTab, onTabChange, completion = DEFAULT_COMPLETION }: Props) => {
   const isMobile = useIsMobile();
+  const t = useT();
 
   if (isMobile) {
     return (
       <nav
-        className="fixed bottom-0 left-0 right-0 z-50 h-12 border-t border-border flex items-center justify-around"
-        style={{ background: "#0d0d0d" }}
+        className="fixed bottom-0 left-0 right-0 z-50 h-12 border-t border-border-subtle bg-surface-sidebar flex items-center justify-around"
       >
         {tabs.map((tab) => {
           const isActive = activeTab === tab.id;
@@ -147,7 +147,7 @@ export const ProjectSidebar = ({ activeTab, onTabChange, completion = DEFAULT_CO
               )}
             >
               <tab.icon className="w-4 h-4" />
-              <span className="text-[8px] mt-0.5 font-bold tracking-wider">{tab.label}</span>
+              <span className="text-[8px] mt-0.5 font-bold tracking-wider">{t(tab.labelKey)}</span>
             </button>
           );
         })}
@@ -160,11 +160,9 @@ export const ProjectSidebar = ({ activeTab, onTabChange, completion = DEFAULT_CO
 
   return (
     <aside
-      className="flex flex-col items-center shrink-0 border-r"
+      className="flex flex-col items-center shrink-0 border-r border-border-subtle bg-surface-sidebar"
       style={{
         width: 100,
-        background: COLOR.sidebarBg,
-        borderColor: "rgba(255,255,255,0.05)",
       }}
     >
       {/* 펄스 keyframes — 전역 CSS 대신 컴포넌트 로컬 스타일로 선언. */}
@@ -172,13 +170,13 @@ export const ProjectSidebar = ({ activeTab, onTabChange, completion = DEFAULT_CO
         @keyframes preflow-stepper-pulse {
           0%, 100% {
             box-shadow:
-              0 0 0 0 rgba(249, 66, 58, 0.55),
-              0 0 0 0 rgba(249, 66, 58, 0.15);
+              0 0 0 0 hsl(var(--primary) / 0.55),
+              0 0 0 0 hsl(var(--primary) / 0.15);
           }
           50% {
             box-shadow:
-              0 0 0 3px rgba(249, 66, 58, 0.35),
-              0 0 0 7px rgba(249, 66, 58, 0.08);
+              0 0 0 3px hsl(var(--primary) / 0.35),
+              0 0 0 7px hsl(var(--primary) / 0.08);
           }
         }
       `}</style>
@@ -256,10 +254,10 @@ export const ProjectSidebar = ({ activeTab, onTabChange, completion = DEFAULT_CO
                 <button
                   key={tab.id}
                   onClick={() => onTabChange(tab.id)}
-                  title={tab.label}
+                  title={t(tab.labelKey)}
                   className={cn(
                     "group relative flex flex-col items-center justify-center transition-colors duration-150",
-                    "hover:bg-white/[0.04]",
+                    "hover:bg-surface-panel",
                   )}
                   style={{
                     width: 64,
@@ -278,7 +276,7 @@ export const ProjectSidebar = ({ activeTab, onTabChange, completion = DEFAULT_CO
                     className="text-[10px] font-medium tracking-tight mt-[5px] leading-none"
                     style={{ color: "currentColor" }}
                   >
-                    {tab.label}
+                    {t(tab.labelKey)}
                   </span>
                 </button>
               );

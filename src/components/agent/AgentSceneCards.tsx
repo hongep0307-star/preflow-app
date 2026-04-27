@@ -17,6 +17,7 @@ import {
   ACFG,
   ASSET_ICON,
 } from "./agentTypes";
+import { useT } from "@/lib/uiLanguage";
 
 /* ━━━━━ TagChip ━━━━━
  * 콘티탭 씬카드(`contiInternals.TagChip`)와 동일 스타일로 통일:
@@ -235,6 +236,7 @@ export const AgentInlineField = ({
   placeholder?: string;
   style?: React.CSSProperties;
 }) => {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -435,7 +437,7 @@ export const AgentDescriptionField = ({
               commit();
             }
           }}
-          placeholder="Scene description... (@tag to reference assets)"
+          placeholder={t("agent.sceneDescriptionPlaceholder")}
           style={{
             width: "100%",
             outline: "none",
@@ -491,7 +493,7 @@ export const AgentDescriptionField = ({
           return <span key={i}>{p}</span>;
         })
       ) : (
-        <span style={{ opacity: 0.3 }}>Scene description... (@ to tag assets)</span>
+        <span style={{ opacity: 0.3 }}>{t("agent.sceneDescriptionEmpty")}</span>
       )}
     </div>
   );
@@ -512,6 +514,7 @@ export const AgentLocationField = ({
   projectId?: string;
   onChange: (v: string) => void;
 }) => {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(value);
   const [mentionState, setMentionState] = useState<{ query: string; startIdx: number } | null>(null);
@@ -612,7 +615,7 @@ export const AgentLocationField = ({
             }
             if (e.key === "Enter" || e.key === "Escape") commit();
           }}
-          placeholder="Enter location (@background tag)"
+          placeholder={t("agent.locationPlaceholder")}
           style={{
             width: "100%",
             outline: "none",
@@ -663,7 +666,7 @@ export const AgentLocationField = ({
           return <span key={i}>{p}</span>;
         })
       ) : (
-        <span style={{ opacity: 0.3 }}>+ Enter location</span>
+        <span style={{ opacity: 0.3 }}>{t("agent.enterLocation")}</span>
       )}
     </span>
   );
@@ -687,6 +690,7 @@ export const AgentMetaRows = ({
   projectId?: string;
   onUpdate: (k: string, v: string) => void;
 }) => {
+  const t = useT();
   const [ek, setEk] = useState<string | null>(null);
   // ✅ 각 input ref를 map으로 관리
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -724,13 +728,13 @@ export const AgentMetaRows = ({
       k: "camera_angle",
       icon: "M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2zM12 17a4 4 0 100-8 4 4 0 000 8",
       color: KR,
-      label: "Camera",
+      label: t("agent.camera"),
     },
     {
       k: "mood",
       icon: "M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z",
       color: "#f59e0b",
-      label: "Mood",
+      label: t("agent.mood"),
     },
   ];
 
@@ -795,7 +799,7 @@ export const AgentMetaRows = ({
                   transition: "background 0.1s",
                 }}
               >
-                {val || `+ Enter ${label.toLowerCase()}`}
+                {val || t("agent.enterField", { label })}
               </span>
             )}
           </div>
@@ -817,7 +821,7 @@ export const AgentMetaRows = ({
         >
           <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0zM12 13a3 3 0 100-6 3 3 0 000 6" />
         </svg>
-        <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", width: 56, flexShrink: 0 }}>Location</span>
+        <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", width: 56, flexShrink: 0 }}>{t("agent.location")}</span>
         <AgentLocationField
           value={fields.location}
           assets={assets}
@@ -842,7 +846,7 @@ export const AgentMetaRows = ({
           <circle cx="12" cy="12" r="10" />
           <path d="M12 6v6l4 2" />
         </svg>
-        <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", width: 56, flexShrink: 0 }}>Duration</span>
+        <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", width: 56, flexShrink: 0 }}>{t("agent.duration")}</span>
         {ek === "duration_sec" ? (
           <input
             ref={(el) => {

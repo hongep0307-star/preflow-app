@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useState } from 'react';
 import { X, ChevronLeft, ChevronRight, RefreshCw, Download, Paintbrush, Loader2 } from 'lucide-react';
+import { OverlayActionButton } from '@/components/common/ui-primitives';
 
 interface Scene {
   id: string;
@@ -63,8 +64,7 @@ export const ContiLightbox = ({ scene, allScenes, onClose, onRegenerate, onInpai
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center"
-      style={{ background: 'rgba(0,0,0,0.92)' }}
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/90"
       onClick={onClose}
     >
       {/* Top bar */}
@@ -76,31 +76,28 @@ export const ContiLightbox = ({ scene, allScenes, onClose, onRegenerate, onInpai
           Scene {currentScene.scene_number} — {currentScene.title || `Scene ${currentScene.scene_number}`}
         </span>
         <div className="flex items-center gap-2">
-          <button
+          <OverlayActionButton
             onClick={() => onRegenerate(currentScene)}
             disabled={isRegenerating}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-40"
           >
             {isRegenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-            재생성
-          </button>
-          <button
+            Regenerate
+          </OverlayActionButton>
+          <OverlayActionButton
             onClick={() => onInpaint(currentScene)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
           >
             <Paintbrush className="w-3.5 h-3.5" />
-            브러시 편집
-          </button>
-          <button
+            Brush Edit
+          </OverlayActionButton>
+          <OverlayActionButton
             onClick={handleDownload}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
           >
             <Download className="w-3.5 h-3.5" />
-            다운로드
-          </button>
+            Download
+          </OverlayActionButton>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+            className="p-1.5 rounded-none text-muted-foreground hover:text-foreground hover:bg-surface-panel transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -129,7 +126,7 @@ export const ContiLightbox = ({ scene, allScenes, onClose, onRegenerate, onInpai
       {currentScene.conti_image_url ? (
         <img
           src={currentScene.conti_image_url}
-          className="rounded-lg"
+          className="rounded-none"
           style={{ maxHeight: 'calc(100vh - 140px)', maxWidth: '90vw', objectFit: 'contain' }}
           onClick={e => e.stopPropagation()}
           alt={`Scene ${currentScene.scene_number}`} loading="lazy" decoding="async" />
@@ -139,14 +136,13 @@ export const ContiLightbox = ({ scene, allScenes, onClose, onRegenerate, onInpai
 
       {/* Bottom info */}
       <div
-        className="absolute bottom-0 left-0 right-0 px-6 py-3 flex items-center gap-6"
-        style={{ background: 'rgba(0,0,0,0.8)' }}
+        className="absolute bottom-0 left-0 right-0 px-6 py-3 flex items-center gap-6 bg-black/80"
         onClick={e => e.stopPropagation()}
       >
         {currentScene.camera_angle && <span className="text-xs text-muted-foreground">{currentScene.camera_angle}</span>}
         {currentScene.location && <span className="text-xs text-muted-foreground">{currentScene.location}</span>}
         {currentScene.mood && <span className="text-xs text-muted-foreground">{currentScene.mood}</span>}
-        {currentScene.duration_sec && <span className="text-xs text-muted-foreground">{currentScene.duration_sec}초</span>}
+        {currentScene.duration_sec && <span className="text-xs text-muted-foreground">{currentScene.duration_sec}s</span>}
       </div>
     </div>
   );

@@ -38,6 +38,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import MentionInput from "@/components/MentionInput";
 import { renderMessageWithMentions as renderMentions } from "@/lib/renderMentions";
+import { useT } from "@/lib/uiLanguage";
 
 /* ━━━━━ 타입 ━━━━━ */
 interface Scene {
@@ -52,6 +53,8 @@ interface Scene {
   tagged_assets: string[];
   duration_sec: number | null;
   conti_image_url: string | null;
+  is_transition?: boolean;
+  transition_type?: string | null;
   conti_image_crop?: unknown;
   /** Per-scene composition candidates generated in the Sketches tab.
    *  Lives on the scene row so deleting the scene cascades the sketches. */
@@ -116,13 +119,13 @@ export interface ContiStudioProps {
 const KR = "#f9423a";
 const TYPE_LABEL: Record<string, string> = { character: "Character", item: "Item", background: "Background" };
 export type TabId = "view" | "editor" | "edit" | "sketches" | "history" | "compare";
-const TABS: { id: TabId; label: string; icon: typeof Eye }[] = [
-  { id: "view", label: "View", icon: Eye },
-  { id: "editor", label: "Editor", icon: PenLine },
-  { id: "edit", label: "Inpaint", icon: Paintbrush },
-  { id: "sketches", label: "Sketches", icon: Sparkles },
-  { id: "history", label: "History", icon: History },
-  { id: "compare", label: "Compare", icon: Columns2 },
+const TABS: { id: TabId; labelKey: string; icon: typeof Eye }[] = [
+  { id: "view", labelKey: "studio.view", icon: Eye },
+  { id: "editor", labelKey: "studio.editor", icon: PenLine },
+  { id: "edit", labelKey: "studio.inpaint", icon: Paintbrush },
+  { id: "sketches", labelKey: "studio.sketches", icon: Sparkles },
+  { id: "history", labelKey: "studio.history", icon: History },
+  { id: "compare", labelKey: "studio.compare", icon: Columns2 },
 ];
 const ASPECT_CLASS: Record<VideoFormat, string> = {
   vertical: "aspect-[9/16]",
@@ -139,6 +142,8 @@ const FORMAT_RATIO: Record<VideoFormat, number> = {
   square: 1,
 };
 const MAX_INPAINT_UNDO = 20;
+const formatSceneRefLabel = (scene: Pick<Scene, "scene_number" | "is_transition" | "transition_type">) =>
+  scene.is_transition || scene.transition_type ? "TR" : `S${String(scene.scene_number).padStart(2, "0")}`;
 
 /* ━━━ 원본 이미지 비율 보존 imageSize 계산 ━━━
  * 실제 W/H 비율로 GPT/NB2가 지원하는 3가지 크기 중 가장 가까운 것을 선택.
@@ -177,6 +182,7 @@ export const ContiStudio = ({
   isRegenerating: externalRegenerating,
 }: ContiStudioProps) => {
   const { toast } = useToast();
+  const t = useT();
 
   const [currentIndex, setCurrentIndex] = useState(() => allScenes.findIndex((s) => s.id === initialScene.id));
   const currentScene = allScenes[currentIndex] ?? initialScene;
@@ -1908,7 +1914,7 @@ Edit instruction:
         if (usedPreflight) sceneUpdate.conti_image_crop = null;
         await supabase.from("scenes").update(sceneUpdate).eq("id", sceneId);
         onSaveInpaint(publicUrl);
-        toast({ title: "Inpainting complete" });
+        toast({ title: t("studio.inpaintComplete") });
         // inpaint 성공 후 preflight 임시 파일 정리.
         // - preflightSourceUrl 은 이 호출 전에 snapshot 된 로컬 변수라서,
         //   다음 useEffect 재실행으로 ref 가 바뀌든 말든 안전하게 그 파일만 지움.
@@ -1916,7 +1922,7 @@ Edit instruction:
         //   preflight 를 새로 만들어주므로 캐시 손실이 없다.
         if (usedPreflight && preflightSourceUrl) void deleteStoredFile(preflightSourceUrl);
       } catch (e: any) {
-        toast({ title: "Inpainting failed", description: e.message, variant: "destructive" });
+        toast({ title: t("studio.inpaintFailed"), description: e.message, variant: "destructive" });
       } finally {
         onStageChange?.(sceneId, null);
         onEditGeneratingChange?.(sceneId, false);
@@ -2009,9 +2015,9 @@ Edit instruction:
                   briefAnalysis: briefAnalysis ?? undefined,
                 });
                 onSaveInpaint(newUrl);
-                toast({ title: "Regeneration complete" });
+                toast({ title: t("studio.regenComplete") });
               } catch (e: any) {
-                toast({ title: "Regeneration failed", description: e.message, variant: "destructive" });
+                toast({ title: t("studio.regenFailed"), description: e.message, variant: "destructive" });
               } finally {
                 setIsLocalRegenerating(false);
                 onEditGeneratingChange?.(currentScene.id, false);
@@ -2021,13 +2027,13 @@ Edit instruction:
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-40"
           >
             {isRegenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}{" "}
-            Regenerate
+            {t("studio.regenerate")}
           </button>
           <button
             onClick={handleDownload}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
           >
-            <Download className="w-3.5 h-3.5" /> Download
+            <Download className="w-3.5 h-3.5" /> {t("studio.download")}
           </button>
           <button
             onClick={onClose}
@@ -2068,12 +2074,12 @@ Edit instruction:
             >
               {!imageLoaded && !imageError && (
                 <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin" /> Loading image...
+                  <Loader2 className="w-4 h-4 animate-spin" /> {t("studio.loadingImage")}
                 </div>
               )}
               {imageError && (
                 <div className="absolute inset-0 flex items-center justify-center text-destructive text-sm">
-                  Failed to load image
+                  {t("studio.failedLoadImage")}
                 </div>
               )}
 
@@ -2148,23 +2154,23 @@ Edit instruction:
                   <button
                     onClick={() => setToolMode("brush")}
                     className={`p-1.5 rounded transition-colors ${toolMode === "brush" ? "text-foreground bg-white/10" : "text-muted-foreground hover:text-foreground"}`}
-                    title="Brush"
+                    title={t("studio.brush")}
                   >
                     <Paintbrush className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => setToolMode("eraser")}
                     className={`p-1.5 rounded transition-colors ${toolMode === "eraser" ? "text-foreground bg-white/10" : "text-muted-foreground hover:text-foreground"}`}
-                    title="Eraser"
+                    title={t("studio.eraser")}
                   >
                     <Eraser className="w-3.5 h-3.5" />
                   </button>
                   <div className="w-px h-4 bg-white/10 mx-1" />
                   <span
-                    className="text-[10px] text-muted-foreground uppercase tracking-wide"
-                    title="Brush size (image-pixel radius)"
+                    className="text-[10px] text-muted-foreground tracking-wide"
+                    title={t("studio.brushSizeTitle")}
                   >
-                    Size
+                    {t("studio.size")}
                   </span>
                   <input
                     type="range"
@@ -2173,20 +2179,20 @@ Edit instruction:
                     value={brushSize}
                     onChange={(e) => setBrushSize(Number(e.target.value))}
                     className="w-16"
-                    title={`Brush radius: ${brushSize} px (image).  Shortcuts: [ and ]`}
+                    title={t("studio.brushRadiusTitle", { size: brushSize })}
                   />
                   <span
                     className="text-[11px] text-muted-foreground w-9 text-right tabular-nums"
-                    title="Image-pixel radius (resolution-independent)"
+                    title={t("studio.imagePixelRadiusTitle")}
                   >
                     {brushSize}px
                   </span>
                   <div className="w-px h-4 bg-white/10 mx-1" />
                   <span
-                    className="text-[10px] text-muted-foreground uppercase tracking-wide"
-                    title="Edit strength — lower = subtler edit, preserves more original"
+                    className="text-[10px] text-muted-foreground tracking-wide"
+                    title={t("studio.editStrengthTitle")}
                   >
-                    Strength
+                    {t("studio.strength")}
                   </span>
                   <input
                     type="range"
@@ -2195,11 +2201,11 @@ Edit instruction:
                     value={brushStrength}
                     onChange={(e) => setBrushStrength(Number(e.target.value))}
                     className="w-16"
-                    title={`Edit strength: ${brushStrength}%.  Lower = preserves more original.  Shortcuts: Shift+[ and Shift+]`}
+                    title={t("studio.editStrengthValueTitle", { strength: brushStrength })}
                   />
                   <span
                     className="text-[11px] text-muted-foreground w-9 text-right tabular-nums"
-                    title="Lower strength = subtler edit, original structure preserved"
+                    title={t("studio.lowerStrengthTitle")}
                   >
                     {brushStrength}%
                   </span>
@@ -2207,7 +2213,7 @@ Edit instruction:
                   <button
                     onClick={handleUndoInpaint}
                     disabled={inpaintUndoCount === 0}
-                    title="Undo (Ctrl+Z)"
+                    title={t("studio.undoTitle")}
                     className="p-1.5 rounded transition-colors text-muted-foreground hover:text-foreground disabled:opacity-30"
                   >
                     <Undo2 className="w-3.5 h-3.5" />
@@ -2215,14 +2221,14 @@ Edit instruction:
                   <button
                     onClick={handleResetMask}
                     className="text-[11px] text-muted-foreground px-2 py-0.5 border border-white/[0.06] rounded-md hover:text-foreground transition-colors"
-                    title="Clear mask"
+                    title={t("studio.clearMaskTitle")}
                   >
-                    Reset
+                    {t("studio.reset")}
                   </button>
                   <div className="w-px h-4 bg-white/10 mx-1" />
                   <button
                     onClick={resetZoom}
-                    title="Reset zoom (0)"
+                    title={t("studio.resetZoomTitle")}
                     className="text-[11px] text-muted-foreground px-2 py-0.5 border border-white/[0.06] rounded-md hover:text-foreground transition-colors tabular-nums"
                   >
                     {Math.round(zoom * 100)}%
@@ -2238,7 +2244,7 @@ Edit instruction:
                 >
                   <div className="flex flex-col items-center gap-3">
                     <Loader2 className="w-8 h-8 animate-spin text-foreground" />
-                    <span className="text-sm font-medium text-foreground">Generating...</span>
+                    <span className="text-sm font-medium text-foreground">{t("studio.generating")}</span>
                   </div>
                 </div>
               )}
@@ -2251,7 +2257,7 @@ Edit instruction:
               alt={`Scene ${currentScene.scene_number}`} loading="lazy" decoding="async" />
           ) : (
             <div className="text-muted-foreground text-sm">
-              {(currentScene as any).is_transition ? "Transition" : "No conti image"}
+              {(currentScene as any).is_transition ? t("studio.transition") : t("studio.noContiImage")}
             </div>
           )}
         </div>
@@ -2286,7 +2292,7 @@ Edit instruction:
                   style={{ color: isActive ? KR : "hsl(var(--muted-foreground))" }}
                 >
                   <Icon className="w-3.5 h-3.5" />
-                  {tab.label}
+                  {t(tab.labelKey)}
                   {badge !== null && (
                     <span
                       className="ml-0.5 text-[9.5px] font-bold px-1 rounded-sm tracking-wide"
@@ -2313,7 +2319,7 @@ Edit instruction:
                 <div className="space-y-3">
                   {currentScene.camera_angle && (
                     <div>
-                      <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">Camera</div>
+                      <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">{t("studio.camera")}</div>
                       <div className="text-[13px] text-foreground">
                         {renderMentions(currentScene.camera_angle, assets)}
                       </div>
@@ -2321,26 +2327,26 @@ Edit instruction:
                   )}
                   {currentScene.mood && (
                     <div>
-                      <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">Mood</div>
+                      <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">{t("studio.mood")}</div>
                       <div className="text-[13px] text-foreground">{renderMentions(currentScene.mood, assets)}</div>
                     </div>
                   )}
                   {currentScene.location && (
                     <div>
-                      <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">Location</div>
+                      <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">{t("studio.location")}</div>
                       <div className="text-[13px] text-foreground">{renderMentions(currentScene.location, assets)}</div>
                     </div>
                   )}
                   {currentScene.duration_sec && (
                     <div>
-                      <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">Duration</div>
+                      <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">{t("studio.duration")}</div>
                       <div className="text-[13px] text-foreground">{currentScene.duration_sec}s</div>
                     </div>
                   )}
                 </div>
                 {currentScene.description && (
                   <div>
-                    <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">Description</div>
+                    <div className="text-[10px] text-muted-foreground/60 tracking-wider mb-1">{t("studio.description")}</div>
                     <p className="text-[12px] text-muted-foreground leading-relaxed whitespace-pre-wrap">
                       {renderMentions(currentScene.description, assets)}
                     </p>
@@ -2353,11 +2359,10 @@ Edit instruction:
             {activeTab === "editor" && (
               <div className="p-4 space-y-3">
                 <p className="text-[11px] text-muted-foreground">
-                  Draw annotations on the conti image. Use the toolbar at the bottom of the canvas.
+                  {t("studio.editorHelp")}
                 </p>
                 <p className="text-[10px] text-muted-foreground/60">
-                  Annotations are local-only and do not modify the original image. Use <strong>Save</strong> to download
-                  a merged PNG.
+                  {t("studio.editorHelp2")}
                 </p>
               </div>
             )}
@@ -2367,7 +2372,7 @@ Edit instruction:
               <div className="flex flex-col h-full">
                 <div className="px-4 py-3 border-b border-white/[0.06]">
                   <p className="text-[11px]" style={{ color: hasMask ? KR : "hsl(var(--muted-foreground))" }}>
-                    {hasMask ? "Modify painted area" : "Modify entire image"}
+                    {hasMask ? t("studio.modifyPaintedArea") : t("studio.modifyEntireImage")}
                   </p>
                 </div>
                 <div className="px-4 py-3 border-b border-white/[0.06] space-y-2">
@@ -2403,7 +2408,7 @@ Edit instruction:
                       value={inpaintPrompt}
                       onChange={setInpaintPrompt}
                       assets={assets as any}
-                      placeholder="Describe changes... (type @ to tag an asset)"
+                      placeholder={t("studio.promptPlaceholder")}
                       minHeight={72}
                       textareaRef={inpaintInputRef}
                       squareCorners
@@ -2413,7 +2418,7 @@ Edit instruction:
                     />
                     {isDragOver && (
                       <div className="text-center py-1" style={{ fontSize: 11, color: KR }}>
-                        Drop images to add as reference
+                        {t("studio.dropReferenceImages")}
                       </div>
                     )}
                   </div>
@@ -2431,7 +2436,7 @@ Edit instruction:
                         onClick={() => customRefInputRef.current?.click()}
                         className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground px-2 py-1 rounded border border-dashed border-white/[0.06] transition-colors"
                       >
-                        <Upload className="w-3 h-3" /> Images ({customRefImages.length}/3)
+                        <Upload className="w-3 h-3" /> {t("studio.images")} ({customRefImages.length}/3)
                       </button>
                     )}
                     {customRefImages.map((img, i) => (
@@ -2458,10 +2463,10 @@ Edit instruction:
                   >
                     {isGenerating ? (
                       <span className="flex items-center justify-center gap-2">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Generating...
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("studio.generating")}
                       </span>
                     ) : (
-                      "Edit Image"
+                      t("studio.editImage")
                     )}
                   </button>
                 </div>
@@ -2469,7 +2474,7 @@ Edit instruction:
                   {moodReferenceUrl && (
                     <div className="border-b border-white/[0.06]">
                       <div className="w-full flex items-center justify-between px-4 py-2 text-[11px] font-semibold text-muted-foreground">
-                        <span>Mood Reference</span>
+                        <span>{t("studio.moodReference")}</span>
                       </div>
                       <div className="px-3 pb-3">
                         <button
@@ -2505,7 +2510,7 @@ Edit instruction:
                   {compareSelectedRefs.length > 0 && (
                     <div className="px-4 py-3 border-b border-white/[0.06]">
                       <div style={{ fontSize: 11, color: "#999" }} className="mb-2">
-                        References
+                        {t("studio.references")}
                       </div>
                       <div className="flex flex-wrap gap-1.5">
                         {compareSelectedRefs.map((url, i) => (
@@ -2556,7 +2561,7 @@ Edit instruction:
                 {currentImageHistory.length === 0 ? (
                   <EmptyState
                     icon={<History className="w-8 h-8" />}
-                    title="No history yet"
+                    title={t("studio.noHistory")}
                     compact
                   />
                 ) : (
@@ -2568,14 +2573,14 @@ Edit instruction:
                       >
                         <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/[0.06]">
                           <span className="text-[11px] text-muted-foreground">
-                            {idx === 0 ? "Previous" : `${idx + 1} ago`}
+                            {idx === 0 ? t("studio.previous") : t("studio.ago", { count: idx + 1 })}
                           </span>
                           <div className="flex items-center gap-1">
                             <button
                               onClick={() => setPreviewUrl(previewUrl === url ? null : url)}
                               className="text-[10px] px-2 py-0.5 rounded text-muted-foreground hover:text-foreground transition-colors"
                             >
-                              {previewUrl === url ? "Current" : "Preview"}
+                              {previewUrl === url ? t("studio.current") : t("studio.preview")}
                             </button>
                             <Button
                               size="sm"
@@ -2583,12 +2588,12 @@ Edit instruction:
                               disabled={deletingHistoryUrl !== null}
                               onClick={() => {
                                 onRollback(url);
-                                toast({ title: `Scene ${currentScene.scene_number} restored` });
+                                toast({ title: t("studio.sceneRestored", { scene: currentScene.scene_number }) });
                               }}
                               className="gap-1 text-[11px] h-6 px-2"
                               style={{ color: KR }}
                             >
-                              <RotateCcw className="w-3 h-3" /> Restore
+                              <RotateCcw className="w-3 h-3" /> {t("studio.restore")}
                             </Button>
                           </div>
                         </div>
@@ -2602,14 +2607,14 @@ Edit instruction:
                               try {
                                 if (previewUrl === url) setPreviewUrl(null);
                                 await onDeleteHistory(url);
-                                toast({ title: `Scene ${currentScene.scene_number} history deleted` });
+                                toast({ title: t("studio.historyDeleted", { scene: currentScene.scene_number }) });
                               } finally {
                                 setDeletingHistoryUrl(null);
                               }
                             }}
                             className="absolute top-2 right-2 z-10 w-6 h-6 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity disabled:hidden"
                             style={{ background: "rgba(0,0,0,0.65)" }}
-                            title="Delete from history"
+                            title={t("studio.deleteFromHistory")}
                           >
                             {deletingHistoryUrl === url ? (
                               <Loader2 className="w-3 h-3 text-white animate-spin" />
@@ -2641,24 +2646,24 @@ Edit instruction:
                 const hasExistingConti = !!currentScene.conti_image_url;
                 const onReplaceWithImage = (url: string) => {
                   onSaveInpaint(url);
-                  toast({ title: hasExistingConti ? "Image replaced" : "Set as conti image" });
+                  toast({ title: hasExistingConti ? t("studio.imageReplaced") : t("studio.setAsConti") });
                   setComparePreviewUrl(null);
                 };
                 const addToEditRefs = (url: string) => {
                   setCompareSelectedRefs((prev) => (prev.includes(url) ? prev : [...prev, url]));
-                  toast({ title: "Added to Edit references" });
+                  toast({ title: t("studio.addedToEditRefs") });
                 };
                 return (
                   <div className="flex flex-col h-full">
                     <div
                       className="shrink-0 border-b border-white/[0.06] flex flex-col items-center justify-center"
-                      style={{ minHeight: 280, maxHeight: 360, background: "rgba(0,0,0,0.2)" }}
+                      style={{ minHeight: 320, maxHeight: 440, background: "rgba(0,0,0,0.2)" }}
                     >
                       {comparePreviewUrl ? (
                         <div className="flex flex-col items-center gap-2 w-full px-4 py-3">
                           <img
                             src={comparePreviewUrl}
-                            className="max-h-[240px] w-auto object-contain rounded"
+                            className="max-h-[320px] w-auto object-contain rounded"
                             alt="preview" loading="lazy" decoding="async" />
                           <div className="flex items-center gap-2">
                             <button
@@ -2666,7 +2671,7 @@ Edit instruction:
                               className="px-3 py-1.5 rounded text-[11px] font-semibold text-white transition-colors"
                               style={{ background: KR }}
                             >
-                              {hasExistingConti ? "Replace" : "Use as Conti"}
+                              {hasExistingConti ? t("studio.replace") : t("studio.useAsConti")}
                             </button>
                             {hasExistingConti && (
                               <button
@@ -2675,27 +2680,27 @@ Edit instruction:
                                 style={{ borderColor: "rgba(255,255,255,0.15)", color: "hsl(var(--foreground))" }}
                               >
                                 <span className="flex items-center gap-1">
-                                  <Plus className="w-3 h-3" /> Add to Edit
+                                  <Plus className="w-3 h-3" /> {t("studio.addToEdit")}
                                 </span>
                               </button>
                             )}
                           </div>
                         </div>
                       ) : (
-                        <span style={{ fontSize: 12, color: "#666" }}>Click an image to preview</span>
+                        <span style={{ fontSize: 12, color: "#666" }}>{t("studio.clickPreview")}</span>
                       )}
                     </div>
                     <div className="flex-1 overflow-y-auto p-4 space-y-0">
                       {!hasAnyContent && (
                         <div className="flex flex-col items-center justify-center h-32 gap-2">
                           <Columns2 className="w-8 h-8 text-border" />
-                          <p className="text-[12px] text-muted-foreground">No reference images available</p>
+                          <p className="text-[12px] text-muted-foreground">{t("studio.noReferenceImages")}</p>
                         </div>
                       )}
                       {hasSceneImages && (
                         <div className="mb-4">
                           <div style={{ fontSize: 12, color: "#999" }} className="mb-2">
-                            Scene Reference
+                            {t("studio.sceneReference")}
                           </div>
                           {versions.map((v) => {
                             const vScenes = (v.scenes as Scene[]).filter(
@@ -2729,7 +2734,7 @@ Edit instruction:
                                           className="absolute top-0.5 left-0.5 text-[8px] font-bold px-1 py-0.5 rounded text-white"
                                           style={{ background: "rgba(0,0,0,0.6)" }}
                                         >
-                                          S{vScene.scene_number}
+                                          {formatSceneRefLabel(vScene)}
                                         </div>
                                       </button>
                                     );
@@ -2743,7 +2748,7 @@ Edit instruction:
                       {sortedMoods.length > 0 && (
                         <div style={{ marginTop: hasSceneImages ? 16 : 0 }}>
                           <div style={{ fontSize: 12, color: "#999" }} className="mb-2">
-                            Mood Reference
+                            {t("studio.moodReference")}
                           </div>
                           <div className="flex flex-wrap gap-1.5">
                             {sortedMoods.map((url, i) => {

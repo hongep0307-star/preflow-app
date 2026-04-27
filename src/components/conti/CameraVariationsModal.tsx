@@ -130,16 +130,16 @@ const sheetCache = new Map<string, ContactSheetSession>();
 const CONCURRENCY = 5;
 
 /* ━━━ Palette ━━━ */
-const ACCENT = "#dc2626";
-const ACCENT_SOFT_BG = "rgba(220, 38, 38, 0.12)";
-const ACCENT_SOFT_BORDER = "rgba(220, 38, 38, 0.55)";
+const ACCENT = "hsl(var(--primary))";
+const ACCENT_SOFT_BG = "hsl(var(--primary) / 0.12)";
+const ACCENT_SOFT_BORDER = "hsl(var(--primary) / 0.55)";
 
 /* ━━━ Styles ━━━ */
 const BACKDROP_STYLE: React.CSSProperties = {
   position: "fixed",
   inset: 0,
   zIndex: 100,
-  background: "rgba(0,0,0,0.65)",
+  background: "rgba(0,0,0,0.78)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -147,8 +147,8 @@ const BACKDROP_STYLE: React.CSSProperties = {
 };
 
 const PANEL_STYLE: React.CSSProperties = {
-  background: "#121212",
-  border: "1px solid rgba(255,255,255,0.08)",
+  background: "hsl(var(--card))",
+  border: "1px solid hsl(var(--border-subtle))",
   width: "min(1180px, 100%)",
   height: "min(92vh, 860px)",
   display: "flex",
@@ -161,20 +161,20 @@ const HEADER_STYLE: React.CSSProperties = {
   alignItems: "center",
   gap: 10,
   padding: "14px 20px",
-  borderBottom: "1px solid rgba(255,255,255,0.06)",
+  borderBottom: "1px solid hsl(var(--border-subtle))",
   userSelect: "none",
   flexShrink: 0,
 };
 
 const FOOTER_STYLE: React.CSSProperties = {
   padding: "12px 20px",
-  borderTop: "1px solid rgba(255,255,255,0.06)",
+  borderTop: "1px solid hsl(var(--border-subtle))",
   display: "flex",
   alignItems: "center",
   gap: 10,
   justifyContent: "flex-end",
   flexShrink: 0,
-  background: "#0e0e0e",
+  background: "hsl(var(--surface-nav))",
 };
 
 type Tab = "presets" | "contact_sheet";
@@ -1669,7 +1669,7 @@ function TabBtn({
       onClick={onClick}
       style={{
         padding: "10px 16px",
-        background: active ? "#121212" : "transparent",
+        background: active ? "hsl(var(--card))" : "transparent",
         border: "none",
         borderBottom: `2px solid ${active ? ACCENT : "transparent"}`,
         color: active ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.6)",

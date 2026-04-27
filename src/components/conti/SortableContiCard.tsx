@@ -32,7 +32,10 @@ import {
   TRANSITION_MAP,
   normalizeTransitionKey,
   type TransitionKey,
+  type TransitionCategory,
+  type TransitionSpec,
 } from "@/lib/transitionGrammar";
+import { useUiLanguage, useT } from "@/lib/uiLanguage";
 
 // Walks free-form scene text (description / location / etc) and returns the
 // set of canonical asset tag names referenced via `@mention`. Uses
@@ -92,6 +95,40 @@ const computeTaggedAssets = (
   }
   return out;
 };
+
+const TRANSITION_CATEGORY_KO: Record<TransitionCategory, string> = {
+  "Camera Movement": "카메라 무브먼트",
+  "Light & Optics": "빛/광학",
+  "Digital / Glitch": "디지털/글리치",
+  "Geometric / Morph": "기하/변형",
+  Environmental: "환경 효과",
+  Temporal: "시간 효과",
+};
+
+const TRANSITION_UI_KO: Record<TransitionKey, { label: string; tagline: string; guide: string }> = {
+  WHIP_PAN: { label: "휩 팬", tagline: "빠른 팬의 모션 블러 정점", guide: "A컷을 기준으로 빠른 팬이 정점에 도달한 순간을 포착합니다. B컷은 직접 보이지 않고 색감 정도만 가장자리에서 살짝 묻어납니다." },
+  ZOOM_PUNCH: { label: "줌 펀치", tagline: "급격한 줌의 피크 프레임", guide: "A컷 피사체를 향한 급격한 줌이 가장 강하게 걸린 순간입니다. 중심부는 비교적 읽히고 주변부는 방사형으로 흐려집니다." },
+  DOLLY_ZOOM: { label: "돌리 줌", tagline: "공간이 뒤틀리는 압축감", guide: "A컷을 기준으로 배경 깊이가 비정상적으로 당겨지거나 밀리는 순간을 만듭니다. 인물/주체는 유지하고 공간감만 불안정하게 변형합니다." },
+  CAMERA_ROLL: { label: "카메라 롤", tagline: "화면 축이 회전하는 순간", guide: "A컷이 회전축을 따라 기울어지는 정점입니다. B컷은 명확히 등장하지 않고 회전감과 색 흐름만 암시합니다." },
+  ARC_SWEEP: { label: "아크 스윕", tagline: "궤도 이동으로 연결", guide: "카메라가 A컷에서 B컷으로 호를 그리며 이동하는 연결 프레임입니다. 두 공간이 동시에 읽히되 하나의 카메라 동선처럼 보여야 합니다." },
+  LIGHT_LEAK: { label: "라이트 리크", tagline: "빛 번짐으로 화면 전환", guide: "A컷을 강한 빛 번짐이 덮는 순간입니다. B컷은 빛 속 색감이나 형태의 암시 정도만 허용합니다." },
+  LENS_FLARE: { label: "렌즈 플레어", tagline: "플레어가 화면을 가르는 순간", guide: "A컷 위로 렌즈 플레어가 강하게 지나가는 순간입니다. 플레어가 주된 전환 장치이며 B컷은 직접 렌더링하지 않습니다." },
+  DEFOCUS_PULL: { label: "디포커스 풀", tagline: "초점이 빠지는 순간", guide: "A컷의 초점이 풀리며 형태가 흐려지는 순간입니다. 피사체 윤곽은 남기되 B컷은 흐릿한 색면 정도로만 암시합니다." },
+  GLITCH: { label: "글리치", tagline: "디지털 깨짐의 정점", guide: "주체와 배경이 디지털 노이즈, 블록, 찢김으로 분해되는 순간입니다. A/B 피사체보다 효과 자체가 화면을 지배합니다." },
+  DATAMOSH: { label: "데이터모시", tagline: "프레임이 압축 오류처럼 섞임", guide: "이전 프레임의 픽셀 잔상이 다음 흐름과 뒤섞이는 순간입니다. 명확한 인물 합성보다 압축 오류 같은 흐름이 중요합니다." },
+  CHROMATIC_SPLIT: { label: "색수차 분리", tagline: "RGB 채널이 갈라지는 순간", guide: "A컷 피사체의 채널이 어긋나며 색이 분리되는 순간입니다. B컷은 색 힌트 정도로만 제한합니다." },
+  VHS_WARP: { label: "VHS 워프", tagline: "아날로그 화면 뒤틀림", guide: "A컷이 테이프 노이즈와 수평 왜곡으로 흔들리는 순간입니다. 화면 결함이 전환의 주된 느낌을 만듭니다." },
+  MORPH: { label: "모프", tagline: "형태가 다른 형태로 변환", guide: "A컷의 실루엣이 B컷의 실루엣으로 넘어가는 중간 프레임입니다. 두 형태가 동시에 읽히는 드문 bridge 방식입니다." },
+  LIQUID_WARP: { label: "리퀴드 워프", tagline: "액체처럼 휘어지는 변형", guide: "A컷이 액체 표면처럼 휘어지고 늘어나는 순간입니다. B컷은 왜곡 속 색감이나 윤곽 정도만 나타납니다." },
+  SHATTER: { label: "샤터", tagline: "화면이 조각나는 순간", guide: "A컷이 유리나 파편처럼 깨져 나가는 순간입니다. 조각 속에 B컷 색이 일부 비칠 수 있지만 주체는 A컷입니다." },
+  PRISM: { label: "프리즘", tagline: "굴절 조각으로 분할", guide: "A컷이 프리즘/유리 굴절처럼 여러 조각으로 나뉘는 순간입니다. 색 분산과 굴절이 핵심입니다." },
+  SMOKE_VEIL: { label: "스모크 베일", tagline: "연무가 화면을 덮는 순간", guide: "A컷을 연기나 먼지가 덮으며 전환을 숨기는 순간입니다. B컷은 연무 너머 희미한 색감만 허용합니다." },
+  WATER_RIPPLE: { label: "물결 리플", tagline: "수면처럼 번지는 왜곡", guide: "A컷이 물결에 비친 것처럼 퍼지고 흔들리는 순간입니다. 형태는 유지하되 표면 왜곡을 강하게 보여줍니다." },
+  TIME_FREEZE: { label: "타임 프리즈", tagline: "시간이 멈춘 잔상", guide: "A컷의 동작이 멈추고 잔상/입자가 남는 순간입니다. B컷보다 멈춘 시간감과 잔상 표현이 중심입니다." },
+};
+
+const getTransitionUi = (spec: TransitionSpec, lang: "en" | "ko") =>
+  lang === "ko" ? TRANSITION_UI_KO[spec.key] : { label: spec.label, tagline: spec.tagline, guide: spec.guide };
 
 const FORMAT_RATIO: Record<string, number> = {
   horizontal: 16 / 9,
@@ -189,6 +226,7 @@ function AdjustImageModal({
   onClose: () => void;
   onCapture?: (file: File) => void;
 }) {
+  const t = useT();
   const ratio = FORMAT_RATIO[videoFormat] ?? 16 / 9;
   const fmtLabel = FORMAT_LABEL[videoFormat] ?? "16:9";
   const arStr = ASPECT_RATIO_STR[videoFormat] ?? "16 / 9";
@@ -440,7 +478,7 @@ function AdjustImageModal({
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Move size={14} color={KR} />
-          <span style={{ fontSize: 14, fontWeight: 600 }}>Adjust Image</span>
+          <span style={{ fontSize: 14, fontWeight: 600 }}>{t("conti.adjustImage")}</span>
           <span
             style={{
               fontSize: 11,
@@ -452,7 +490,7 @@ function AdjustImageModal({
               padding: "2px 8px",
             }}
           >
-            {fmtLabel} output frame
+            {t("conti.outputFrame", { format: fmtLabel })}
           </span>
         </div>
         <button
@@ -619,10 +657,10 @@ function AdjustImageModal({
       {/* 하단 버튼 */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, width: wProp, minWidth: 260 }}>
         <button onClick={handleReset} style={{ ...btnGhost, flex: 1 }}>
-          <RotateCcw size={13} /> Reset
+          <RotateCcw size={13} /> {t("conti.reset")}
         </button>
         <button onClick={onClose} style={{ ...btnGhost, flex: 1, justifyContent: "center" }}>
-          Cancel
+          {t("common.cancel")}
         </button>
         {onCapture && (
           <button
@@ -630,7 +668,7 @@ function AdjustImageModal({
             disabled={capturing}
             style={{ ...btnWhite, flex: 1, justifyContent: "center", whiteSpace: "nowrap" }}
           >
-            {capturing ? "Capturing..." : "Set as Image"}
+            {capturing ? t("conti.capturing") : t("conti.setAsImage")}
           </button>
         )}
         <button
@@ -641,7 +679,7 @@ function AdjustImageModal({
           }}
           style={{ ...btnPrimary, flex: 1, justifyContent: "center" }}
         >
-          Apply
+          {t("conti.apply")}
         </button>
       </div>
     </div>
@@ -677,6 +715,9 @@ const TransitionTechniquePicker = memo(function TransitionTechniquePicker({
   const normalized = normalizeTransitionKey(rawValue);
   const current = normalized ? TRANSITION_MAP[normalized] : null;
   const [open, setOpen] = useState(false);
+  const { language } = useUiLanguage();
+  const t = useT();
+  const currentUi = current ? getTransitionUi(current, language) : null;
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -696,19 +737,19 @@ const TransitionTechniquePicker = memo(function TransitionTechniquePicker({
               className="text-[10px] font-mono tracking-wider"
               style={{ color: "rgba(255,255,255,0.35)" }}
             >
-              Transition Technique
+              {t("conti.transitionTechnique")}
             </span>
             {current ? (
               <span
                 className="text-[12px] font-semibold truncate"
                 style={{ color: "#f0f0f0" }}
               >
-                {current.label}
+                {currentUi?.label}
                 <span
                   className="ml-1.5 font-normal"
                   style={{ color: "rgba(255,255,255,0.45)" }}
                 >
-                  {current.tagline}
+                  {currentUi?.tagline}
                 </span>
               </span>
             ) : (
@@ -716,7 +757,7 @@ const TransitionTechniquePicker = memo(function TransitionTechniquePicker({
                 className="text-[12px] font-semibold"
                 style={{ color: "#d97706" }}
               >
-                Select a technique
+                {t("conti.selectTechnique")}
               </span>
             )}
           </div>
@@ -740,10 +781,11 @@ const TransitionTechniquePicker = memo(function TransitionTechniquePicker({
               className="text-[9px] font-mono tracking-[0.12em]"
               style={{ color: "rgba(255,255,255,0.35)" }}
             >
-              {group.category}
+              {language === "ko" ? TRANSITION_CATEGORY_KO[group.category] : group.category}
             </DropdownMenuLabel>
             {group.items.map((spec) => {
               const isSelected = normalized === spec.key;
+              const specUi = getTransitionUi(spec, language);
               return (
                 <Tooltip key={spec.key} delayDuration={250}>
                   <TooltipTrigger asChild>
@@ -762,13 +804,13 @@ const TransitionTechniquePicker = memo(function TransitionTechniquePicker({
                         className="text-[12px] font-semibold leading-tight"
                         style={{ color: isSelected ? "#f9423a" : "#f0f0f0" }}
                       >
-                        {spec.label}
+                        {specUi.label}
                       </span>
                       <span
                         className="text-[10px] leading-tight"
                         style={{ color: "rgba(255,255,255,0.5)" }}
                       >
-                        {spec.tagline}
+                        {specUi.tagline}
                       </span>
                     </DropdownMenuItem>
                   </TooltipTrigger>
@@ -780,19 +822,22 @@ const TransitionTechniquePicker = memo(function TransitionTechniquePicker({
                   >
                     <div className="flex flex-col gap-1.5 p-1">
                       <div className="text-[11px] font-semibold" style={{ color: "#f0f0f0" }}>
-                        {spec.label}
+                        {specUi.label}
                       </div>
                       <div
                         className="text-[10px] font-mono"
                         style={{ color: "rgba(255,255,255,0.5)" }}
                       >
-                        {spec.tagline}
+                        {specUi.tagline}
+                      </div>
+                      <div className="text-[9px] font-mono" style={{ color: "rgba(255,255,255,0.35)" }}>
+                        {t("conti.transitionGuide")}
                       </div>
                       <div
                         className="text-[11px] leading-relaxed mt-0.5"
                         style={{ color: "rgba(255,255,255,0.8)" }}
                       >
-                        {spec.guide}
+                        {specUi.guide}
                       </div>
                     </div>
                   </TooltipContent>
@@ -911,6 +956,7 @@ export const SortableContiCard = memo(
     const [menuOpenLeft, setMenuOpenLeft] = useState(false);
     const [isDragOver, setIsDragOver] = useState(false);
     const [adjustOpen, setAdjustOpen] = useState(false);
+    const t = useT();
 
     const [localTitle, setLocalTitle] = useState(scene.title ?? "");
     const [localCam, setLocalCam] = useState(scene.camera_angle ?? "");
@@ -947,11 +993,11 @@ export const SortableContiCard = memo(
     const showMoreBtn = imgHov || menuOpen;
 
     const STAGE_LABELS: Record<GeneratingStage, string> = {
-      queued: "Queued",
-      translating: "Translating...",
-      building: "Building...",
-      generating: "Generating...",
-      uploading: "Uploading...",
+      queued: t("conti.queued"),
+      translating: t("conti.translating"),
+      building: t("conti.building"),
+      generating: t("conti.generating"),
+      uploading: t("conti.uploading"),
     };
     // 일반 generate-all 플로우의 스테이지 번호 (Queued 는 사전 단계로 번호 미부여, 유지)
     const STAGE_STEPS: Partial<Record<GeneratingStage, string>> = {
@@ -973,12 +1019,12 @@ export const SortableContiCard = memo(
     const busyLabel = generatingStage
       ? STAGE_LABELS[generatingStage]
       : isQueued
-        ? "Queued"
+        ? t("conti.queued")
         : isStyleTransferring
-          ? "Style transfer..."
+          ? t("conti.styleTransferring")
           : isUploading
-            ? "Uploading..."
-            : "Generating...";
+            ? t("conti.uploading")
+            : t("conti.generating");
 
     // isEditGenerating=true면 inpaint 단일 호출 → "1/1" 고정 표시
     const busyStep = isEditGenerating
@@ -1388,7 +1434,7 @@ export const SortableContiCard = memo(
                 {isGeneratingAll ? (
                   <>
                     <div className="w-8 h-8 rounded-none border-2 border-border animate-pulse" />
-                    <span className="text-[11px] text-muted-foreground/50">Queued</span>
+                    <span className="text-[11px] text-muted-foreground/50">{t("conti.queued")}</span>
                   </>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -1861,7 +1907,7 @@ export const SortableContiCard = memo(
                       <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01" />
                     </svg>
                     <span style={{ fontSize: 10, color: "#d97706", fontWeight: 500 }}>
-                      No description — excluded from Generate All
+                      {t("conti.noDescriptionGenerateAll")}
                     </span>
                   </div>
                 )}

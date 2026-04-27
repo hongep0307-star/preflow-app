@@ -31,8 +31,12 @@ import type { Sketch } from "@/components/conti/contiTypes";
  *  the assets are registered and a reference-aware model produces noticeably
  *  better composition candidates than text-only GPT Image 1.5. */
 export const SKETCH_MODEL_DEFAULT: MoodImageModel = "nano-banana-2";
-export { MOOD_MODEL_USES_ASSET_REFS as SKETCH_MODEL_USES_ASSET_REFS };
 export type { MoodImageModel as SketchModel };
+
+export const SKETCH_MODEL_USES_ASSET_REFS: Record<MoodImageModel, boolean> = {
+  ...MOOD_MODEL_USES_ASSET_REFS,
+  "gpt-image-1.5": true,
+};
 
 export const SKETCH_MODEL_LABELS: Record<MoodImageModel, string> = {
   "nano-banana-2": "Nano Banana 2",
@@ -41,9 +45,9 @@ export const SKETCH_MODEL_LABELS: Record<MoodImageModel, string> = {
 };
 
 export const SKETCH_MODEL_DESCRIPTIONS: Record<MoodImageModel, string> = {
-  "nano-banana-2": "Reflects asset images · Vertex",
-  "gpt-image-2": "Vision · Reflects asset images · Slow",
-  "gpt-image-1.5": "Fastest · Text-based (assets not reflected)",
+  "nano-banana-2": "Best default · Uses asset images for stable character/background likeness",
+  "gpt-image-2": "High quality vision · Strong reference reading, slower generation",
+  "gpt-image-1.5": "Faster vision · Reads asset images with lighter reference fidelity",
 };
 
 export interface GenerateSketchesOptions {
@@ -85,6 +89,7 @@ export async function generateSceneSketches(
       count: opts.count,
       targetSceneNumber: opts.sceneNumber,
       model,
+      forceAssetRefs: true,
     },
     onBatchDone,
   );

@@ -282,27 +282,23 @@ export const AnnotationEditor = ({
 
   const effectiveImageUrl = croppedImgSrc || imageUrl;
 
-  /* ★ effectiveSize — canvasSize prop이 0일 때 자체 계산
-   * canvasSize=0 → container div width: undefined → canvas CSS 크기 0
-   * → getBoundingClientRect().width=0 → 좌표 Infinity → 그리기 무음 실패 */
+  /* ★ effectiveSize — keep the displayed editor image at its natural ratio.
+   * ContiStudio's canvasSize follows the project format, but GPT images can be
+   * 1:1, 2:3, or 3:2. Using that box directly visually stretches the image. */
   const effectiveSize = useMemo(() => {
-    if (canvasSize.w > 0 && canvasSize.h > 0) return canvasSize;
-    // containerRef에서 직접 계산
-    const ctr = containerRef.current;
-    if (ctr && naturalSize.w > 0 && naturalSize.h > 0) {
-      const cw = Math.max(0, ctr.clientWidth - 48);
-      const ch = Math.max(0, ctr.clientHeight - 48);
-      if (cw > 0 && ch > 0) {
-        const s = Math.min(cw / naturalSize.w, ch / naturalSize.h);
-        return { w: Math.round(naturalSize.w * s), h: Math.round(naturalSize.h * s) };
-      }
+    if (naturalSize.w <= 0 || naturalSize.h <= 0) return { w: 0, h: 0 };
+
+    let maxW = canvasSize.w;
+    let maxH = canvasSize.h;
+    if (maxW <= 0 || maxH <= 0) {
+      const ctr = containerRef.current;
+      maxW = ctr ? Math.max(0, ctr.clientWidth - 48) : 800;
+      maxH = ctr ? Math.max(0, ctr.clientHeight - 48) : 600;
     }
-    // 마지막 폴백: 화면 최대 800×600 기준 스케일
-    if (naturalSize.w > 0 && naturalSize.h > 0) {
-      const s = Math.min(1, 800 / naturalSize.w, 600 / naturalSize.h);
-      return { w: Math.round(naturalSize.w * s), h: Math.round(naturalSize.h * s) };
-    }
-    return { w: 0, h: 0 };
+
+    const scale = Math.min(maxW / naturalSize.w, maxH / naturalSize.h);
+    if (!Number.isFinite(scale) || scale <= 0) return { w: 0, h: 0 };
+    return { w: Math.round(naturalSize.w * scale), h: Math.round(naturalSize.h * scale) };
   }, [canvasSize, naturalSize, containerRef]);
 
   /* ── image load ── */
@@ -1556,7 +1552,7 @@ export const AnnotationEditor = ({
         <img
           src={effectiveImageUrl!}
           className="block w-full h-full"
-          style={{ pointerEvents: "none" }}
+          style={{ pointerEvents: "none", objectFit: "contain" }}
           alt="conti"
           crossOrigin="anonymous"
         />

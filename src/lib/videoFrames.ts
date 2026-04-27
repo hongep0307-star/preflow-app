@@ -68,7 +68,7 @@ export async function sampleFrames(
   try {
     const meta = await probeVideoMeta(url);
     if (meta.durationSec > MAX_DURATION_SEC) {
-      throw new Error(`5분(${MAX_DURATION_SEC}s) 이하 영상만 지원합니다. (현재 ${Math.round(meta.durationSec)}s)`);
+      throw new Error(`Only videos up to ${MAX_DURATION_SEC}s are supported. Current duration: ${Math.round(meta.durationSec)}s.`);
     }
     const times = computeUniformTimes(meta.durationSec, Math.max(1, count), range);
     return await sampleFromObjectUrl(url, times);

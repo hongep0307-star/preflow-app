@@ -26,6 +26,8 @@ import {
   migrateLegacyVariations,
 } from "@/lib/bgVariationStore";
 import { useToast } from "@/hooks/use-toast";
+import { HelpTooltip } from "@/components/common/ui-primitives";
+import { useT } from "@/lib/uiLanguage";
 
 interface Props {
   asset: Asset;
@@ -60,6 +62,7 @@ export const AssetDetailModal = ({
   const dragging = useRef(false);
   const lastPos = useRef({ x: 0, y: 0 });
   const { toast } = useToast();
+  const t = useT();
 
   // Subscribe to the module-singleton bgVariationStore so in-flight
   // counts and errors survive modal close/reopen cycles.
@@ -80,14 +83,14 @@ export const AssetDetailModal = ({
     for (const [framing, msg] of Object.entries(errors)) {
       if (msg && prev[framing as keyof BgVarSnapshot["errors"]] !== msg) {
         toast({
-          title: `${framing} framing failed`,
+          title: t("assets.framingFailed", { framing }),
           description: msg,
           variant: "destructive",
         });
       }
     }
     lastErrorsRef.current = errors;
-  }, [errors, toast]);
+  }, [errors, t, toast]);
 
   const effectivePrimaryUrl = asset.photo_url;
 
@@ -163,14 +166,14 @@ export const AssetDetailModal = ({
         }
         if (created.length > 0) {
           toast({
-            title: "Camera framings upgraded",
-            description: `${created.length} stored variation${created.length === 1 ? "" : "s"} promoted to standalone @tag${created.length === 1 ? "" : "s"}.`,
+            title: t("assets.cameraFramingsUpgraded"),
+            description: t("assets.cameraFramingsUpgradedDesc", { count: created.length }),
           });
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         toast({
-          title: "Variation migration failed",
+          title: t("assets.variationMigrationFailed"),
           description: msg,
           variant: "destructive",
         });
@@ -187,14 +190,15 @@ export const AssetDetailModal = ({
     asset.space_description,
     asset.asset_type,
     onAssetCreated,
+    t,
     toast,
   ]);
 
   const generateOne = async (framing: (typeof BACKGROUND_FRAMINGS)[number]["id"]) => {
     if (!asset.photo_url) {
       toast({
-        title: "No source image",
-        description: "Upload a primary photo before generating framings.",
+        title: t("assets.noSourceImage"),
+        description: t("assets.noSourceImageDesc"),
         variant: "destructive",
       });
       return;
@@ -212,8 +216,8 @@ export const AssetDetailModal = ({
     if (created) {
       onAssetCreated?.(created as unknown as Asset);
       toast({
-        title: "Framing created",
-        description: `@${created.tag_name} — ready to @-mention in scenes.`,
+        title: t("assets.framingCreated"),
+        description: t("assets.framingCreatedDesc", { tag: created.tag_name }),
       });
     }
   };
@@ -221,8 +225,8 @@ export const AssetDetailModal = ({
   const generateAll = () => {
     if (!asset.photo_url) {
       toast({
-        title: "No source image",
-        description: "Upload a primary photo before generating framings.",
+        title: t("assets.noSourceImage"),
+        description: t("assets.noSourceImageDesc"),
         variant: "destructive",
       });
       return;
@@ -342,7 +346,7 @@ export const AssetDetailModal = ({
           </div>
 
           <p className="text-center text-white/25 text-[10px] py-2 pointer-events-none select-none">
-            {scale > 1 ? "Drag to move · Scroll to zoom" : "Scroll to zoom · Click outside to close"}
+            {scale > 1 ? t("assets.zoomHintDrag") : t("assets.zoomHintClose")}
           </p>
 
           {/* ── Camera Framings panel (background-only) ──
@@ -354,35 +358,38 @@ export const AssetDetailModal = ({
               modal. */}
           {isBackground && (
             <div
-              className="border-t border-white/10 bg-[#0a0a0a] px-3 py-3"
+              className="border-t border-border-subtle bg-surface-sidebar px-3 py-3"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-1.5">
                   <Camera className="w-3 h-3 text-white/60" />
                   <span className="text-white/70 text-[10px] font-semibold uppercase tracking-wider">
-                    Generate Camera Framings
+                    {t("assets.generateCameraFramings")}
                   </span>
+                  <HelpTooltip>
+                    {t("assets.cameraFramingHelp")}
+                  </HelpTooltip>
                   {isMigrating && (
                     <span className="flex items-center gap-1 text-white/50 text-[10px]">
-                      <Loader2 className="w-3 h-3 animate-spin" /> upgrading legacy...
+                      <Loader2 className="w-3 h-3 animate-spin" /> {t("assets.upgradingLegacy")}
                     </span>
                   )}
                 </div>
                 <button
                   onClick={generateAll}
                   disabled={!effectivePrimaryUrl || isMigrating}
-                  className="px-2 py-1 text-[10px] font-medium border border-white/15 text-white/80 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
+                  className="px-2 py-1 text-[10px] font-medium border border-border-subtle text-foreground/80 hover:bg-surface-panel disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
                   style={{ borderRadius: 2 }}
                   title="Generate one new sibling per framing (4 in parallel)"
                 >
                   {isAnyGenerating ? (
                     <>
                       <Loader2 className="w-3 h-3 animate-spin" />
-                      Generating ({totalInFlight})
+                      {t("studio.generating")} ({totalInFlight})
                     </>
                   ) : (
-                    "Generate All"
+                    t("assets.generateAll")
                   )}
                 </button>
               </div>
@@ -397,7 +404,7 @@ export const AssetDetailModal = ({
                       key={f.id}
                       onClick={() => void generateOne(f.id)}
                       disabled={!effectivePrimaryUrl || isMigrating}
-                      className="relative flex flex-col items-center justify-center gap-1 py-2 px-1.5 bg-black/40 border border-white/10 hover:border-white/30 hover:bg-black/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      className="relative flex flex-col items-center justify-center gap-1 py-2 px-1.5 bg-background/70 border border-border-subtle hover:border-primary/30 hover:bg-surface-panel disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                       style={{ borderRadius: 2, minHeight: 58 }}
                       title={`Generate a new @${asset.tag_name.replace(/^@/, "")}_${f.id} sibling asset — ${f.shortDesc}`}
                     >
@@ -418,7 +425,7 @@ export const AssetDetailModal = ({
                         <span
                           className="absolute top-1 right-1 text-[9px] text-white/90 px-1"
                           style={{
-                            background: "rgba(249,66,58,0.85)",
+                            background: "hsl(var(--primary) / 0.85)",
                             borderRadius: 2,
                             minWidth: 14,
                             textAlign: "center",
@@ -438,7 +445,7 @@ export const AssetDetailModal = ({
               {siblings.length > 0 && (
                 <div className="mt-3">
                   <p className="text-white/40 text-[9px] font-semibold uppercase tracking-wider mb-1.5">
-                    Existing siblings ({siblings.length})
+                    {t("assets.existingSiblings", { count: siblings.length })}
                   </p>
                   <div className="flex flex-wrap gap-1.5">
                     {siblings.map(({ asset: sib, framing }) => (
@@ -471,8 +478,8 @@ export const AssetDetailModal = ({
                 </div>
               )}
 
-              <p className="text-white/35 text-[9px] mt-2 leading-relaxed">
-                Each button creates a new standalone asset — click multiple times for numbered siblings (e.g. <span className="text-white/55">@{asset.tag_name.replace(/^@/, "")}_wide</span>, <span className="text-white/55">_wide_2</span>). @-mention the one you want directly in scene Location / Description.
+              <p className="text-muted-foreground text-[9px] mt-2">
+                {t("assets.generatedFramings")}
               </p>
             </div>
           )}
@@ -505,7 +512,7 @@ export const AssetDetailModal = ({
           {asset.asset_type === "item" && asset.ai_description && (
             <div className="mb-4">
               <p className="text-[11px] text-muted-foreground font-medium mb-1.5 flex items-center gap-1.5">
-                <Package className="w-3 h-3" /> Item Description
+                <Package className="w-3 h-3" /> {t("assets.itemDescription")}
               </p>
               <p className="text-[13px] text-foreground/80 leading-relaxed">{asset.ai_description}</p>
             </div>
@@ -513,7 +520,7 @@ export const AssetDetailModal = ({
           {isBackground && asset.space_description && (
             <div className="mb-4">
               <p className="text-[11px] text-muted-foreground font-medium mb-1.5 flex items-center gap-1.5">
-                <MapPin className="w-3 h-3" /> Location Description
+                <MapPin className="w-3 h-3" /> {t("assets.locationDescription")}
               </p>
               <p className="text-[13px] text-foreground/80 leading-relaxed">{asset.space_description}</p>
             </div>
@@ -522,7 +529,7 @@ export const AssetDetailModal = ({
             <>
               {asset.ai_description && (
                 <div className="mb-4">
-                  <p className="text-[11px] text-muted-foreground font-medium mb-1.5">Character Description</p>
+                  <p className="text-[11px] text-muted-foreground font-medium mb-1.5">{t("assets.characterDescription")}</p>
                   <p className="text-[13px] text-foreground/80 leading-relaxed">
                     {asset.ai_description.slice(0, 240)}
                     {asset.ai_description.length > 240 ? "..." : ""}
@@ -532,7 +539,7 @@ export const AssetDetailModal = ({
               {asset.role_description && (
                 <div className="mb-3">
                   <p className="text-[11px] text-muted-foreground font-medium mb-0.5 flex items-center gap-1.5">
-                    <User className="w-3 h-3" /> Role / Relationship
+                    <User className="w-3 h-3" /> {t("assets.roleRelationship")}
                   </p>
                   <p className="text-[13px] text-foreground/70">{asset.role_description}</p>
                 </div>
@@ -540,20 +547,20 @@ export const AssetDetailModal = ({
               {asset.outfit_description && (
                 <div className="mb-3">
                   <p className="text-[11px] text-muted-foreground font-medium mb-0.5 flex items-center gap-1.5">
-                    <Shirt className="w-3 h-3" /> Outfit
+                    <Shirt className="w-3 h-3" /> {t("assets.outfit")}
                   </p>
                   <p className="text-[13px] text-foreground/70">{asset.outfit_description}</p>
                 </div>
               )}
               {!asset.ai_description && !asset.role_description && !asset.outfit_description && (
-                <p className="text-[12px] text-muted-foreground/30">No description registered</p>
+                <p className="text-[12px] text-muted-foreground/30">{t("assets.noDescriptionRegistered")}</p>
               )}
             </>
           )}
 
           <div className="mt-auto pt-3 border-t border-border">
             <span className="text-[11px] text-muted-foreground/50">
-              Used in {sceneCount} {sceneCount === 1 ? "Scene" : "Scenes"}
+              {t("assets.usedInScenes", { count: sceneCount, unit: t(sceneCount === 1 ? "assets.scene" : "assets.scenes") })}
             </span>
           </div>
         </div>

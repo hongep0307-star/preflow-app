@@ -18,6 +18,8 @@ import { ProjectSidebar, TabId, TabCompletion } from "@/components/ProjectSideba
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { VideoFormat } from "@/lib/conti";
+import { BrandLogo } from "@/components/common/BrandLogo";
+import { useT } from "@/lib/uiLanguage";
 
 const BriefTab = lazy(() => import("@/components/BriefTab").then((m) => ({ default: m.BriefTab })));
 const AgentTab = lazy(() => import("@/components/AgentTab").then((m) => ({ default: m.AgentTab })));
@@ -53,6 +55,7 @@ const FORMAT_EDIT_OPTIONS: { value: VideoFormat; label: string }[] = [
 const ProjectPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const t = useT();
   const [searchParams] = useSearchParams();
   // URL 에 ?tab=... 이 있으면 그 탭으로 바로 진입. 없으면 null 로 두고
   // 중앙 4 버튼 선택 화면 (시작점 선택 picker) 을 보여준다.
@@ -60,6 +63,9 @@ const ProjectPage = () => {
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [folderName, setFolderName] = useState<string>("");
   const [activeTab, setActiveTab] = useState<TabId | null>(initialTab);
+  const [mountedTabs, setMountedTabs] = useState<Set<TabId>>(() =>
+    initialTab ? new Set<TabId>([initialTab]) : new Set<TabId>(),
+  );
   const [completion, setCompletion] = useState<TabCompletion>({
     brief: false,
     assets: false,
@@ -78,6 +84,14 @@ const ProjectPage = () => {
   const formatRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<HTMLDivElement>(null);
   const deadlineRef = useRef<HTMLDivElement>(null);
+
+  const activateTab = useCallback((tab: TabId) => {
+    setMountedTabs((prev) => {
+      if (prev.has(tab)) return prev;
+      return new Set([...prev, tab]);
+    });
+    setActiveTab(tab);
+  }, []);
 
   useEffect(() => {
     if (!id) return;
@@ -112,6 +126,14 @@ const ProjectPage = () => {
     };
     fetchData();
   }, [id]);
+
+  useEffect(() => {
+    if (!activeTab) return;
+    setMountedTabs((prev) => {
+      if (prev.has(activeTab)) return prev;
+      return new Set([...prev, activeTab]);
+    });
+  }, [activeTab]);
 
   // ── Tab completion 판정 ──────────────────────────────────────────
   // 사이드바 스테퍼에 넘길 4 개 탭의 완료 여부. DB 에서 각각 최소 존재 여부만
@@ -197,11 +219,11 @@ const ProjectPage = () => {
         return;
       }
       e.preventDefault();
-      setActiveTab(tabOrder[idx]);
+      activateTab(tabOrder[idx]);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [activateTab]);
 
   const updateProjectField = useCallback(
     async (patch: Partial<{ video_format: VideoFormat; client: string | null; deadline: string | null }>) => {
@@ -257,7 +279,7 @@ const ProjectPage = () => {
   const deadlineDisplay = formatDeadlineDisplay(project?.deadline ?? null);
 
   const handleSwitchToContiTab = (sceneNumber?: number) => {
-    setActiveTab("storyboard");
+    activateTab("storyboard");
     if (sceneNumber) {
       setTimeout(() => {
         const el = document.getElementById(`conti-scene-${sceneNumber}`);
@@ -266,76 +288,93 @@ const ProjectPage = () => {
     }
   };
 
-  const renderContent = () => {
+  const renderTabPanels = () => {
     if (!id) return null;
+    const panelClass = (tab: TabId) => (activeTab === tab ? "block h-full" : "hidden");
+
     return (
-      <ErrorBoundary label={`${activeTab} tab`} resetKey={`${id}:${activeTab}`}>
-        <Suspense fallback={<TabLoadingFallback />}>
-          {activeTab === "brief" && (
-            <BriefTab
-              projectId={id}
-              onSwitchToAgent={(lang) => { setBriefLang(lang); setActiveTab("agent"); }}
-              onSwitchToAssets={() => setActiveTab("assets")}
-            />
-          )}
-          {activeTab === "agent" && (
-            <AgentTab projectId={id} videoFormat={videoFormat} lang={briefLang} onSwitchToContiTab={handleSwitchToContiTab} />
-          )}
-          {activeTab === "assets" && <AssetsTab projectId={id} onSwitchToAgent={() => setActiveTab("agent")} />}
-          {activeTab === "storyboard" && <ContiTab projectId={id} videoFormat={videoFormat} />}
-        </Suspense>
-      </ErrorBoundary>
+      <>
+        {mountedTabs.has("brief") && (
+          <div className={panelClass("brief")}>
+            <ErrorBoundary label="brief tab" resetKey={`${id}:brief`}>
+              <Suspense fallback={<TabLoadingFallback />}>
+                <BriefTab
+                  projectId={id}
+                  onSwitchToAgent={(lang) => { setBriefLang(lang); activateTab("agent"); }}
+                  onSwitchToAssets={() => activateTab("assets")}
+                />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        )}
+        {mountedTabs.has("agent") && (
+          <div className={panelClass("agent")}>
+            <ErrorBoundary label="agent tab" resetKey={`${id}:agent`}>
+              <Suspense fallback={<TabLoadingFallback />}>
+                <AgentTab
+                  projectId={id}
+                  videoFormat={videoFormat}
+                  lang={briefLang}
+                  onSwitchToContiTab={handleSwitchToContiTab}
+                />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        )}
+        {mountedTabs.has("assets") && (
+          <div className={panelClass("assets")}>
+            <ErrorBoundary label="assets tab" resetKey={`${id}:assets`}>
+              <Suspense fallback={<TabLoadingFallback />}>
+                <AssetsTab projectId={id} onSwitchToAgent={() => activateTab("agent")} />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        )}
+        {mountedTabs.has("storyboard") && (
+          <div className={panelClass("storyboard")}>
+            <ErrorBoundary label="storyboard tab" resetKey={`${id}:storyboard`}>
+              <Suspense fallback={<TabLoadingFallback />}>
+                <ContiTab projectId={id} videoFormat={videoFormat} />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        )}
+      </>
     );
   };
 
   /* ── Pill 스타일 ── */
-  const pillBase =
-    "font-mono text-[10px] font-medium tracking-wide px-2.5 h-[26px] inline-flex items-center border transition-colors duration-100 cursor-pointer select-none";
-  const pillDefault =
-    "border-border bg-secondary/50 text-muted-foreground hover:border-primary/30 hover:text-foreground";
-  const pillActive = "border-primary/40 bg-primary/10 text-primary";
+  const pillBase = "meta-pill cursor-pointer";
+  const pillDefault = "";
+  const pillActive = "meta-pill-active";
 
   const TAB_LABEL: Record<TabId, string> = {
-    brief: "Brief",
-    agent: "Ideation",
-    assets: "Assets",
-    storyboard: "Conti",
+    brief: t("tabs.brief"),
+    agent: t("tabs.agent"),
+    assets: t("tabs.assets"),
+    storyboard: t("tabs.conti"),
   };
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden">
+    <div className="h-screen flex flex-col overflow-hidden bg-background">
       {/* ── Top bar ── */}
-      <nav
-        className="h-16 border-b flex items-center justify-between px-4 shrink-0"
-        style={{ background: "#0d0d0d", borderColor: "rgba(255,255,255,0.05)" }}
-      >
+      <nav className="app-topbar justify-between px-4">
         {/* 왼쪽: 브랜드(클릭 시 대시보드) + 브레드크럼 + 제목 */}
         <div className="flex items-center gap-0">
           {/* 브랜드 버튼 */}
           <button
             onClick={() => navigate("/dashboard")}
-            className="flex items-center gap-3 pl-4 pr-8 border-r border-white/[0.13] hover:opacity-75 transition-opacity flex-shrink-0"
+            className="flex items-center pl-4 pr-8 border-r border-border-subtle hover:opacity-80 transition-opacity flex-shrink-0"
           >
-            <div className="relative w-[22px] h-[17px] scale-150 origin-center">
-              <div className="absolute bottom-0 right-0 w-[13px] h-[9px] rounded-[2px] border border-white/10 bg-[#1a1a1a]" />
-              <div className="absolute bottom-[2.5px] right-[2.5px] w-[14px] h-[10px] rounded-[2px] border border-[#5a2a2a] bg-[#1c1010]" />
-              <div className="absolute bottom-[5px] right-[4.5px] w-[15px] h-[11px] rounded-[2px] border-[1.5px] border-[#f9423a] bg-[#1f0f0f]">
-                <span className="absolute left-[1.5px] top-1/2 -translate-y-1/2 w-[2px] h-[2px] bg-[#f9423a] rounded-[0.5px]" />
-                <span className="absolute right-[1.5px] top-1/2 -translate-y-1/2 w-[2px] h-[2px] bg-[#f9423a] rounded-[0.5px]" />
-              </div>
-            </div>
-            <span className="text-[26px] font-extrabold tracking-tight leading-none">
-              <span className="text-white">Pre</span>
-              <span className="text-[#f9423a]">-Flow</span>
-            </span>
+            <BrandLogo />
           </button>
 
           {/* 브레드크럼 */}
           <div className="flex items-center pl-8 gap-0">
             {folderName && (
               <>
-                <span className="text-[15px] text-white/35">{folderName}</span>
-                <span className="text-[#f9423a]/50 text-[10px] mx-2">/</span>
+                <span className="text-[15px] text-muted-foreground">{folderName}</span>
+                <span className="text-primary/50 text-[10px] mx-2">/</span>
               </>
             )}
             {editingTitle ? (
@@ -356,16 +395,16 @@ const ProjectPage = () => {
                   setEditTitle(project?.title ?? "");
                   setEditingTitle(true);
                 }}
-                className="text-[15px] font-bold text-white/80 truncate max-w-[200px] hover:text-white transition-colors cursor-pointer tracking-wide"
-                title="Edit title"
+                className="text-[15px] font-bold text-foreground/85 truncate max-w-[200px] hover:text-foreground transition-colors cursor-pointer tracking-wide"
+                title={t("project.editTitle")}
               >
                 {project?.title || ""}
               </button>
             )}
             {activeTab && (
               <>
-                <span className="text-[#f9423a]/50 text-[10px] mx-2">/</span>
-                <span className="text-[15px] text-white/55 flex-shrink-0">{TAB_LABEL[activeTab]}</span>
+                <span className="text-primary/50 text-[10px] mx-2">/</span>
+                <span className="text-[15px] text-text-secondary flex-shrink-0">{TAB_LABEL[activeTab]}</span>
               </>
             )}
           </div>
@@ -417,9 +456,8 @@ const ProjectPage = () => {
                   if (e.key === "Escape") setEditingField(null);
                 }}
                 onBlur={() => updateProjectField({ client: editClient.trim() || null })}
-                placeholder="DEPARTMENT"
-                className="font-mono text-[10px] font-medium tracking-wide border border-primary/40 px-2.5 h-[26px] inline-flex items-center bg-background text-foreground outline-none w-[110px]"
-                style={{ borderRadius: 0 }}
+                placeholder={t("project.departmentPlaceholder")}
+                className="meta-pill-active font-mono text-[10px] font-medium tracking-wide border px-2.5 h-[26px] inline-flex items-center bg-background outline-none w-[110px] rounded-none"
               />
             ) : (
               <button
@@ -430,7 +468,7 @@ const ProjectPage = () => {
                 className={`${pillBase} ${pillDefault}`}
                 style={{ borderRadius: 0 }}
               >
-                {project?.client || "Dept"}
+                {project?.client || t("project.department")}
               </button>
             )}
           </div>
@@ -450,8 +488,8 @@ const ProjectPage = () => {
                     if (e.key === "Escape") setEditingField(null);
                   }}
                   onBlur={() => updateProjectField({ deadline: editDeadline || null })}
-                  className="font-mono text-[10px] font-bold uppercase border border-primary/40 px-2 py-0.5 bg-background text-foreground outline-none"
-                  style={{ borderRadius: 0, colorScheme: "dark" }}
+                  className="meta-pill-active font-mono text-[10px] font-bold uppercase border px-2 py-0.5 bg-background outline-none rounded-none"
+                  style={{ colorScheme: "dark" }}
                 />
                 {project?.deadline && (
                   <button
@@ -460,7 +498,7 @@ const ProjectPage = () => {
                       updateProjectField({ deadline: null });
                     }}
                     className="text-muted-foreground hover:text-destructive transition-colors"
-                    title="Clear deadline"
+                    title={t("project.clearDeadline")}
                   >
                     <X className="w-3 h-3" />
                   </button>
@@ -476,7 +514,7 @@ const ProjectPage = () => {
                 style={{ borderRadius: 0 }}
               >
                 <Calendar className="w-3 h-3 inline mr-1 -mt-px" />
-                {deadlineDisplay ? deadlineDisplay.text : "Deadline"}
+                {deadlineDisplay ? deadlineDisplay.text : t("project.deadline")}
               </button>
             )}
           </div>
@@ -489,15 +527,15 @@ const ProjectPage = () => {
           // 첫 진입 — 사이드바 없이 시작점 선택.
           <StartPointPicker
             completion={completion}
-            onPick={setActiveTab}
+            onPick={activateTab}
           />
         ) : (
           <>
-            <ProjectSidebar activeTab={activeTab} onTabChange={setActiveTab} completion={completion} />
+            <ProjectSidebar activeTab={activeTab} onTabChange={activateTab} completion={completion} />
             <main
               className={`flex-1 overflow-hidden ${activeTab === "brief" ? "overflow-y-auto p-5 lg:p-6" : ""} ${isMobile ? "pb-14" : ""}`}
             >
-              {renderContent()}
+              {renderTabPanels()}
             </main>
           </>
         )}
@@ -511,14 +549,14 @@ const ProjectPage = () => {
  * 사이드바 대신 전체 영역을 차지하며, 카드 클릭 시 해당 탭으로 진입. */
 const PICKER_CARDS: {
   id: TabId;
-  title: string;
+  titleKey: string;
   icon: typeof FileText;
-  desc: string;
+  descKey: string;
 }[] = [
-  { id: "brief", icon: FileText, title: "Brief", desc: "Analyze the brief to kick off the project" },
-  { id: "assets", icon: Layers, title: "Assets", desc: "Register characters, items and backgrounds" },
-  { id: "agent", icon: MessageSquare, title: "Ideation", desc: "Shape scenes through AI conversation" },
-  { id: "storyboard", icon: Film, title: "Conti", desc: "Generate storyboard images" },
+  { id: "brief", icon: FileText, titleKey: "tabs.brief", descKey: "project.briefDesc" },
+  { id: "assets", icon: Layers, titleKey: "tabs.assets", descKey: "project.assetsDesc" },
+  { id: "agent", icon: MessageSquare, titleKey: "tabs.agent", descKey: "project.agentDesc" },
+  { id: "storyboard", icon: Film, titleKey: "tabs.conti", descKey: "project.contiDesc" },
 ];
 
 const StartPointPicker = ({
@@ -528,17 +566,15 @@ const StartPointPicker = ({
   completion: TabCompletion;
   onPick: (tab: TabId) => void;
 }) => {
+  const t = useT();
   return (
-    <div className="flex-1 flex flex-col items-center justify-center px-6">
+    <div className="flex-1 flex flex-col items-center justify-center px-6 bg-background">
       <div className="text-center mb-12">
-        <h1
-          className="text-[32px] font-extrabold tracking-tight leading-tight"
-          style={{ color: "rgba(255,255,255,0.92)" }}
-        >
-          Where would you like to start?
+        <h1 className="text-[32px] font-extrabold tracking-tight leading-tight text-foreground">
+          {t("project.startTitle")}
         </h1>
-        <p className="mt-3 text-[14px]" style={{ color: "rgba(255,255,255,0.55)" }}>
-          Pick a stage to jump straight into work.
+        <p className="mt-3 text-[14px] text-text-secondary">
+          {t("project.startDesc")}
         </p>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 w-full max-w-[1500px]">
@@ -548,47 +584,28 @@ const StartPointPicker = ({
             <button
               key={card.id}
               onClick={() => onPick(card.id)}
-              className="group relative flex flex-col items-start gap-3 p-6 h-[180px] border bg-white/[0.02] hover:bg-white/[0.05] hover:border-[#f9423a]/40 transition-all duration-150 text-left"
-              style={{ borderColor: "rgba(255,255,255,0.08)", borderRadius: 0 }}
+              className="group relative flex flex-col items-start gap-3 p-6 h-[180px] border border-border-subtle bg-surface-panel/50 hover:bg-surface-elevated hover:border-primary/40 transition-all duration-150 text-left rounded-none"
             >
               {done && (
                 <span
-                  className="absolute top-3 right-3 inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold tracking-wide"
-                  style={{
-                    background: "rgba(16,185,129,0.12)",
-                    color: "#10b981",
-                    borderRadius: 0,
-                  }}
+                  className="absolute top-3 right-3 inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold tracking-wide bg-success/10 text-success rounded-none"
                 >
                   <Check className="w-3 h-3" strokeWidth={3} />
-                  DONE
+                  {t("common.done")}
                 </span>
               )}
               <div
-                className="w-14 h-14 flex items-center justify-center transition-colors duration-150 group-hover:bg-[#f9423a]/15"
-                style={{ background: "rgba(255,255,255,0.04)", borderRadius: 0 }}
+                className="w-14 h-14 flex items-center justify-center bg-surface-elevated transition-colors duration-150 group-hover:bg-primary/15 rounded-none"
               >
-                <card.icon className="w-7 h-7 text-white/70 group-hover:text-[#f9423a] transition-colors" />
+                <card.icon className="w-7 h-7 text-text-secondary group-hover:text-primary transition-colors" />
               </div>
               <div className="flex-1 flex flex-col justify-end w-full">
-                <div
-                  className="text-[17px] font-bold tracking-tight"
-                  style={{ color: "rgba(255,255,255,0.92)" }}
-                >
-                  {card.title}
+                <div className="text-[17px] font-bold tracking-tight text-foreground">
+                  {t(card.titleKey)}
                 </div>
                 {/* 한 줄 고정 — 카드 폭을 넉넉히 줘서 줄바꿈 없음. */}
-                <div
-                  className="mt-1.5 text-[12px] overflow-hidden"
-                  style={{
-                    color: "rgba(255,255,255,0.5)",
-                    lineHeight: "18px",
-                    height: 18,
-                    whiteSpace: "nowrap",
-                    textOverflow: "ellipsis",
-                  }}
-                >
-                  {card.desc}
+                <div className="mt-1.5 h-[18px] overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-[18px] text-muted-foreground">
+                  {t(card.descKey)}
                 </div>
               </div>
             </button>

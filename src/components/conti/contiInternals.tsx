@@ -15,6 +15,7 @@ import {
   Images,
 } from "lucide-react";
 import { KR, KR_BG, ACFG, ASSET_ICON, type Asset } from "./contiTypes";
+import { useT } from "@/lib/uiLanguage";
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // TagChip
@@ -172,6 +173,7 @@ export const InlineField = ({
   placeholder?: string;
   style?: React.CSSProperties;
 }) => {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   // 클릭한 위치의 문자열 오프셋. editing 전환 후 해당 위치에 커서를 둔다.
@@ -271,6 +273,7 @@ export const LocationField = ({
   assets: Asset[];
   onChange: (v: string) => void;
 }) => {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(value);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -398,7 +401,7 @@ export const LocationField = ({
               }
               return p ? <span key={i}>{p}</span> : null;
             })
-          : "+ Enter location"}
+          : t("conti.enterLocation")}
       </span>
     );
   }
@@ -436,7 +439,7 @@ export const LocationField = ({
           }
           if (e.key === "Enter" || e.key === "Escape") commit();
         }}
-        placeholder="Enter location (@background tag)"
+        placeholder={t("conti.enterLocation")}
         style={{
           width: "100%",
           outline: "none",
@@ -539,6 +542,7 @@ export const MetaRows = ({
   assets?: Asset[];
   onUpdate: (k: string, v: string) => void;
 }) => {
+  const t = useT();
   const [ek, setEk] = useState<string | null>(null);
   // ✅ 각 필드 input ref — commit 시점에 값 읽기
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -597,19 +601,21 @@ export const MetaRows = ({
       k: "camera_angle",
       icon: "M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2zM12 17a4 4 0 100-8 4 4 0 000 8",
       color: KR,
-      label: "Camera",
+      label: t("conti.camera"),
+      empty: t("conti.enterCamera"),
     },
     {
       k: "mood",
       icon: "M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z",
       color: "#f59e0b",
-      label: "Mood",
+      label: t("conti.mood"),
+      empty: t("conti.enterMood"),
     },
   ];
 
   return (
     <div ref={containerRef} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      {topRows.map(({ k, icon, color, label }) => {
+      {topRows.map(({ k, icon, color, label, empty }) => {
         const val = (fields as any)[k] as string;
         return (
           <div key={k} style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 26 }}>
@@ -678,7 +684,7 @@ export const MetaRows = ({
                   transition: "background 0.1s",
                 }}
               >
-                {val || `+ Enter ${label.toLowerCase()}`}
+                {val || empty}
               </span>
             )}
           </div>
@@ -700,7 +706,7 @@ export const MetaRows = ({
         >
           <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0zM12 13a3 3 0 100-6 3 3 0 000 6" />
         </svg>
-        <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", width: 56, flexShrink: 0 }}>Location</span>
+        <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", width: 56, flexShrink: 0 }}>{t("conti.location")}</span>
         <LocationField value={fields.location} assets={assets} onChange={(v) => onUpdate("location", v)} />
       </div>
 
@@ -720,7 +726,7 @@ export const MetaRows = ({
           <circle cx="12" cy="12" r="10" />
           <path d="M12 6v6l4 2" />
         </svg>
-        <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", width: 56, flexShrink: 0 }}>Duration</span>
+        <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", width: 56, flexShrink: 0 }}>{t("conti.duration")}</span>
         {ek === "duration_sec" ? (
           <input
             // ✅ duration도 동일하게 uncontrolled
@@ -763,7 +769,7 @@ export const MetaRows = ({
               opacity: fields.duration_sec ? 1 : 0.35,
             }}
           >
-            {fields.duration_sec ? `${fields.duration_sec}s` : "+ Enter time"}
+            {fields.duration_sec ? `${fields.duration_sec}s` : t("conti.enterTime")}
           </span>
         )}
       </div>
@@ -786,6 +792,7 @@ export const DescriptionField = ({
   existingTags?: string[];
   onChange: (v: string, tags: string[]) => void;
 }) => {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(value);
   const [mentionState, setMentionState] = useState<{ query: string; startIdx: number } | null>(null);
@@ -936,7 +943,7 @@ export const DescriptionField = ({
               commit();
             }
           }}
-          placeholder="Enter scene description... (@tag for assets)"
+          placeholder={t("conti.sceneDescriptionPlaceholder")}
           className="w-full outline-none resize-none text-[12px] leading-relaxed"
           style={{
             borderRadius: 0,
@@ -1088,7 +1095,7 @@ export const DescriptionField = ({
           return <span key={i}>{p}</span>;
         })
       ) : (
-        <span style={{ opacity: 0.3 }}>Enter scene description...</span>
+        <span style={{ opacity: 0.3 }}>{t("conti.sceneDescriptionEmpty")}</span>
       )}
     </div>
   );
@@ -1156,6 +1163,7 @@ export const SidePanel = ({
    *  원본 이미지를 NB2 inpaint 경로로 보내 정체성은 유지하고 카메라 좌표(yaw/pitch/zoom)만 조정. */
   onChangeAngle?: () => void;
 }) => {
+  const t = useT();
   const [hovKey, setHovKey] = useState<string>("");
   // 그룹 항목은 hover 시 우측에 flyout 서브메뉴로 노출됨.
   // 마우스 이동 중 틈이 생겨도 플라이아웃이 닫히지 않게 짧은 지연 후 닫는다.
@@ -1183,7 +1191,7 @@ export const SidePanel = ({
     variantsChildren.push({
       kind: "leaf",
       icon: <Lightbulb className="w-3.5 h-3.5" />,
-      label: "Relight",
+      label: t("conti.relight"),
       fn: onRelight,
       danger: false,
     });
@@ -1195,7 +1203,7 @@ export const SidePanel = ({
     variantsChildren.push({
       kind: "leaf",
       icon: <Move3d className="w-3.5 h-3.5" />,
-      label: "Change Angle",
+      label: t("conti.changeAngle"),
       fn: onChangeAngle,
       danger: false,
     });
@@ -1208,24 +1216,24 @@ export const SidePanel = ({
     variantsChildren.push({
       kind: "leaf",
       icon: <Images className="w-3.5 h-3.5" />,
-      label: "Camera Variations",
+      label: t("conti.cameraVariations"),
       fn: () => {},
       danger: false,
       disabled: true,
-      hint: "Unavailable",
+      hint: t("conti.unavailable"),
     });
   // "Use as Style" 은 콘티 이미지 호버시 나오는 Palette 퀵 아이콘으로
   // 이미 노출되므로 Variants 서브메뉴에서는 중복 제거. 시그니처의
   // onUseAsStyle prop 은 호버 아이콘이 계속 사용하므로 유지.
 
   const entries: SidePanelEntry[] = [
-    { kind: "leaf", icon: <Copy className="w-3.5 h-3.5" />, label: "Duplicate scene", fn: onDuplicate, danger: false },
+    { kind: "leaf", icon: <Copy className="w-3.5 h-3.5" />, label: t("conti.duplicateScene"), fn: onDuplicate, danger: false },
     ...(hasMultipleVersions
       ? [
           {
             kind: "leaf" as const,
             icon: <Columns2 className="w-3.5 h-3.5" />,
-            label: "Compare versions",
+            label: t("conti.compareVersions"),
             fn: onCompare,
             danger: false,
           },
@@ -1236,7 +1244,7 @@ export const SidePanel = ({
           {
             kind: "leaf" as const,
             icon: <Paintbrush className="w-3.5 h-3.5" />,
-            label: "Inpaint",
+            label: t("conti.inpaint"),
             fn: onInpaint,
             danger: false,
           },
@@ -1247,7 +1255,7 @@ export const SidePanel = ({
           {
             kind: "leaf" as const,
             icon: <ImageIcon className="w-3.5 h-3.5" />,
-            label: "Set as Thumbnail",
+            label: t("conti.setAsThumbnail"),
             fn: onSetThumbnail,
             danger: false,
           },
@@ -1258,7 +1266,7 @@ export const SidePanel = ({
           {
             kind: "leaf" as const,
             icon: <Crop className="w-3.5 h-3.5" />,
-            label: "Adjust Image",
+            label: t("conti.adjustImage"),
             fn: onAdjustImage,
             danger: false,
           },
@@ -1271,25 +1279,25 @@ export const SidePanel = ({
             kind: "group" as const,
             id: "variants",
             icon: <Sparkles className="w-3.5 h-3.5" />,
-            label: "Variants",
+            label: t("conti.variants"),
             children: variantsChildren,
           },
         ]
       : []),
     null,
-    { kind: "leaf", icon: <Upload className="w-3.5 h-3.5" />, label: "Upload Image", fn: onUpload, danger: false },
+    { kind: "leaf", icon: <Upload className="w-3.5 h-3.5" />, label: t("conti.uploadImage"), fn: onUpload, danger: false },
     ...(hasImage
       ? [
           {
             kind: "leaf" as const,
             icon: <X className="w-3.5 h-3.5" />,
-            label: "Delete image",
+            label: t("conti.deleteImage"),
             fn: onDeleteImage,
             danger: true,
           },
         ]
       : []),
-    { kind: "leaf", icon: <Trash2 className="w-3.5 h-3.5" />, label: "Delete scene", fn: onDelete, danger: true },
+    { kind: "leaf", icon: <Trash2 className="w-3.5 h-3.5" />, label: t("conti.deleteScene"), fn: onDelete, danger: true },
   ];
 
   const renderLeaf = (item: SidePanelLeaf, key: string, indent = 0) => (

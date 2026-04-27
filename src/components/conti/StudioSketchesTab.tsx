@@ -26,7 +26,6 @@ import type { Sketch } from "./contiTypes";
 import {
   SKETCH_MODEL_DEFAULT,
   SKETCH_MODEL_LABELS,
-  SKETCH_MODEL_DESCRIPTIONS,
   SKETCH_MODEL_USES_ASSET_REFS,
   generateSceneSketches,
   makeSketchFromUrl,
@@ -40,6 +39,7 @@ import {
   subscribeSketchGen,
   genSketchId,
 } from "./sketchState";
+import { useT } from "@/lib/uiLanguage";
 
 const KR = "#f9423a";
 const KR_BG = "rgba(249,66,58,0.10)";
@@ -50,7 +50,7 @@ const ASPECT_CLASS: Record<string, string> = {
   square: "aspect-square",
 };
 
-const MODEL_ORDER: SketchModel[] = ["nano-banana-2", "gpt-image-2", "gpt-image-1.5"];
+const MODEL_ORDER: SketchModel[] = ["nano-banana-2", "gpt-image-1.5", "gpt-image-2"];
 // Min/max match MoodIdeationPanel's stepper (1..20). 20 is a soft cap
 // coming from the quota budget for a single generation burst — beyond
 // that the NB2 batch pacing stops feeling "one job" in the UI.
@@ -129,6 +129,7 @@ export function StudioSketchesTab({
   onSketchesUpdated,
 }: StudioSketchesTabProps) {
   const { toast } = useToast();
+  const t = useT();
 
   // Per-project persisted model selection (last used).
   const modelKey = `ff_sketch_model_${projectId}`;
@@ -144,6 +145,11 @@ export function StudioSketchesTab({
   const setModel = (val: SketchModel) => {
     setModelState(val);
     try { window.localStorage.setItem(modelKey, val); } catch { /* ignore */ }
+  };
+  const getModelDescription = (m: SketchModel) => {
+    if (m === "nano-banana-2") return t("studio.sketchModelNanoDesc");
+    if (m === "gpt-image-2") return t("studio.sketchModelGpt2Desc");
+    return t("studio.sketchModelGpt15Desc");
   };
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
@@ -300,8 +306,8 @@ export function StudioSketchesTab({
     if (isGeneratingCurrentModel) return;
     if (assetBlocked) {
       toast({
-        title: "Register assets first",
-        description: `${SKETCH_MODEL_LABELS[model]} needs at least one asset with an image. Switch to GPT Image 1.5 or register assets.`,
+        title: t("studio.registerAssetsFirstTitle"),
+        description: t("studio.modelRequiresAssets", { model: SKETCH_MODEL_LABELS[model] }),
         variant: "destructive",
       });
       return;
@@ -400,7 +406,7 @@ export function StudioSketchesTab({
         // ── Honest toast ──
         if (generationError) {
           toast({
-            title: "Sketch generation failed",
+            title: t("studio.sketchGenerationFailed"),
             description: generationError?.message ?? String(generationError),
             variant: "destructive",
           });
@@ -410,20 +416,18 @@ export function StudioSketchesTab({
           // throws "모든 이미지 생성 실패" when 0 succeed), but guard so we
           // never lie with a "generated" toast.
           toast({
-            title: "No sketches generated",
-            description:
-              "All shots failed upstream. Check the logs and try again — " +
-              "switching to a different model often helps.",
+            title: t("studio.noSketchesGenerated"),
+            description: t("studio.noSketchesGeneratedDesc"),
             variant: "destructive",
           });
         } else if (arrivedCount < count) {
           toast({
-            title: `${arrivedCount}/${count} sketch${arrivedCount === 1 ? "" : "es"} generated`,
-            description: `${count - arrivedCount} shot${count - arrivedCount === 1 ? "" : "s"} failed upstream and were skipped.`,
+            title: t("studio.partialSketchesGenerated", { done: arrivedCount, total: count }),
+            description: t("studio.partialSketchesFailed", { count: count - arrivedCount }),
           });
         } else {
           toast({
-            title: `${arrivedCount} sketch${arrivedCount === 1 ? "" : "es"} generated`,
+            title: t("studio.sketchesGenerated", { count: arrivedCount }),
           });
         }
 
@@ -444,10 +448,10 @@ export function StudioSketchesTab({
         .eq("id", scene.id);
       onSetAsSceneImage(s.url);
       toast({
-        title: scene.conti_image_url ? "Scene image replaced" : "Set as scene image",
+        title: scene.conti_image_url ? t("studio.sceneImageReplaced") : t("studio.setAsSceneImage"),
       });
     } catch (e: any) {
-      toast({ title: "Failed to set scene image", description: e.message, variant: "destructive" });
+      toast({ title: t("studio.failedSetSceneImage"), description: e.message, variant: "destructive" });
     }
   };
 
@@ -609,7 +613,7 @@ export function StudioSketchesTab({
                 border: "none", cursor: isGeneratingCurrentModel ? "not-allowed" : "pointer",
                 lineHeight: 1, opacity: isGeneratingCurrentModel ? 0.5 : 1,
               }}
-              aria-label="Decrease count"
+              aria-label={t("studio.decreaseCount")}
             >
               −
             </button>
@@ -628,7 +632,7 @@ export function StudioSketchesTab({
                 background: KR, color: "#fff", border: "none", textAlign: "center",
                 fontFamily: "var(--font-mono, monospace)",
               }}
-              aria-label="Sketch count"
+              aria-label={t("studio.sketchCount")}
             />
             <button
               onClick={() => setCount((p) => Math.min(COUNT_MAX, p + 1))}
@@ -639,7 +643,7 @@ export function StudioSketchesTab({
                 border: "none", cursor: isGeneratingCurrentModel ? "not-allowed" : "pointer",
                 lineHeight: 1, opacity: isGeneratingCurrentModel ? 0.5 : 1,
               }}
-              aria-label="Increase count"
+              aria-label={t("studio.increaseCount")}
             >
               +
             </button>
@@ -667,7 +671,7 @@ export function StudioSketchesTab({
                 transition: "all 0.15s",
                 whiteSpace: "nowrap",
               }}
-              title={SKETCH_MODEL_DESCRIPTIONS[model]}
+              title={getModelDescription(model)}
             >
               <Sparkles className="w-3 h-3" style={{ color: modelMenuOpen ? KR : KR }} />
               {SKETCH_MODEL_LABELS[model]}
@@ -716,12 +720,12 @@ export function StudioSketchesTab({
                             className="text-[9px] tracking-wider px-1.5 py-0.5 border border-current"
                             style={{ color: "hsl(var(--muted-foreground))", borderColor: "hsl(var(--border))" }}
                           >
-                            DEFAULT
+                            {t("studio.default")}
                           </span>
                         )}
                       </span>
                       <span className="text-[10px] text-muted-foreground">
-                        {disabled ? "Register asset images first" : SKETCH_MODEL_DESCRIPTIONS[m]}
+                        {disabled ? t("studio.registerAssetsFirst") : getModelDescription(m)}
                       </span>
                     </button>
                   );
@@ -753,14 +757,14 @@ export function StudioSketchesTab({
               whiteSpace: "nowrap",
               flexShrink: 0,
             }}
-            title={showLikedOnly ? "Show all sketches" : "Show liked only"}
+            title={showLikedOnly ? t("studio.showAllSketches") : t("studio.showLikedOnly")}
           >
             <Heart
               className="w-3 h-3"
               fill={showLikedOnly ? "currentColor" : "none"}
               strokeWidth={2}
             />
-            {likedCount > 0 ? `Saved ${likedCount}` : "Saved"}
+            {likedCount > 0 ? t("studio.savedCount", { count: likedCount }) : t("common.saved")}
           </button>
 
           {/* Spacer */}
@@ -788,8 +792,8 @@ export function StudioSketchesTab({
               value={thumbCols}
               onChange={(e) => setThumbCols(Number(e.target.value))}
               style={{ width: 56, accentColor: KR, cursor: "pointer" }}
-              title={`${thumbCols} col`}
-              aria-label="Gallery columns"
+              title={t("studio.colsTitle", { count: thumbCols })}
+              aria-label={t("studio.galleryColumns")}
             />
           </div>
 
@@ -824,7 +828,7 @@ export function StudioSketchesTab({
             ) : (
               <>
                 <Sparkles className="w-3.5 h-3.5" />
-                Generate
+                {t("mood.generate")}
               </>
             )}
           </button>
@@ -835,12 +839,12 @@ export function StudioSketchesTab({
           <div className="mt-1.5 space-y-0.5">
             {anyGenerating && !isGeneratingCurrentModel && (
               <p className="text-[10px]" style={{ color: KR }}>
-                Other model{allGens.filter((g) => !!g.promise).length > 1 ? "s" : ""} generating in the background — switch model anytime.
+                {t("studio.otherModelsGenerating")}
               </p>
             )}
             {assetBlocked && (
               <p className="text-[10px] text-muted-foreground">
-                {SKETCH_MODEL_LABELS[model]} requires registered assets. Switch to GPT Image 1.5 for text-only.
+                {t("studio.modelRequiresAssets", { model: SKETCH_MODEL_LABELS[model] })}
               </p>
             )}
           </div>
@@ -852,18 +856,17 @@ export function StudioSketchesTab({
         {sketches.length === 0 && pendingSkeletons.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-2 px-6 py-10">
             <Sparkles className="w-6 h-6 opacity-60" />
-            <div className="text-[12px] font-semibold">No sketches yet</div>
+            <div className="text-[12px] font-semibold">{t("studio.noSketchesYet")}</div>
             <p className="text-[11px] text-center leading-relaxed text-muted-foreground/80">
-              Generate composition candidates for scene {scene.scene_number} based on its
-              description. Pick the best one and promote it to this scene's image.
+              {t("studio.noSketchesDesc", { scene: scene.scene_number })}
             </p>
           </div>
         ) : showLikedOnly && displaySketches.length === 0 && pendingSkeletons.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-2 px-6 py-10">
             <Heart className="w-6 h-6 opacity-60" />
-            <div className="text-[12px] font-semibold">No saved sketches</div>
+            <div className="text-[12px] font-semibold">{t("studio.noSavedSketches")}</div>
             <p className="text-[11px] text-center leading-relaxed text-muted-foreground/80">
-              Hover a sketch and tap the heart to save it. Switch off "Saved" to see all {sketches.length} sketches again.
+              {t("studio.noSavedSketchesDesc", { count: sketches.length })}
             </p>
           </div>
         ) : (
@@ -1022,6 +1025,7 @@ function SketchCard({
   onPreview?: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const t = useT();
   return (
     <div
       onMouseEnter={() => setHover(true)}
@@ -1065,7 +1069,7 @@ function SketchCard({
               onClick={(e) => { e.stopPropagation(); onToggleLike(); }}
               className="w-6 h-6 flex items-center justify-center rounded-full transition-colors"
               style={{ background: sketch.liked ? KR : "rgba(0,0,0,0.55)" }}
-              title={sketch.liked ? "Unlike" : "Like"}
+              title={sketch.liked ? t("studio.unlike") : t("studio.like")}
             >
               <Heart
                 className="w-3 h-3 text-white"
@@ -1076,7 +1080,7 @@ function SketchCard({
               onClick={(e) => { e.stopPropagation(); onDelete(); }}
               className="w-6 h-6 flex items-center justify-center rounded-full"
               style={{ background: "rgba(0,0,0,0.55)" }}
-              title="Delete"
+              title={t("common.delete")}
             >
               <Trash2 className="w-3 h-3 text-white" />
             </button>
@@ -1089,10 +1093,10 @@ function SketchCard({
               onClick={(e) => { e.stopPropagation(); onSetAsScene(); }}
               className="w-full flex items-center justify-center gap-1 h-6 text-[10.5px] font-semibold text-white rounded-none"
               style={{ background: KR }}
-              title="Set as scene image"
+              title={t("studio.setAsSceneImage")}
             >
               <Check className="w-3 h-3" />
-              Use
+              {t("studio.use")}
             </button>
           </div>
         </div>

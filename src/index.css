@@ -17,6 +17,7 @@
     /* ── Primary → KR Red ── */
     --primary: 2 95% 60%; /* #f9423a */
     --primary-foreground: 0 0% 100%;
+    --brand: 2 95% 60%;
 
     /* ── Secondary / Muted ──
        muted-foreground was #5a5a5a (~3.0:1 on #0a0a0a) which fails WCAG AA
@@ -36,6 +37,7 @@
 
     /* ── Border / Input / Ring ── */
     --border: 0 0% 100% / 0.07;
+    --border-subtle: 0 0% 100% / 0.08;
     --input: 0 0% 11%; /* #1c1c1c */
     --ring: 2 95% 60%;
 
@@ -54,9 +56,18 @@
 
     /* ── Elevated surface ── */
     --surface-elevated: 0 0% 11%; /* #1c1c1c */
+    --surface-nav: 0 0% 5%;
+    --surface-sidebar: 0 0% 4%;
+    --surface-panel: 0 0% 7%;
+    --surface-footer: 0 0% 2%;
 
     /* ── Text secondary ── */
     --text-secondary: 0 0% 60%; /* #999 */
+    --text-tertiary: 0 0% 35%;
+
+    /* ── Semantic state ── */
+    --success: 160 84% 39%;
+    --warning: 38 92% 50%;
   }
 }
 
@@ -135,6 +146,39 @@
   /* ── Elevated surface ── */
   .surface-elevated {
     background: hsl(var(--surface-elevated));
+  }
+
+  .surface-panel {
+    background: hsl(var(--surface-panel));
+    border: 1px solid hsl(var(--border-subtle));
+  }
+
+  .app-topbar {
+    @apply h-16 border-b flex items-center shrink-0;
+    background: hsl(var(--surface-nav));
+    border-color: hsl(var(--border-subtle));
+  }
+
+  .app-footer {
+    @apply h-7 border-t flex items-center shrink-0;
+    background: hsl(var(--surface-footer));
+    border-color: hsl(var(--border-subtle));
+  }
+
+  .meta-pill {
+    @apply inline-flex h-[26px] items-center border px-2.5 font-mono text-[10px] font-medium tracking-wide transition-colors duration-100 rounded-none select-none;
+    border-color: hsl(var(--border-subtle));
+    background: hsl(var(--surface-panel) / 0.7);
+    color: hsl(var(--muted-foreground));
+  }
+  .meta-pill:hover {
+    border-color: hsl(var(--primary) / 0.3);
+    color: hsl(var(--foreground));
+  }
+  .meta-pill-active {
+    border-color: hsl(var(--primary) / 0.4);
+    background: hsl(var(--primary) / 0.1);
+    color: hsl(var(--primary));
   }
 
   /* ── 메타데이터 라벨 ── */

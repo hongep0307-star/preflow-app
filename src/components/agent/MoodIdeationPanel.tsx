@@ -2,14 +2,13 @@ import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useToast } from "@/hooks/use-toast";
 import {
   generateMoodImages,
-  MOOD_IMAGE_MODEL_DEFAULT,
-  MOOD_MODEL_USES_ASSET_REFS,
   type MoodImageModel,
 } from "@/lib/moodIdeation";
 import { supabase } from "@/lib/supabase";
 import { Trash2, Loader2, X, Check, ExternalLink, Sparkles, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { useT } from "@/lib/uiLanguage";
 import {
   KR,
   KR_BG,
@@ -30,6 +29,9 @@ import {
   type MoodImage,
   type MoodGenState,
 } from "./agentTypes";
+
+type MoodModelOption = "gpt-image-1.5-ref" | "gpt-image-1.5-text" | "gpt-image-2" | "nano-banana-2";
+const MOOD_MODEL_OPTION_DEFAULT: MoodModelOption = "gpt-image-1.5-ref";
 
 /* ━━━━━ Mood generation result persistence ━━━━━
  * AgentTab(부모) 이 언마운트된 상태에서 generation 이 끝날 수 있으므로
@@ -105,6 +107,7 @@ const MoodCard = ({
    *  refused to write, so the URL went to DB but no file was ever saved). */
   onBroken?: () => void;
 }) => {
+  const t = useT();
   const [hovered, setHovered] = useState(false);
   const showOverlay = hovered || selected;
 
@@ -293,7 +296,11 @@ const MoodCard = ({
               e.stopPropagation();
               onAttach(e);
             }}
-            title={img.sceneRef != null ? `Linked to S${String(img.sceneRef).padStart(2, "0")}` : "Attach to scene"}
+            title={
+              img.sceneRef != null
+                ? t("mood.linkedToScene", { scene: String(img.sceneRef).padStart(2, "0") })
+                : t("mood.attachToScene")
+            }
             style={{
               position: "absolute",
               bottom: 7,
@@ -357,7 +364,7 @@ const MoodCard = ({
                 alignItems: "center",
                 justifyContent: "center",
               }}
-              title="Send to chat"
+              title={t("mood.sendToChat")}
             >
               <ExternalLink style={{ width: 12, height: 12, color: "rgba(255,255,255,.85)" }} />
             </button>
@@ -377,7 +384,7 @@ const MoodCard = ({
                 alignItems: "center",
                 justifyContent: "center",
               }}
-              title="Delete image"
+              title={t("mood.deleteImage")}
             >
               <Trash2 style={{ width: 12, height: 12, color: "rgba(255,255,255,.9)" }} />
             </button>
@@ -432,6 +439,7 @@ export const MoodIdeationPanel = ({
   onDetachFromScene: (moodImageId: string, sceneNumber: number) => Promise<void>;
   onDeleteMoodImages: (ids: string[]) => Promise<void>;
 }) => {
+  const t = useT();
   useEffect(() => {
     const id = "mood-shimmer-style";
     if (document.getElementById(id)) return;
@@ -488,24 +496,26 @@ export const MoodIdeationPanel = ({
     },
     [thumbColsKey],
   );
-  // Mood 이미지 생성 모델. 빠른 텍스트-only GPT 1.5 가 기본값.
+  // Mood 이미지 생성 모델. GPT Image 1.5 + 이미지 참조가 기본값.
   // 사용자의 마지막 선택은 프로젝트 단위로 localStorage 에 저장되어
   // 탭 이동/재진입/새로고침 후에도 유지된다.
   const moodModelKey = `ff_mood_model_${projectId}`;
-  const [moodModel, setMoodModelState] = useState<MoodImageModel>(() => {
+  const [moodModel, setMoodModelState] = useState<MoodModelOption>(() => {
     try {
       const raw = typeof window !== "undefined" ? window.localStorage.getItem(moodModelKey) : null;
-      if (raw === "gpt-image-1.5" || raw === "gpt-image-2" || raw === "nano-banana-2") {
+      if (raw === "gpt-image-1.5-ref" || raw === "gpt-image-1.5-text") {
         return raw;
       }
+      if (raw === "gpt-image-1.5") return "gpt-image-1.5-ref";
+      if (raw === "gpt-image-2" || raw === "nano-banana-2") return "gpt-image-1.5-ref";
       // 과거 "creative" / "asset" 문자열을 신규 모델명으로 마이그레이트.
-      if (raw === "asset") return "nano-banana-2";
-      if (raw === "creative") return "gpt-image-1.5";
+      if (raw === "asset") return "gpt-image-1.5-ref";
+      if (raw === "creative") return "gpt-image-1.5-text";
     } catch {}
-    return MOOD_IMAGE_MODEL_DEFAULT;
+    return MOOD_MODEL_OPTION_DEFAULT;
   });
   const setMoodModel = useCallback(
-    (val: MoodImageModel) => {
+    (val: MoodModelOption) => {
       setMoodModelState(val);
       try {
         window.localStorage.setItem(moodModelKey, val);
@@ -516,15 +526,17 @@ export const MoodIdeationPanel = ({
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
 
-  const MOOD_MODEL_LABELS: Record<MoodImageModel, string> = {
-    "gpt-image-1.5": "GPT Image 1.5",
+  const MOOD_MODEL_LABELS: Record<MoodModelOption, string> = {
+    "gpt-image-1.5-ref": t("mood.gpt15WithRefs"),
+    "gpt-image-1.5-text": t("mood.gpt15TextOnly"),
     "gpt-image-2": "GPT Image 2",
     "nano-banana-2": "Nano Banana 2",
   };
-  const MOOD_MODEL_DESCRIPTIONS: Record<MoodImageModel, string> = {
-    "gpt-image-1.5": "Fastest · Text-based (asset appearance not reflected)",
-    "gpt-image-2": "Vision · Reflects asset images · Slow",
-    "nano-banana-2": "Reflects asset images · Vertex",
+  const MOOD_MODEL_DESCRIPTIONS: Record<MoodModelOption, string> = {
+    "gpt-image-1.5-ref": t("mood.gpt15WithRefsDesc"),
+    "gpt-image-1.5-text": t("mood.gpt15TextOnlyDesc"),
+    "gpt-image-2": t("mood.disabledModelDesc"),
+    "nano-banana-2": t("mood.disabledModelDesc"),
   };
   const genMoodId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
@@ -568,7 +580,7 @@ export const MoodIdeationPanel = ({
       const s = scenes.find((sc) => sc.scene_number === targetSceneNum);
       return `S${String(targetSceneNum).padStart(2, "0")}${s?.title ? ` · ${s.title}` : ""}`;
     }
-    return scenes.length > 0 ? `All scenes (${scenes.length})` : "Brief-based";
+    return scenes.length > 0 ? t("mood.contextAllScenes", { count: scenes.length }) : t("mood.contextBriefBased");
   })();
 
   const handleGenerate = async () => {
@@ -580,6 +592,10 @@ export const MoodIdeationPanel = ({
     const batchId = genMoodId();
     const batchCount = generateCount;
     const batchModel = moodModel;
+    const batchApiModel: MoodImageModel = batchModel === "gpt-image-1.5-ref" || batchModel === "gpt-image-1.5-text"
+      ? "gpt-image-1.5"
+      : batchModel;
+    const batchForceAssetRefs = batchModel === "gpt-image-1.5-ref";
     const batchTargetSceneNum = targetSceneNum;
 
     // skeleton placeholder (url: null) 삽입.
@@ -608,7 +624,7 @@ export const MoodIdeationPanel = ({
       try {
         const targetScenes =
           batchTargetSceneNum !== null ? scenes.filter((s) => s.scene_number === batchTargetSceneNum) : scenes;
-        await generateMoodImages(
+        const generatedUrls = await generateMoodImages(
           {
             projectId,
             briefAnalysis,
@@ -633,7 +649,8 @@ export const MoodIdeationPanel = ({
             videoFormat,
             count: batchCount,
             targetSceneNumber: batchTargetSceneNum,
-            model: batchModel,
+            model: batchApiModel,
+            forceAssetRefs: batchForceAssetRefs,
           },
           (batchUrls) => {
             // 이 배치의 arrivedUrls 만 갱신 — 다른 in-flight 배치에 영향 없음.
@@ -652,9 +669,23 @@ export const MoodIdeationPanel = ({
             }
           },
         );
-        toast({ title: `${batchCount} mood images generated` });
+        if (generatedUrls.length < batchCount) {
+          toast({
+            title: t("mood.generatedPartialToast", { done: generatedUrls.length, total: batchCount }),
+            description: t("mood.generatedPartialDesc"),
+            variant: "destructive",
+          });
+        } else {
+          toast({ title: t("mood.generatedToast", { count: batchCount }) });
+        }
       } catch (err: any) {
-        toast({ title: "Mood generation failed", description: err.message, variant: "destructive" });
+        const message = String(err?.message ?? "");
+        const isSafetyRejected = message === "SAFETY_FILTER_REJECTED" || /safety system|safety filter/i.test(message);
+        toast({
+          title: isSafetyRejected ? t("mood.safetyRejectedTitle") : t("mood.generationFailed"),
+          description: isSafetyRejected ? t("mood.safetyRejectedDesc") : t("mood.allGenerationFailedDesc"),
+          variant: "destructive",
+        });
       } finally {
         // ─── 언마운트-세이프 완료 처리 ───
         // 탭 전환으로 AgentTab 이 unmount 된 상태에서도 DB 에 반드시 저장되어야 하므로,
@@ -705,22 +736,21 @@ export const MoodIdeationPanel = ({
     if (!img || !img.url) return;
     await onAttachToScene(img.url, scene.id, imgId, scene.scene_number);
     setAttachMenu(null);
-    toast({ title: `Image attached to Scene ${scene.scene_number}` });
+    toast({ title: t("mood.attachedToast", { scene: scene.scene_number }) });
   };
   const doDetach = async (imgId: string) => {
     const img = moodImages.find((i) => i.id === imgId);
     if (!img || img.sceneRef === null) return;
     await onDetachFromScene(imgId, img.sceneRef);
     setAttachMenu(null);
-    toast({ title: `Detached from Scene ${img.sceneRef}` });
+    toast({ title: t("mood.detachedToast", { scene: img.sceneRef }) });
   };
 
   const displayImages = showLikedOnly ? moodImages.filter((img) => img.url === null || img.liked) : moodImages;
   const likedCount = moodImages.filter((img) => img.liked).length;
   const attachImg = attachMenu ? moodImages.find((i) => i.id === attachMenu.id) : null;
 
-  const hasPhotoAssets = assets.some((a) => a.photo_url);
-  const MOOD_MODEL_OPTIONS: MoodImageModel[] = ["gpt-image-1.5", "gpt-image-2", "nano-banana-2"];
+  const MOOD_MODEL_OPTIONS: MoodModelOption[] = ["gpt-image-1.5-ref", "gpt-image-1.5-text", "gpt-image-2", "nano-banana-2"];
 
   const modelSelector = (
     <div ref={modelMenuRef} style={{ position: "relative" }}>
@@ -761,8 +791,7 @@ export const MoodIdeationPanel = ({
           }}
         >
           {MOOD_MODEL_OPTIONS.map((m) => {
-            const needsAsset = MOOD_MODEL_USES_ASSET_REFS[m];
-            const disabled = needsAsset && !hasPhotoAssets;
+            const disabled = m === "gpt-image-2" || m === "nano-banana-2";
             const active = moodModel === m;
             return (
               <button
@@ -770,8 +799,8 @@ export const MoodIdeationPanel = ({
                 onClick={() => {
                   if (disabled) {
                     toast({
-                      title: "Register assets first",
-                      description: "Assets with images are required",
+                      title: t("mood.disabledModelTitle"),
+                      description: t("mood.disabledModelDesc"),
                       variant: "destructive",
                     });
                     return;
@@ -806,7 +835,7 @@ export const MoodIdeationPanel = ({
                   >
                     {MOOD_MODEL_LABELS[m]}
                   </span>
-                  {m === MOOD_IMAGE_MODEL_DEFAULT && (
+                  {m === MOOD_MODEL_OPTION_DEFAULT && (
                     <span
                       style={{
                         fontSize: 9,
@@ -816,7 +845,7 @@ export const MoodIdeationPanel = ({
                         letterSpacing: 0.3,
                       }}
                     >
-                      DEFAULT
+                      {t("mood.default")}
                     </span>
                   )}
                   {active && (
@@ -824,7 +853,7 @@ export const MoodIdeationPanel = ({
                   )}
                 </div>
                 <span style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
-                  {disabled ? "Register asset images first" : MOOD_MODEL_DESCRIPTIONS[m]}
+                  {MOOD_MODEL_DESCRIPTIONS[m]}
                 </span>
               </button>
             );
@@ -954,7 +983,7 @@ export const MoodIdeationPanel = ({
                 }}
               >
                 {[
-                  { label: scenes.length > 0 ? "All scenes" : "Brief-based", num: null },
+                  { label: scenes.length > 0 ? t("mood.allScenes") : t("mood.briefBased"), num: null },
                   ...scenes.map((s) => ({
                     label: `S${String(s.scene_number).padStart(2, "0")}${s.title ? ` · ${s.title}` : ""}`,
                     num: s.scene_number,
@@ -1102,7 +1131,7 @@ export const MoodIdeationPanel = ({
             >
               <path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z" />
             </svg>
-            {likedCount > 0 ? `Saved ${likedCount}` : "Saved"}
+            {likedCount > 0 ? t("mood.savedCount", { count: likedCount }) : t("mood.saved")}
           </button>
           {/* Column slider + count */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
@@ -1156,10 +1185,10 @@ export const MoodIdeationPanel = ({
               cursor: "pointer",
               flexShrink: 0,
             }}
-            title={isGenerating ? `${inFlightCount} batch in progress · click to start another` : undefined}
+            title={isGenerating ? t("mood.generateInProgressTitle", { count: inFlightCount }) : undefined}
           >
             {isGenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}{" "}
-            Generate
+            {t("mood.generate")}
             {inFlightCount > 0 && (
               <span
                 style={{
@@ -1208,8 +1237,9 @@ export const MoodIdeationPanel = ({
             <polyline points="9 11 12 14 22 4" />
             <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
           </svg>
-          <span style={{ fontSize: 12, fontWeight: 500, color: KR }}>{selectedIds.size} selected</span>
-          <div style={{ flex: 1 }} />
+          <span style={{ fontSize: 12, fontWeight: 500, color: KR }}>
+            {t("mood.selected", { count: selectedIds.size })}
+          </span>
           <button
             onClick={clearSelection}
             style={{
@@ -1222,8 +1252,9 @@ export const MoodIdeationPanel = ({
               cursor: "pointer",
             }}
           >
-            Deselect
+            {t("mood.deselect")}
           </button>
+          <div style={{ flex: 1 }} />
           <button
             onClick={() => requestDelete(Array.from(selectedIds))}
             style={{
@@ -1240,7 +1271,7 @@ export const MoodIdeationPanel = ({
               cursor: "pointer",
             }}
           >
-            Delete
+          {t("mood.delete")}
           </button>
           {moodImages.length > 0 && (
             <button
@@ -1259,7 +1290,7 @@ export const MoodIdeationPanel = ({
                 cursor: "pointer",
               }}
             >
-              Delete All
+              {t("mood.deleteAll")}
             </button>
           )}
         </div>
@@ -1270,9 +1301,9 @@ export const MoodIdeationPanel = ({
       <div className="flex-1 overflow-y-auto p-3 pb-24" onClick={() => setAttachMenu(null)}>
         {displayImages.length === 0 && !isGenerating ? (
           <div className="flex flex-col items-center justify-center h-full min-h-[200px]">
-            <p className="text-sm text-muted-foreground">{showLikedOnly ? "No saved images" : "No mood images yet"}</p>
+            <p className="text-sm text-muted-foreground">{showLikedOnly ? t("mood.noSavedImages") : t("mood.noMoodImages")}</p>
             <p className="text-xs text-muted-foreground/60 mt-1">
-              {showLikedOnly ? "Save images with the ♥ button" : "Select a scene above and generate mood images"}
+              {showLikedOnly ? t("mood.saveImagesHint") : t("mood.generateHint")}
             </p>
           </div>
         ) : (
@@ -1306,7 +1337,7 @@ export const MoodIdeationPanel = ({
               borderBottom: "0.5px solid hsl(var(--border))",
             }}
           >
-            Attach to scene
+            {t("mood.attachToScene")}
           </div>
           {attachImg.sceneRef !== null && (
             <>
@@ -1330,7 +1361,7 @@ export const MoodIdeationPanel = ({
                 onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
               >
                 <X style={{ width: 11, height: 11 }} />
-                Detach S{String(attachImg.sceneRef).padStart(2, "0")}
+                {t("mood.detachScene", { scene: String(attachImg.sceneRef).padStart(2, "0") })}
               </button>
               <div style={{ height: 1, background: "hsl(var(--border))", margin: "2px 0" }} />
             </>
@@ -1380,7 +1411,7 @@ export const MoodIdeationPanel = ({
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {s.title || `Scene ${s.scene_number}`}
                 </span>
-                {alreadyTaken && <span style={{ fontSize: 9, color: "hsl(var(--muted-foreground))" }}>linked</span>}
+                {alreadyTaken && <span style={{ fontSize: 9, color: "hsl(var(--muted-foreground))" }}>{t("mood.linked")}</span>}
                 {isCurrentlyAttached && !alreadyTaken && (
                   <svg
                     width={10}
@@ -1405,18 +1436,17 @@ export const MoodIdeationPanel = ({
         <Dialog open onOpenChange={() => setDeleteConfirm(null)}>
           <DialogContent className="max-w-[380px] bg-card border-border">
             <DialogHeader>
-              <DialogTitle>Delete images?</DialogTitle>
+              <DialogTitle>{t("mood.deleteImagesTitle")}</DialogTitle>
             </DialogHeader>
             <p className="text-[13px] text-muted-foreground leading-relaxed">
-              <strong className="text-foreground">{deleteConfirm.connectedScenes.length}</strong> of the selected images
-              {" "}are linked to scenes ({deleteConfirm.connectedScenes.map((n) => `Scene ${n}`).join(", ")}).
-              <br />
-              <br />
-              Deleting them will also remove the images from those scenes. Continue?
+              {t("mood.deleteImagesDesc", {
+                count: deleteConfirm.connectedScenes.length,
+                scenes: deleteConfirm.connectedScenes.map((n) => `S${String(n).padStart(2, "0")}`).join(", "),
+              })}
             </p>
             <DialogFooter>
               <Button variant="ghost" onClick={() => setDeleteConfirm(null)}>
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button
                 onClick={async () => {
@@ -1427,7 +1457,7 @@ export const MoodIdeationPanel = ({
                 className="gap-1.5"
                 style={{ background: "#dc2626", color: "#fff" }}
               >
-                Delete
+                {t("common.delete")}
               </Button>
             </DialogFooter>
           </DialogContent>

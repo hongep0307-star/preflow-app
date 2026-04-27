@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { type AssetType, KR } from "./types";
+import { useT } from "@/lib/uiLanguage";
 
 interface Props {
   assetType: AssetType;
@@ -8,6 +9,7 @@ interface Props {
 }
 
 export const UploadZone = ({ assetType, onFile }: Props) => {
+  const t = useT();
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handleDrop = (e: React.DragEvent) => {
@@ -51,7 +53,7 @@ export const UploadZone = ({ assetType, onFile }: Props) => {
       >
         <Plus className="w-5 h-5" style={{ color: dragOver ? KR : "rgba(255,255,255,0.2)" }} />
         <span className="font-mono text-[10px] tracking-wider text-muted-foreground/40">
-          {dragOver ? "Drop Here" : "Drag or Click · Max 5MB"}
+          {dragOver ? t("assets.dropHere") : t("assets.dragOrClick")}
         </span>
       </button>
     </>

@@ -23,9 +23,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Plus, Film, Search, X, ChevronRight, Loader2, Trash2, Folder } from "lucide-react";
+import { Plus, Film, Search, X, ChevronRight, Loader2, Trash2, Folder, Settings } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/uiLanguage";
+import {
+  DASHBOARD_CARDS_PER_ROW_CHANGED_EVENT,
+  readDashboardCardsPerRow,
+  type DashboardCardsPerRow,
+} from "@/lib/dashboardPreferences";
 
 /* ── 타입 ── */
 export interface Project {
@@ -74,6 +80,7 @@ const FolderModal = ({
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
+  const t = useT();
 
   useEffect(() => {
     setName(editFolder?.name ?? "");
@@ -116,14 +123,14 @@ const FolderModal = ({
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="bg-card border-border max-w-[360px]" style={{ borderRadius: 0 }}>
         <DialogHeader>
-          <DialogTitle className="text-[15px] font-semibold">{editFolder ? "Edit Folder" : "New Folder"}</DialogTitle>
+          <DialogTitle className="text-[15px] font-semibold">{editFolder ? t("dashboard.editFolder") : t("dashboard.newFolder")}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4 mt-2">
           <div className="space-y-1.5">
-            <Label className="text-muted-foreground text-[13px]">Folder Name *</Label>
+            <Label className="text-muted-foreground text-[13px]">{t("dashboard.folderName")}</Label>
             <Input
               required
               value={name}
@@ -142,21 +149,21 @@ const FolderModal = ({
                 className="text-destructive hover:text-destructive hover:bg-destructive/10 text-[13px] h-9 px-3"
               >
                 <Trash2 className="w-3.5 h-3.5 mr-1.5" />
-                Delete
+                {t("common.delete")}
               </Button>
             ) : (
               <div />
             )}
             <div className="flex gap-2">
               <Button type="button" variant="ghost" onClick={onClose} className="text-[13px] h-9">
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button
                 disabled={loading}
                 className="min-w-[80px] bg-primary hover:bg-primary/85 text-[13px] h-9"
                 style={{ borderRadius: 0 }}
               >
-                {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : editFolder ? "Save" : "Create"}
+                {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : editFolder ? t("common.save") : t("common.create")}
               </Button>
             </div>
           </div>
@@ -194,6 +201,7 @@ const DraggableCard = ({
 /* ── 사이드바 Ungrouped 드롭존 (드래그 중에만 노출) ── */
 const DroppableUngroupedSidebar = ({ isOver }: { isOver: boolean }) => {
   const { setNodeRef } = useDroppable({ id: "sidebar-ungrouped" });
+  const t = useT();
   return (
     <div ref={setNodeRef}>
       <div
@@ -205,16 +213,16 @@ const DroppableUngroupedSidebar = ({ isOver }: { isOver: boolean }) => {
         <Folder
           className={cn(
             "w-3.5 h-3.5 flex-shrink-0 transition-colors",
-            isOver ? "text-primary" : "text-white/25",
+            isOver ? "text-primary" : "text-muted-foreground",
           )}
         />
         <span
           className={cn(
             "text-[13px] transition-colors",
-            isOver ? "text-white/90 font-semibold" : "text-white/35",
+            isOver ? "text-foreground font-semibold" : "text-muted-foreground",
           )}
         >
-          Ungrouped
+          {t("common.ungrouped")}
         </span>
       </div>
     </div>
@@ -229,7 +237,7 @@ const DroppableSidebarFolder = ({
   isOver,
   isDragging,
   onSelect,
-  onDoubleClick,
+  onEdit,
 }: {
   folder: Folder;
   count: number;
@@ -237,52 +245,65 @@ const DroppableSidebarFolder = ({
   isOver: boolean;
   isDragging: boolean;
   onSelect: () => void;
-  onDoubleClick: () => void;
+  onEdit: () => void;
 }) => {
   const { setNodeRef } = useDroppable({ id: `sidebar-folder-${folder.id}` });
+  const t = useT();
 
   return (
     <div ref={setNodeRef}>
-      <button
-        onClick={onSelect}
-        onDoubleClick={onDoubleClick}
+      <div
         className={cn(
-          "w-full flex items-center gap-3 px-4 py-2.5 text-left border-l-2 transition-all duration-100",
+          "group/folder flex items-center border-l-2 transition-all duration-100",
           isOver && isDragging
             ? "bg-primary/15 border-l-primary"
             : isSelected
               ? "border-l-primary bg-primary/[0.07]"
-              : "border-l-transparent hover:bg-white/[0.03]",
+              : "border-l-transparent hover:bg-surface-panel",
         )}
-        title="Double-click to edit"
       >
-        <Folder
-          className={cn(
-            "w-3.5 h-3.5 flex-shrink-0 transition-colors",
-            isOver && isDragging ? "text-primary" : isSelected ? "text-primary" : "text-white/25",
-          )}
-        />
-        <span
-          className={cn(
-            "text-[13px] flex-1 truncate transition-colors",
-            isOver && isDragging
-              ? "text-white/90 font-semibold"
-              : isSelected
-                ? "text-white/90 font-semibold"
-                : "text-white/45",
-          )}
+        <button
+          type="button"
+          onClick={onSelect}
+          className="grid min-w-0 flex-1 grid-cols-[18px_minmax(0,1fr)_28px] items-center gap-3 py-2.5 pl-4 pr-0 text-left"
         >
-          {folder.name}
-        </span>
-        <span
-          className={cn(
-            "text-[11px] font-mono transition-colors",
-            isOver && isDragging ? "text-white/60" : "text-white/22",
-          )}
+          <Folder
+            className={cn(
+              "w-3.5 h-3.5 flex-shrink-0 transition-colors",
+              isOver && isDragging ? "text-primary" : isSelected ? "text-primary" : "text-muted-foreground",
+            )}
+          />
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate text-[13px] transition-colors",
+              isOver && isDragging
+                ? "text-foreground font-semibold"
+                : isSelected
+                  ? "text-foreground font-semibold"
+                  : "text-text-secondary",
+            )}
+          >
+            {folder.name}
+          </span>
+          <span
+            className={cn(
+              "text-right font-mono text-[11px] transition-all duration-150 group-hover/folder:-translate-x-[14px]",
+              isOver && isDragging ? "text-text-secondary" : "text-text-tertiary",
+            )}
+          >
+            {count}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={onEdit}
+          className="mr-[10px] flex h-6 w-6 shrink-0 items-center justify-center text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/folder:opacity-100"
+          title={t("common.edit")}
+          style={{ borderRadius: 0 }}
         >
-          {count}
-        </span>
-      </button>
+          <Settings className="h-3 w-3" />
+        </button>
+      </div>
     </div>
   );
 };
@@ -293,6 +314,7 @@ const ProjectGroup = ({
   count,
   projects,
   sceneStatsMap,
+  cardsPerRow,
   onRefresh,
   onEditProject,
   isOver,
@@ -302,6 +324,7 @@ const ProjectGroup = ({
   count?: number;
   projects: Project[];
   sceneStatsMap: Record<string, SceneStats>;
+  cardsPerRow: DashboardCardsPerRow;
   onRefresh: () => void;
   onEditProject: (p: Project) => void;
   isOver?: boolean;
@@ -316,6 +339,7 @@ const ProjectGroup = ({
     if (isOver) setCollapsed(false);
   }, [isOver]);
   if (projects.length === 0) return null;
+  const gridStyle = { gridTemplateColumns: `repeat(${cardsPerRow}, minmax(0, 1fr))` };
 
   return (
     <div ref={setNodeRef}>
@@ -326,12 +350,12 @@ const ProjectGroup = ({
             onClick={() => setCollapsed((v) => !v)}
             aria-label={collapsed ? "Expand group" : "Collapse group"}
             aria-expanded={!collapsed}
-            className="flex items-center justify-center w-4 h-4 hover:bg-white/[0.04] transition-colors"
+            className="flex items-center justify-center w-4 h-4 hover:bg-surface-panel transition-colors"
             style={{ borderRadius: 0 }}
           >
             <ChevronRight
               className={cn(
-                "w-3 h-3 text-white/40 transition-transform duration-150",
+                "w-3 h-3 text-muted-foreground transition-transform duration-150",
                 !collapsed && "rotate-90",
               )}
             />
@@ -341,22 +365,23 @@ const ProjectGroup = ({
             onClick={() => setCollapsed((v) => !v)}
             className="flex items-center gap-2.5 cursor-pointer"
           >
-            <span className="text-[11px] font-mono tracking-[0.05em] text-white/35 hover:text-white/55 transition-colors">
+            <span className="text-[11px] font-mono tracking-[0.05em] text-muted-foreground hover:text-text-secondary transition-colors">
               {label}
             </span>
             {count !== undefined && (
-              <span className="text-[10px] font-mono text-white/18">{count}</span>
+              <span className="text-[10px] font-mono text-text-tertiary">{count}</span>
             )}
           </button>
-          <div className="flex-1 h-px bg-white/[0.05]" />
+          <div className="flex-1 h-px bg-border-subtle" />
         </div>
       )}
       {!collapsed && (
         <div
           className={cn(
-            "grid grid-cols-1 md:grid-cols-2 gap-2 transition-[box-shadow,background-color] duration-100",
+            "grid gap-3 transition-[box-shadow,background-color] duration-100",
             isOver && "ring-2 ring-primary/60 bg-primary/[0.05]",
           )}
+          style={gridStyle}
         >
           {projects.map((p) => (
             <DraggableCard
@@ -375,6 +400,7 @@ const ProjectGroup = ({
 
 /* ═══════════════════════ 메인 페이지 ═══════════════════════ */
 const DashboardPage = () => {
+  const t = useT();
   const [projects, setProjects] = useState<Project[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -388,10 +414,12 @@ const DashboardPage = () => {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [cardsPerRow, setCardsPerRow] = useState<DashboardCardsPerRow>(readDashboardCardsPerRow);
 
   const { toast } = useToast();
   const navigate = useNavigate();
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  const projectGridStyle = { gridTemplateColumns: `repeat(${cardsPerRow}, minmax(0, 1fr))` };
 
   /* ── 데이터 패칭 ── */
   const fetchData = async () => {
@@ -499,6 +527,19 @@ const DashboardPage = () => {
     fetchData();
   }, []);
 
+  useEffect(() => {
+    const syncCardsPerRow = () => setCardsPerRow(readDashboardCardsPerRow());
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === "preflow.dashboard.cardsPerRow") syncCardsPerRow();
+    };
+    window.addEventListener(DASHBOARD_CARDS_PER_ROW_CHANGED_EVENT, syncCardsPerRow);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(DASHBOARD_CARDS_PER_ROW_CHANGED_EVENT, syncCardsPerRow);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
   /* ── 드래그 핸들러 ── */
   const handleDragStart = ({ active }: DragStartEvent) => setActiveId(active.id as string);
   const handleDragOver = ({ over }: DragOverEvent) => setOverId(over ? String(over.id) : null);
@@ -537,11 +578,11 @@ const DashboardPage = () => {
 
   const activeProject = projects.find((p) => p.id === activeId);
   const mainTitle = selectedFolderId
-    ? (folders.find((f) => f.id === selectedFolderId)?.name ?? "Projects")
-    : "All Projects";
+    ? (folders.find((f) => f.id === selectedFolderId)?.name ?? t("dashboard.allProjects"))
+    : t("dashboard.allProjects");
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col bg-background">
       <Navbar />
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -554,53 +595,55 @@ const DashboardPage = () => {
         >
           {/* ━━━ 좌측 사이드바 ━━━ */}
           <aside
-            className="flex flex-col flex-shrink-0 border-r border-white/[0.07]"
-            style={{ width: 230, background: "#090909" }}
+            className="flex flex-col flex-shrink-0 border-r border-border-subtle bg-surface-sidebar"
+            style={{ width: 230 }}
           >
             {/* 검색 */}
-            <div className="flex items-center px-3 border-b border-white/[0.06] flex-shrink-0" style={{ height: 48 }}>
+            <div className="flex items-center px-3 border-b border-border-subtle flex-shrink-0" style={{ height: 48 }}>
               <div
-                className="flex items-center gap-2 px-3 py-2 bg-white/[0.04] border border-white/[0.08] w-full"
+                className="flex items-center gap-2 px-3 py-2 bg-surface-panel border border-border-subtle w-full"
                 style={{ borderRadius: 0 }}
               >
-                <Search className="w-3.5 h-3.5 text-white/25 flex-shrink-0" />
+                <Search className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
                 <input
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search..."
-                  className="bg-transparent border-none outline-none text-[12px] font-mono text-white/50 placeholder:text-white/15 w-full"
+                  placeholder={t("common.search")}
+                  className="bg-transparent border-none outline-none text-[12px] font-mono text-text-secondary placeholder:text-muted-foreground w-full"
                 />
                 {searchQuery && (
                   <button onClick={() => setSearchQuery("")}>
-                    <X className="w-3 h-3 text-white/30 hover:text-white/60 transition-colors" />
+                    <X className="w-3 h-3 text-muted-foreground hover:text-foreground transition-colors" />
                   </button>
                 )}
               </div>
             </div>
 
             {/* Create Project */}
-            <div className="px-3 py-3 border-b border-white/[0.06] flex-shrink-0">
+            <div className="px-3 py-3 border-b border-border-subtle flex-shrink-0">
               <button
                 onClick={() => setIsModalOpen(true)}
                 className="w-full flex items-center justify-center gap-2 h-9 bg-primary hover:bg-primary/85 text-white text-[12px] font-semibold tracking-wide transition-colors"
                 style={{ borderRadius: 0 }}
               >
                 <Plus className="w-4 h-4" />
-                Create Project
+                {t("dashboard.newProject")}
               </button>
             </div>
 
             {/* Folders 헤더 */}
-            <div className="flex items-center justify-between px-4 pt-4 pb-2 flex-shrink-0">
-              <span className="text-[10px] font-mono tracking-[0.12em] text-white/25">Folders</span>
+            <div className="flex items-center gap-2 px-4 pt-4 pb-2 flex-shrink-0">
+              <span className="text-[10px] font-mono tracking-[0.12em] text-muted-foreground">
+                {t("dashboard.folders")}
+              </span>
               <button
                 onClick={() => {
                   setEditFolder(null);
                   setIsFolderModalOpen(true);
                 }}
-                className="w-[18px] h-[18px] flex items-center justify-center border border-white/[0.12] text-white/35 hover:border-primary/50 hover:text-primary hover:bg-primary/[0.08] transition-all text-[13px] leading-none"
+                className="w-[18px] h-[18px] flex items-center justify-center border border-border-subtle text-muted-foreground hover:border-primary/50 hover:text-primary hover:bg-primary/[0.08] transition-all text-[13px] leading-none"
                 style={{ borderRadius: 2 }}
-                title="New Folder"
+                title={t("dashboard.newFolder")}
               >
                 +
               </button>
@@ -609,7 +652,9 @@ const DashboardPage = () => {
             {/* 폴더 목록 */}
             <div className="flex-1 overflow-y-auto pb-2">
               {folders.length === 0 && !loading && (
-                <div className="px-4 py-3 text-[11px] text-white/20 font-mono">No folders yet</div>
+                <div className="px-4 py-3 text-[11px] text-text-tertiary font-mono">
+                  {t("dashboard.noFolders")}
+                </div>
               )}
               {folders.map((folder) => {
                 const count = projects.filter((p) => p.folder_id === folder.id).length;
@@ -623,7 +668,7 @@ const DashboardPage = () => {
                     isOver={overId === `sidebar-folder-${folder.id}`}
                     isDragging={!!activeId}
                     onSelect={() => setSelectedFolderId(isSelected ? null : folder.id)}
-                    onDoubleClick={() => {
+                    onEdit={() => {
                       setEditFolder(folder);
                       setIsFolderModalOpen(true);
                     }}
@@ -639,13 +684,13 @@ const DashboardPage = () => {
           <main className="flex-1 flex flex-col min-w-0 min-h-0">
             {/* 메인 바 */}
             <div
-              className="flex items-center px-5 border-b border-white/[0.07] flex-shrink-0"
-              style={{ height: 48, background: "#0c0c0c" }}
+              className="flex items-center px-5 border-b border-border-subtle bg-surface-nav flex-shrink-0"
+              style={{ height: 48 }}
             >
-              <span className="text-[14px] font-bold text-white/70">{mainTitle}</span>
-              <span className="text-[11px] font-mono text-white/25 ml-2.5">{visibleProjects.length}</span>
+              <span className="text-[14px] font-bold text-foreground/80">{mainTitle}</span>
+              <span className="text-[11px] font-mono text-muted-foreground ml-2.5">{visibleProjects.length}</span>
 
-              <div className="flex items-center ml-auto">
+              <div className="ml-auto flex items-center">
                 {(["all", "active", "completed"] as const).map((key) => (
                   <button
                     key={key}
@@ -654,11 +699,11 @@ const DashboardPage = () => {
                       "px-4 text-[12px] font-medium tracking-wider border-b-[2px] h-[48px] transition-all duration-100",
                       statusFilter === key
                         ? "text-primary border-primary"
-                        : "text-white/30 border-transparent hover:text-white/55",
+                        : "text-muted-foreground border-transparent hover:text-text-secondary",
                     )}
                     style={{ borderRadius: 0 }}
                   >
-                    {key === "all" ? "All" : key === "active" ? "Active" : "Done"}
+                    {key === "all" ? t("common.all") : key === "active" ? t("common.active") : t("common.done")}
                   </button>
                 ))}
               </div>
@@ -667,29 +712,29 @@ const DashboardPage = () => {
             {/* 프로젝트 목록 */}
             <div className="flex-1 overflow-y-auto px-5 py-5">
               {loading ? (
-                <div className="space-y-2">
-                  {[...Array(4)].map((_, i) => (
+                <div className="grid gap-3" style={projectGridStyle}>
+                  {[...Array(cardsPerRow)].map((_, i) => (
                     <SkeletonCard key={i} />
                   ))}
                 </div>
               ) : visibleProjects.length === 0 ? (
                 <div
-                  className="border border-dashed border-white/[0.08]"
+                  className="border border-dashed border-border-subtle"
                   style={{ borderRadius: 0 }}
                 >
                   <EmptyState
                     icon={<Film className="w-8 h-8" />}
-                    title={searchQuery || statusFilter !== "all" ? "No results" : "No projects yet"}
+                    title={searchQuery || statusFilter !== "all" ? t("dashboard.noResults") : t("dashboard.noProjects")}
                     description={
                       searchQuery || statusFilter !== "all"
-                        ? "Try a different search or filter"
-                        : "Create a project to get started"
+                        ? t("dashboard.noResultsDesc")
+                        : t("dashboard.noProjectsDesc")
                     }
                   />
                 </div>
               ) : selectedFolderId ? (
-                /* 특정 폴더 선택 뷰 — ProjectGroup 과 동일한 2열 그리드 사용 */
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                /* 특정 폴더 선택 뷰 — ProjectGroup 과 동일한 썸네일 중심 그리드 사용 */
+                <div className="grid gap-3" style={projectGridStyle}>
                   {visibleProjects.map((p) => (
                     <DraggableCard
                       key={p.id}
@@ -716,6 +761,7 @@ const DashboardPage = () => {
                         count={folderProjects.length}
                         projects={folderProjects}
                         sceneStatsMap={sceneStatsMap}
+                        cardsPerRow={cardsPerRow}
                         onRefresh={fetchData}
                         onEditProject={(proj) => {
                           setEditProject(proj);
@@ -733,10 +779,11 @@ const DashboardPage = () => {
                     if (ungrouped.length === 0) return null;
                     return (
                       <ProjectGroup
-                        label={folders.length > 0 ? "Ungrouped" : undefined}
+                        label={folders.length > 0 ? t("common.ungrouped") : undefined}
                         count={ungrouped.length}
                         projects={ungrouped}
                         sceneStatsMap={sceneStatsMap}
+                        cardsPerRow={cardsPerRow}
                         onRefresh={fetchData}
                         onEditProject={(proj) => {
                           setEditProject(proj);
@@ -769,21 +816,20 @@ const DashboardPage = () => {
       </div>
 
       {/* ━━━ 하단 상태바 ━━━ */}
-      <footer
-        className="flex items-center justify-between px-5 border-t border-white/[0.06] flex-shrink-0"
-        style={{ height: 28, background: "#060606" }}
-      >
+      <footer className="app-footer justify-between px-5">
         <div className="flex items-center gap-5">
           <div className="flex items-center gap-2">
-            <span className="inline-block w-[6px] h-[6px] bg-emerald-500" style={{ borderRadius: "50%" }} />
-            <span className="font-mono text-[10px] tracking-wide text-white/35">Server: Online</span>
+            <span className="inline-block w-[6px] h-[6px] bg-success" style={{ borderRadius: "50%" }} />
+            <span className="font-mono text-[10px] tracking-wide text-muted-foreground">{t("dashboard.serverOnline")}</span>
           </div>
           <div className="flex items-center gap-2">
             <span className="inline-block w-[6px] h-[6px] bg-primary" style={{ borderRadius: "50%" }} />
-            <span className="font-mono text-[10px] tracking-wide text-white/35">Projects: {projects.length}</span>
+            <span className="font-mono text-[10px] tracking-wide text-muted-foreground">
+              {t("dashboard.projectsCount", { count: projects.length })}
+            </span>
           </div>
         </div>
-        <span className="font-mono text-[10px] tracking-wide text-white/25">Pre-Flow Dashboard Beta v1.0</span>
+        <span className="font-mono text-[10px] tracking-wide text-text-tertiary">Pre-Flow Dashboard Beta v1.0</span>
       </footer>
 
       {/* ━━━ 모달 ━━━ */}
