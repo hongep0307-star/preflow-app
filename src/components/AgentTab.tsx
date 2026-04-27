@@ -21,11 +21,11 @@ import {
   Image,
   ImageOff,
   Layers,
-  Palette,
   PanelLeftClose,
   PanelLeftOpen,
   Columns2,
   MessageSquare,
+  SlidersHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -106,6 +106,38 @@ interface Props {
   lang?: "ko" | "en";
   onSwitchToContiTab?: () => void;
 }
+
+const DRAFT_REPLACE_INTENT_RE =
+  /(삭제|제거|빼|빼고|줄여|축소|정리|재구성|다시\s*구성|다시\s*짜|교체|새로\s*짜|최종안|최종\s*컷|remove|delete|drop|omit|reduce|shorten|rework|replace|final\s+cut|final\s+shot)/i;
+
+const shouldReplaceDraftsFromExtraction = ({
+  userText,
+  assistantText,
+  previous,
+  extracted,
+}: {
+  userText: string;
+  assistantText: string;
+  previous: ParsedScene[];
+  extracted: ParsedScene[];
+}) => {
+  if (previous.length === 0 || extracted.length === 0) return false;
+  if (extracted.length >= previous.length && extracted.length > 1) return true;
+  const hasReplaceIntent = DRAFT_REPLACE_INTENT_RE.test(`${userText}\n${assistantText}`);
+  return hasReplaceIntent && extracted.length > 1;
+};
+
+const mergeOrReplaceDrafts = (previous: ParsedScene[], extracted: ParsedScene[], forceReplace = false) => {
+  if (previous.length === 0 || forceReplace) return extracted;
+  const updated = [...previous];
+  for (const ext of extracted) {
+    const idx = updated.findIndex((p) => p.scene_number === ext.scene_number);
+    if (idx >= 0) updated[idx] = ext;
+    else updated.push(ext);
+  }
+  if (extracted.length >= previous.length && extracted.length > 1) return extracted;
+  return updated.sort((a, b) => a.scene_number - b.scene_number);
+};
 
 export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onSwitchToContiTab }: Props) => {
   const { toast } = useToast();
@@ -247,6 +279,28 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       });
     },
     [projectId],
+  );
+  const abcdScenes = useMemo<Scene[]>(
+    () => [
+      ...scenes,
+      ...pendingScenes.map((s) => ({
+        id: `draft-${s.scene_number}`,
+        project_id: projectId,
+        scene_number: s.scene_number,
+        title: s.title ?? null,
+        description: s.description ?? null,
+        camera_angle: s.camera_angle ?? null,
+        location: s.location ?? null,
+        mood: s.mood ?? null,
+        duration_sec: typeof s.duration_sec === "number" ? s.duration_sec : null,
+        tagged_assets: s.tagged_assets ?? [],
+        conti_image_url: null,
+        is_highlight: s.is_highlight,
+        highlight_kind: s.highlight_kind,
+        highlight_reason: s.highlight_reason,
+      })),
+    ],
+    [scenes, pendingScenes, projectId],
   );
 
   const [briefAnalysis, setBriefAnalysis] = useState<Analysis | null>(null);
@@ -561,13 +615,16 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       const toInsert = storyScenes.map((s: any, i: number) => ({
         project_id: projectId,
         scene_number: i + 1,
-        title: s.title ?? `Scene ${i + 1}`,
+        title: s.title ?? `Shot ${i + 1}`,
         description: s.description ?? "",
         camera_angle: s.camera_angle ?? "",
         location: s.location ?? "",
         mood: s.mood ?? "",
         duration_sec: s.duration_sec ?? null,
         tagged_assets: s.tagged_assets ?? [],
+        is_highlight: s.is_highlight ?? false,
+        highlight_kind: s.highlight_kind ?? null,
+        highlight_reason: s.highlight_reason ?? null,
         conti_image_url: null,
         source: "agent",
       }));
@@ -614,13 +671,16 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
           return {
             project_id: projectId,
             scene_number: s.scene_number,
-            title: s.title ?? `Scene ${s.scene_number}`,
+        title: s.title ?? `Shot ${s.scene_number}`,
             description: s.description ?? "",
             camera_angle: s.camera_angle ?? "",
             location: s.location ?? "",
             mood: s.mood ?? "",
             duration_sec: typeof s.duration_sec === "number" ? s.duration_sec : null,
             tagged_assets: registeredTags,
+            is_highlight: s.is_highlight ?? false,
+            highlight_kind: s.highlight_kind ?? null,
+            highlight_reason: s.highlight_reason ?? null,
           };
         });
       if (!newScenes.length) return;
@@ -772,26 +832,18 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       if (state.pendingExtractedScenes && state.pendingExtractedScenes.length > 0) {
         const extracted = state.pendingExtractedScenes;
         const needsReplace = !!state.pendingExtractedNeedsReplaceConfirm;
+        const replaceDrafts = !!state.pendingExtractedReplaceDrafts;
         if (needsReplace) {
           setReplaceConfirmBuffer(extracted);
         } else {
-          setPendingScenes((prev) => {
-            if (prev.length === 0) return extracted;
-            const updated = [...prev];
-            for (const ext of extracted) {
-              const idx = updated.findIndex((p) => p.scene_number === ext.scene_number);
-              if (idx >= 0) updated[idx] = ext;
-              else updated.push(ext);
-            }
-            if (extracted.length >= prev.length && extracted.length > 1) return extracted;
-            return updated.sort((a, b) => a.scene_number - b.scene_number);
-          });
+          setPendingScenes((prev) => mergeOrReplaceDrafts(prev, extracted, replaceDrafts));
         }
         // 소비 후 정리
         if (state.inFlight) {
           patchChatGen(projectId, {
             pendingExtractedScenes: undefined,
             pendingExtractedNeedsReplaceConfirm: undefined,
+            pendingExtractedReplaceDrafts: undefined,
           });
         } else {
           setChatGen(projectId, null);
@@ -992,27 +1044,24 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       }
       if (extracted.length > 0) {
         const needsReplaceConfirm = scenes.length > 0;
+        const replaceDrafts = shouldReplaceDraftsFromExtraction({
+          userText: text,
+          assistantText: assistantContent,
+          previous: pendingScenes,
+          extracted,
+        });
         if (mountedRef.current) {
           if (needsReplaceConfirm) {
             setReplaceConfirmBuffer(extracted);
           } else {
-            setPendingScenes((prev) => {
-              if (prev.length === 0) return extracted;
-              const updated = [...prev];
-              for (const ext of extracted) {
-                const idx = updated.findIndex((p) => p.scene_number === ext.scene_number);
-                if (idx >= 0) updated[idx] = ext;
-                else updated.push(ext);
-              }
-              if (extracted.length >= prev.length && extracted.length > 1) return extracted;
-              return updated.sort((a, b) => a.scene_number - b.scene_number);
-            });
+            setPendingScenes((prev) => mergeOrReplaceDrafts(prev, extracted, replaceDrafts));
           }
         } else {
           // 언마운트 상태라면 모듈 스토어에 보관, 리마운트 시 반영
           patchChatGen(projectId, {
             pendingExtractedScenes: extracted,
             pendingExtractedNeedsReplaceConfirm: needsReplaceConfirm,
+            pendingExtractedReplaceDrafts: replaceDrafts,
           });
         }
       }
@@ -1046,7 +1095,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
     await Promise.all(
       reordered.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
-    pendingOrderNotice.current = `[Scene order changed]\n${reordered.map((s) => `${s.scene_number}. ${s.title || `Scene ${s.scene_number}`}`).join("\n")}\n\nPlease check whether the story flow still feels natural.`;
+    pendingOrderNotice.current = `[Shot order changed]\n${reordered.map((s) => `#${String(s.scene_number).padStart(2, "0")} ${s.title || `Shot ${s.scene_number}`}`).join("\n")}\n\nPlease check whether the story flow still feels natural.`;
     toast({ title: t("agent.sceneOrderUpdated") });
   };
 
@@ -1072,7 +1121,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       .insert({
         project_id: projectId,
         scene_number: tempNumber,
-        title: `Scene ${nextNum}`,
+        title: `Shot ${nextNum}`,
         description: null,
         camera_angle: null,
         location: null,
@@ -1113,7 +1162,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       .insert({
         project_id: projectId,
         scene_number: tempNumber,
-        title: `Scene ${insertIdx + 1}`,
+        title: `Shot ${insertIdx + 1}`,
         description: null,
         camera_angle: null,
         location: null,
@@ -1394,7 +1443,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
         >
           {(["scenes", "mood"] as RightPanel[]).map((p) => {
             const active = !splitView && rightPanel === p;
-            const Icon = p === "scenes" ? Layers : Palette;
+            const Icon = p === "scenes" ? Layers : SlidersHorizontal;
             const label = p === "scenes" ? t("agent.sceneComposition") : t("agent.moodIdeation");
             const count = p === "scenes" ? scenes.length : moodImages.length;
             return (
@@ -1625,7 +1674,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
             {briefAnalysis && (
               <AgentAbcdPanel
                 projectId={projectId}
-                scenes={scenes}
+                scenes={abcdScenes}
                 briefAnalysis={briefAnalysis}
                 lang={briefLang}
               />
@@ -1848,7 +1897,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
       );
       if (splitView && !isMobile) {
         const renderSplitHeader = (kind: RightPanel) => {
-          const Icon = kind === "scenes" ? Layers : Palette;
+          const Icon = kind === "scenes" ? Layers : SlidersHorizontal;
           const label = kind === "scenes" ? t("agent.sceneComposition") : t("agent.moodIdeation");
           const count = kind === "scenes" ? scenes.length : moodImages.length;
           return (

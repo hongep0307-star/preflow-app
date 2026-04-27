@@ -64,6 +64,12 @@ export interface Scene {
    *  any demotes back to `active`. Legacy rows lack the column → treated
    *  as `false`. */
   is_final?: boolean;
+  /** Marks a scene as a key visual candidate. This is a soft creative signal:
+   *  generation should give the shot stronger composition/lighting attention,
+   *  without forcing every highlight into the same hero-shot template. */
+  is_highlight?: boolean;
+  highlight_kind?: "hook" | "hero" | "product" | "emotion" | "cta" | null;
+  highlight_reason?: string | null;
 }
 
 /**

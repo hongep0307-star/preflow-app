@@ -343,7 +343,7 @@ const MoodCard = ({
                   lineHeight: 1,
                 }}
               >
-                S{String(img.sceneRef).padStart(2, "0")}
+                #{String(img.sceneRef).padStart(2, "0")}
               </span>
             )}
           </button>
@@ -403,7 +403,7 @@ const MoodCard = ({
               color: "#fff",
             }}
           >
-            S{String(img.sceneRef).padStart(2, "0")}
+                #{String(img.sceneRef).padStart(2, "0")}
           </span>
         </div>
       )}
@@ -578,7 +578,7 @@ export const MoodIdeationPanel = ({
   const contextLabel = (() => {
     if (targetSceneNum !== null) {
       const s = scenes.find((sc) => sc.scene_number === targetSceneNum);
-      return `S${String(targetSceneNum).padStart(2, "0")}${s?.title ? ` · ${s.title}` : ""}`;
+      return `#${String(targetSceneNum).padStart(2, "0")}${s?.title ? ` · ${s.title}` : ""}`;
     }
     return scenes.length > 0 ? t("mood.contextAllScenes", { count: scenes.length }) : t("mood.contextBriefBased");
   })();
@@ -985,7 +985,7 @@ export const MoodIdeationPanel = ({
                 {[
                   { label: scenes.length > 0 ? t("mood.allScenes") : t("mood.briefBased"), num: null },
                   ...scenes.map((s) => ({
-                    label: `S${String(s.scene_number).padStart(2, "0")}${s.title ? ` · ${s.title}` : ""}`,
+                    label: `#${String(s.scene_number).padStart(2, "0")}${s.title ? ` · ${s.title}` : ""}`,
                     num: s.scene_number,
                   })),
                 ].map((opt) => (
@@ -1406,10 +1406,10 @@ export const MoodIdeationPanel = ({
                     color: "#fff",
                   }}
                 >
-                  S{String(s.scene_number).padStart(2, "0")}
+                  #{String(s.scene_number).padStart(2, "0")}
                 </span>
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {s.title || `Scene ${s.scene_number}`}
+                  {s.title || `Shot ${s.scene_number}`}
                 </span>
                 {alreadyTaken && <span style={{ fontSize: 9, color: "hsl(var(--muted-foreground))" }}>{t("mood.linked")}</span>}
                 {isCurrentlyAttached && !alreadyTaken && (
@@ -1441,7 +1441,7 @@ export const MoodIdeationPanel = ({
             <p className="text-[13px] text-muted-foreground leading-relaxed">
               {t("mood.deleteImagesDesc", {
                 count: deleteConfirm.connectedScenes.length,
-                scenes: deleteConfirm.connectedScenes.map((n) => `S${String(n).padStart(2, "0")}`).join(", "),
+                scenes: deleteConfirm.connectedScenes.map((n) => `#${String(n).padStart(2, "0")}`).join(", "),
               })}
             </p>
             <DialogFooter>

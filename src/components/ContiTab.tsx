@@ -40,7 +40,6 @@ import {
   X,
   LayoutList,
   LayoutGrid,
-  Palette,
   Copy,
   Wand2,
   Minus,
@@ -50,6 +49,7 @@ import {
   FileText,
   ArrowRightLeft,
   Check,
+  SlidersHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -120,7 +120,7 @@ import { ChangeAngleModal, type ChangeAngleSubmit } from "@/components/conti/Cha
 import { StyleTransferConfirmModal } from "@/components/conti/StyleTransferConfirmModal";
 import { GenerateAllModal } from "@/components/conti/GenerateAllModal";
 import { SceneImageCropModal } from "@/components/conti/SceneImageCropModal";
-import { useT } from "@/lib/uiLanguage";
+import { useT, useUiLanguage } from "@/lib/uiLanguage";
 
 // ─── 모듈 레벨 상태 ────────────────────────────────────────────
 // 탭 이동(ContiTab unmount → remount)에도 진행 중인 generation 의 로딩 상태가 보존되도록
@@ -246,7 +246,8 @@ const VersionCompareModal = ({
     }))
     .filter((v) => v.scene !== null);
   if (versionScenes.length === 0) return null;
-  const title = versionScenes[0].scene?.title ?? `Scene ${sceneNumber}`;
+  const shotLabel = `#${String(sceneNumber).padStart(2, "0")}`;
+  const title = versionScenes[0].scene?.title ?? `Shot ${sceneNumber}`;
   const handleImport = async (versionIdx: number, imageUrl: string) => {
     setImportingIdx(versionIdx);
     try {
@@ -264,7 +265,7 @@ const VersionCompareModal = ({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Columns2 className="w-4 h-4" style={{ color: KR }} />
-            Compare — Scene {sceneNumber} · {title}
+            Compare — Shot {shotLabel} · {title}
           </DialogTitle>
         </DialogHeader>
         <div className="overflow-x-auto pb-2" style={{ maxHeight: "75vh" }}>
@@ -368,7 +369,7 @@ const HistorySheet = ({
         <SheetHeader className="mb-4">
           <SheetTitle className="flex items-center gap-2 text-[14px]">
             <History className="w-4 h-4" style={{ color: KR }} />
-            Scene {sceneNumber} History
+            Shot #{String(sceneNumber).padStart(2, "0")} History
             {sceneTitle && <span className="text-muted-foreground font-normal">· {sceneTitle}</span>}
           </SheetTitle>
         </SheetHeader>
@@ -696,7 +697,7 @@ const ExportModal = ({
                   <Checkbox checked={selectedIds.has("current")} onCheckedChange={() => toggle("current")} />
                   <div className="flex-1">
                     <div className="text-foreground text-[13px] font-semibold">{t("export.currentWork")}</div>
-                    <div className="text-muted-foreground/60 text-[11px]">{currentScenes.length} scenes</div>
+                    <div className="text-muted-foreground/60 text-[11px]">{currentScenes.length} shots</div>
                   </div>
                 </label>
               )}
@@ -715,7 +716,7 @@ const ExportModal = ({
                       {`ver.${idx + 1}`} — {v.version_name || `v${v.version_number}`}
                     </div>
                     <div className="text-muted-foreground/60 text-[11px]">
-                      {new Date(v.created_at).toLocaleDateString("en-US")} · {v.scenes.length} scenes
+                      {new Date(v.created_at).toLocaleDateString("en-US")} · {v.scenes.length} shots
                     </div>
                   </div>
                   <div className="flex gap-1 shrink-0">
@@ -1086,7 +1087,7 @@ const StylePickerModal = ({
                         <img src={preset.thumbnail_url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                       ) : (
                         <div className="absolute inset-0 flex items-center justify-center">
-                          <Palette className="w-5 h-5" style={{ color: "rgba(255,255,255,0.15)" }} />
+                          <SlidersHorizontal className="w-5 h-5" style={{ color: "rgba(255,255,255,0.15)" }} />
                         </div>
                       )}
                       {preset.is_default && (
@@ -1577,7 +1578,9 @@ const SortableVersionTab = ({
 export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const { toast } = useToast();
   const t = useT();
+  const { language } = useUiLanguage();
   const isMobile = useIsMobile();
+  const formatDefaultShotTitle = (n: number) => (language === "ko" ? `컷 ${n}` : `Shot ${n}`);
 
   const [versions, setVersions] = useState<SceneVersion[]>([]);
   const savedSceneState = getSceneState(projectId);
@@ -2123,7 +2126,16 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     const current = getSceneState(projectId)?.scenes ?? activeScenes;
     const target = current.find((s) => s.scene_number === sceneNumber);
     if (!target) return;
-    await supabase.from("scenes").update(fields).eq("id", target.id);
+    const dbFields = { ...fields } as Record<string, unknown>;
+    // Highlight metadata is primarily version-level creative intent. Older
+    // running local-server processes may not yet allow these new columns, so
+    // keep the UI/version JSON update silent instead of surfacing adapter 500s.
+    delete dbFields.is_highlight;
+    delete dbFields.highlight_kind;
+    delete dbFields.highlight_reason;
+    if (Object.keys(dbFields).length > 0) {
+      await supabase.from("scenes").update(dbFields).eq("id", target.id);
+    }
     const latest = getSceneState(projectId)?.scenes ?? current;
     const merged = latest.map((s) => (s.scene_number === sceneNumber ? { ...s, ...fields } : s));
     await updateVersionScenes(merged);
@@ -2193,13 +2205,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         const { data: urlData } = supabase.storage.from("style-presets").getPublicUrl(storagePath);
         const publicUrl = urlData.publicUrl;
         const projectTitle = (projectInfo.title ?? "").trim() || "Untitled Project";
-        const sceneLabel = `S${String(scene.scene_number).padStart(2, "0")}`;
+        const sceneLabel = `#${String(scene.scene_number).padStart(2, "0")}`;
         const presetName = `${projectTitle} - ${sceneLabel}`.slice(0, 60);
         const { data: inserted, error: insErr } = await supabase
           .from("style_presets")
           .insert({
             name: presetName,
-            description: `From ${projectTitle} · scene ${scene.scene_number}`,
+            description: `From ${projectTitle} · shot #${String(scene.scene_number).padStart(2, "0")}`,
             thumbnail_url: publicUrl,
             style_prompt: "Match the visual style, color palette, and artistic treatment of the reference image.",
             is_default: false,
@@ -2262,6 +2274,9 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         mood: scene.mood,
         duration_sec: scene.duration_sec,
         tagged_assets: mentionedTags,
+        is_highlight: scene.is_highlight ?? false,
+        highlight_kind: scene.highlight_kind ?? null,
+        highlight_reason: scene.highlight_reason ?? null,
         conti_image_url: null,
         source: "conti",
       })
@@ -2289,7 +2304,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       renumbered.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
     await updateVersionScenes(renumbered);
-    toast({ title: `Scene duplicated to position ${insertIdx + 1}.` });
+    toast({ title: `Shot duplicated to position ${insertIdx + 1}.` });
   };
 
   const handleDeleteScene = async (sceneId: string, sceneNumber: number) => {
@@ -2315,7 +2330,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     toast({
       title: isTransition
         ? `Transition (${transitionLabel}) deleted.`
-        : `Scene ${sceneNumber} deleted.`,
+        : `Shot #${String(sceneNumber).padStart(2, "0")} deleted.`,
     });
   };
 
@@ -2332,7 +2347,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     );
     await updateVersionScenes(updated);
     setSelectedSceneIds(new Set());
-    toast({ title: `${toDelete.length} scene(s) deleted.` });
+    toast({ title: `${toDelete.length} shot(s) deleted.` });
   };
 
   const handleAddScene = async () => {
@@ -2344,7 +2359,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       .insert({
         project_id: projectId,
         scene_number: tempNumber,
-        title: `Scene ${nextSceneTitleNumber}`,
+        title: formatDefaultShotTitle(nextSceneTitleNumber),
         description: null,
         camera_angle: null,
         location: null,
@@ -2357,7 +2372,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       .select()
       .single();
     if (error || !data) {
-      toast({ title: "Failed to add scene", description: error?.message, variant: "destructive" });
+      toast({ title: "Failed to add shot", description: error?.message, variant: "destructive" });
       return;
     }
     // await 이후 모듈 store 재조회 — 진행 중인 스타일 변형/생성 결과를 덮어쓰지 않기 위해.
@@ -2378,7 +2393,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       .insert({
         project_id: projectId,
         scene_number: tempNumber,
-        title: `Scene ${nextSceneTitleNumber}`,
+        title: formatDefaultShotTitle(nextSceneTitleNumber),
         description: null,
         camera_angle: null,
         location: null,
@@ -2391,7 +2406,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       .select()
       .single();
     if (error || !data) {
-      toast({ title: "Failed to add scene", description: error?.message, variant: "destructive" });
+      toast({ title: "Failed to add shot", description: error?.message, variant: "destructive" });
       return;
     }
     // await 이후 모듈 store 재조회.
@@ -2408,7 +2423,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       renumbered.map((s) => supabase.from("scenes").update({ scene_number: s.scene_number }).eq("id", s.id)),
     );
     await updateVersionScenes(renumbered);
-    toast({ title: `Scene inserted at position ${insertIdx + 1}.` });
+    toast({ title: `Shot inserted at position ${insertIdx + 1}.` });
   };
 
   const handleInsertTransitionAt = async (idx: number) => {
@@ -2493,7 +2508,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       latest.map((s) => (s.id === target.id ? { ...s, conti_image_url: imageUrl } : s)),
     );
     bumpCache(target.scene_number);
-    toast({ title: `Scene ${target.scene_number} conti replaced.` });
+    toast({ title: `Shot #${String(target.scene_number).padStart(2, "0")} conti replaced.` });
   };
 
   const handleRollback = async (scene: Scene, url: string) => {
@@ -2509,7 +2524,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       await fetchCurrentScenes();
     }
     bumpCache(scene.scene_number);
-    toast({ title: `Scene ${scene.scene_number} restored.` });
+    toast({ title: `Shot #${String(scene.scene_number).padStart(2, "0")} restored.` });
   };
 
   /**
@@ -2538,7 +2553,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     const inFlight = getLoading(projectId).editGeneratingIds;
     if (inFlight.has(req.sceneId)) {
       toast({
-        title: `Scene ${req.sceneNumber} is still generating`,
+        title: `Shot #${String(req.sceneNumber).padStart(2, "0")} is still generating`,
         description: "Wait for the current edit to finish before applying another angle.",
         variant: "destructive",
       });
@@ -2563,11 +2578,11 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       );
       await updateVersionScenes(updated);
       bumpCache(req.sceneNumber);
-      toast({ title: `Scene ${req.sceneNumber} re-angled.` });
+      toast({ title: `Shot #${String(req.sceneNumber).padStart(2, "0")} re-angled.` });
     } catch (err: any) {
       console.error("[ChangeAngle] failed:", err);
       toast({
-        title: `Scene ${req.sceneNumber} change angle failed`,
+        title: `Shot #${String(req.sceneNumber).padStart(2, "0")} change angle failed`,
         description: err?.message ?? String(err),
         variant: "destructive",
       });
@@ -2594,7 +2609,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     const inFlight = getLoading(projectId).editGeneratingIds;
     if (inFlight.has(req.sceneId)) {
       toast({
-        title: `Scene ${req.sceneNumber} is still generating`,
+        title: `Shot #${String(req.sceneNumber).padStart(2, "0")} is still generating`,
         description: "Wait for the current edit to finish before relighting.",
         variant: "destructive",
       });
@@ -2618,11 +2633,11 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       );
       await updateVersionScenes(updated);
       bumpCache(req.sceneNumber);
-      toast({ title: `Scene ${req.sceneNumber} relit.` });
+      toast({ title: `Shot #${String(req.sceneNumber).padStart(2, "0")} relit.` });
     } catch (err: any) {
       console.error("[Relight] failed:", err);
       toast({
-        title: `Scene ${req.sceneNumber} relight failed`,
+        title: `Shot #${String(req.sceneNumber).padStart(2, "0")} relight failed`,
         description: err?.message ?? String(err),
         variant: "destructive",
       });
@@ -2657,7 +2672,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       const updated = latest.map((s) => (s.id === scene.id ? { ...s, conti_image_url: publicUrl } : s));
       await updateVersionScenes(updated);
       bumpCache(scene.scene_number);
-      toast({ title: `Scene ${scene.scene_number} image uploaded.` });
+      toast({ title: `Shot #${String(scene.scene_number).padStart(2, "0")} image uploaded.` });
     } catch (err: any) {
       toast({ title: "Upload failed", description: err.message, variant: "destructive" });
     } finally {
@@ -2694,7 +2709,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       const prevScene = activeScenes[idx - 1];
       const nextScene = activeScenes[idx + 1];
       if (!prevScene?.conti_image_url || !nextScene?.conti_image_url) {
-        toast({ title: "Adjacent scenes need images first", variant: "destructive" });
+        toast({ title: "Adjacent shots need images first", variant: "destructive" });
         return;
       }
       setSceneStages((prev) => ({ ...prev, [scene.id]: "translating" }));
@@ -2801,7 +2816,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       bumpCache(scene.scene_number);
     } catch (err: any) {
       toast({
-        title: `Scene ${scene.scene_number} generation failed`,
+        title: `Shot #${String(scene.scene_number).padStart(2, "0")} generation failed`,
         description: err.message,
         variant: "destructive",
       });
@@ -3118,7 +3133,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       if (!s.is_transition) counter++;
       if (s.id === scene.id) break;
     }
-    return `S${String(counter).padStart(2, "0")}`;
+    return `#${String(counter).padStart(2, "0")}`;
   }
 
   function getExportTransitionInfo(scene: Scene, scenes: Scene[]) {
@@ -3128,7 +3143,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       for (let i = 0; i <= index; i++) {
         if (!scenes[i]?.is_transition) counter++;
       }
-      return `S${String(counter).padStart(2, "0")}`;
+      return `#${String(counter).padStart(2, "0")}`;
     };
     let prevIdx = -1;
     for (let i = idx - 1; i >= 0; i--) {
@@ -3262,7 +3277,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                     for (let j = 0; j <= pi; j++) {
                       if (!scenes[j].is_transition) dn++;
                     }
-                    prevLabel = `S${String(dn).padStart(2, "0")}`;
+                    prevLabel = `#${String(dn).padStart(2, "0")}`;
                     break;
                   }
                 }
@@ -3272,7 +3287,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                     for (let j = 0; j <= ni; j++) {
                       if (!scenes[j].is_transition) dn++;
                     }
-                    nextLabel = `S${String(dn).padStart(2, "0")}`;
+                    nextLabel = `#${String(dn).padStart(2, "0")}`;
                     break;
                   }
                 }
@@ -3314,7 +3329,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 const title = document.createElement("div");
                 title.style.cssText =
                   "font-size:17px; font-weight:600; color:#ffffff; word-break:break-word; line-height:1.3; flex:1;";
-                title.textContent = stripAt(scene.title || `Scene ${scene.scene_number}`);
+                title.textContent = stripAt(scene.title || `Shot ${scene.scene_number}`);
                 titleRow.appendChild(title);
               }
               textArea.appendChild(titleRow);
@@ -3470,7 +3485,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                       for (let j = 0; j <= pi; j++) {
                         if (!scenes[j].is_transition) dn++;
                       }
-                      prevLabel = `S${String(dn).padStart(2, "0")}`;
+                      prevLabel = `#${String(dn).padStart(2, "0")}`;
                       break;
                     }
                   }
@@ -3480,7 +3495,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                       for (let j = 0; j <= ni; j++) {
                         if (!scenes[j].is_transition) dn++;
                       }
-                      nextLabel = `S${String(dn).padStart(2, "0")}`;
+                      nextLabel = `#${String(dn).padStart(2, "0")}`;
                       break;
                     }
                   }
@@ -3524,7 +3539,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                   const title = document.createElement("div");
                   title.style.cssText =
                     "font-size:17px; font-weight:600; color:#ffffff; word-break:break-word; line-height:1.3; flex:1;";
-                  title.textContent = stripAt(scene.title || `Scene ${scene.scene_number}`);
+                  title.textContent = stripAt(scene.title || `Shot ${scene.scene_number}`);
                   titleRow.appendChild(title);
                 }
                 textArea.appendChild(titleRow);
@@ -3611,7 +3626,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                   for (let j = 0; j <= pi; j++) {
                     if (!scenes[j].is_transition) dn++;
                   }
-                  prevLabel = `S${String(dn).padStart(2, "0")}`;
+                  prevLabel = `#${String(dn).padStart(2, "0")}`;
                   break;
                 }
               }
@@ -3621,7 +3636,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                   for (let j = 0; j <= ni; j++) {
                     if (!scenes[j].is_transition) dn++;
                   }
-                  nextLabel = `S${String(dn).padStart(2, "0")}`;
+                  nextLabel = `#${String(dn).padStart(2, "0")}`;
                   break;
                 }
               }
@@ -3700,7 +3715,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               const indTitleEl = document.createElement("span");
               indTitleEl.style.cssText =
                 "font-size:20px; font-weight:600; color:#ffffff; line-height:1.3; word-break:break-word;";
-              indTitleEl.textContent = stripAt(scene.title || `Scene ${scene.scene_number}`);
+              indTitleEl.textContent = stripAt(scene.title || `Shot ${scene.scene_number}`);
               indTitleRow.appendChild(indTitleEl);
             }
             textArea.appendChild(indTitleRow);
@@ -3772,7 +3787,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         const url = URL.createObjectURL(zipBlob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${projectInfo.title || "pre-flow"}_conti${mode === "individual" ? "_scenes" : ""}.zip`;
+        a.download = `${projectInfo.title || "pre-flow"}_conti${mode === "individual" ? "_shots" : ""}.zip`;
         a.click();
         URL.revokeObjectURL(url);
       }
@@ -4104,7 +4119,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                 />
               </span>
             ) : (
-              <Palette className="w-3.5 h-3.5" />
+              <SlidersHorizontal className="w-3.5 h-3.5" />
             )}
             {currentStyle ? currentStyle.name : t("projectModal.style")}
           </button>
@@ -4552,7 +4567,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             const updated = current.map((s) => (s.id === target.id ? { ...s, conti_image_url: newUrl } : s));
             await updateVersionScenes(updated);
             bumpCache(target.scene_number);
-            toast({ title: `Scene ${target.scene_number} updated with new camera angle.` });
+            toast({ title: `Shot #${String(target.scene_number).padStart(2, "0")} updated with new camera angle.` });
           }}
         />
       )}

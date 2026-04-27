@@ -1,11 +1,13 @@
 import { Lightbulb } from "lucide-react";
 import { KR } from "./agentTypes";
+import type { ReactNode } from "react";
 
-export const StrategyCard = ({ content }: { content: string }) => {
+export const StrategyCard = ({ content, renderText }: { content: string; renderText?: (text: string) => ReactNode }) => {
   const lines = content
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
+  const render = renderText ?? ((text: string) => text);
   return (
     <div
       className="my-2 border overflow-hidden text-left"
@@ -27,13 +29,13 @@ export const StrategyCard = ({ content }: { content: string }) => {
           if (ai !== -1)
             return (
               <div key={i} className="py-2 text-[13px] leading-relaxed" style={st}>
-                <span className="block label-meta text-muted-foreground mb-0.5">{line.slice(0, ai).trim()}</span>
-                <span className="text-foreground/80">{line.slice(ai + 1).trim()}</span>
+                <span className="block label-meta text-muted-foreground mb-0.5">{render(line.slice(0, ai).trim())}</span>
+                <span className="text-foreground/80">{render(line.slice(ai + 1).trim())}</span>
               </div>
             );
           return (
             <div key={i} className="py-2 text-[13px] leading-relaxed text-foreground/60" style={st}>
-              {line}
+              {render(line)}
             </div>
           );
         })}

@@ -81,7 +81,7 @@ export const SendToContiModal = ({ scenes, projectId, onClose, onSent }: {
             {scenes.map((s) => (
               <div key={s.id} className="flex items-center gap-2 text-[13px]">
                 <span className="text-muted-foreground/50 w-5 shrink-0 text-right">#{s.scene_number}</span>
-                <span className="text-foreground truncate">{s.title || `S${String(s.scene_number).padStart(2, "0")}`}</span>
+                <span className="text-foreground truncate">{s.title || `Shot ${s.scene_number}`}</span>
                 {s.duration_sec && <span className="ml-auto text-[11px] text-muted-foreground/60 shrink-0 flex items-center gap-1"><Clock className="w-3 h-3" />{s.duration_sec}s</span>}
               </div>
             ))}
@@ -146,7 +146,7 @@ export const LoadVersionModal = ({ versions, onClose, onLoad }: {
                 <div className="text-[11px] text-muted-foreground mt-0.5">{v.scenes.length} scenes{v.scenes.some((s: any) => s.duration_sec) && <> · {t("agent.total", { seconds: v.scenes.reduce((a: number, s: any) => a + (s.duration_sec ?? 0), 0) })}</>}</div>
               </div>
               <div className="flex flex-col gap-0.5 shrink-0 max-w-[120px]">
-                {v.scenes.slice(0, 3).map((s: any, i: number) => <span key={i} className="text-[10px] text-muted-foreground/60 truncate">{i + 1}. {s.title || `Scene ${i + 1}`}</span>)}
+                {v.scenes.slice(0, 3).map((s: any, i: number) => <span key={i} className="text-[10px] text-muted-foreground/60 truncate">#{String(i + 1).padStart(2, "0")} {s.title || `Shot ${i + 1}`}</span>)}
                 {v.scenes.length > 3 && <span className="text-[10px] text-muted-foreground/40">{t("agent.more", { count: v.scenes.length - 3 })}</span>}
               </div>
               {loading ? <Loader2 className="w-4 h-4 animate-spin shrink-0 ml-1" style={{ color: KR }} /> : <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="hsl(var(--muted-foreground))" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="shrink-0 ml-1"><path d="M9 18l6-6-6-6" /></svg>}

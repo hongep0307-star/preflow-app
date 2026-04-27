@@ -341,6 +341,9 @@ export function StudioSketchesTab({
               location: scene.location,
               mood: scene.mood,
               tagged_assets: scene.tagged_assets,
+              is_highlight: scene.is_highlight,
+              highlight_kind: scene.highlight_kind,
+              highlight_reason: scene.highlight_reason,
             },
             briefAnalysis,
             assets,
@@ -858,7 +861,7 @@ export function StudioSketchesTab({
             <Sparkles className="w-6 h-6 opacity-60" />
             <div className="text-[12px] font-semibold">{t("studio.noSketchesYet")}</div>
             <p className="text-[11px] text-center leading-relaxed text-muted-foreground/80">
-              {t("studio.noSketchesDesc", { scene: scene.scene_number })}
+              {t("studio.noSketchesDesc", { scene: String(scene.scene_number).padStart(2, "0") })}
             </p>
           </div>
         ) : showLikedOnly && displaySketches.length === 0 && pendingSkeletons.length === 0 ? (

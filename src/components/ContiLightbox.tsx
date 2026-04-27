@@ -73,7 +73,7 @@ export const ContiLightbox = ({ scene, allScenes, onClose, onRegenerate, onInpai
         onClick={e => e.stopPropagation()}
       >
         <span className="text-foreground font-semibold text-sm">
-          Scene {currentScene.scene_number} — {currentScene.title || `Scene ${currentScene.scene_number}`}
+          Shot #{String(currentScene.scene_number).padStart(2, "0")} — {currentScene.title || `Shot ${currentScene.scene_number}`}
         </span>
         <div className="flex items-center gap-2">
           <OverlayActionButton
@@ -129,7 +129,7 @@ export const ContiLightbox = ({ scene, allScenes, onClose, onRegenerate, onInpai
           className="rounded-none"
           style={{ maxHeight: 'calc(100vh - 140px)', maxWidth: '90vw', objectFit: 'contain' }}
           onClick={e => e.stopPropagation()}
-          alt={`Scene ${currentScene.scene_number}`} loading="lazy" decoding="async" />
+          alt={`Shot #${String(currentScene.scene_number).padStart(2, "0")}`} loading="lazy" decoding="async" />
       ) : (
         <div className="text-muted-foreground text-sm" onClick={e => e.stopPropagation()}>No storyboard image</div>
       )}

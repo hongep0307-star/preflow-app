@@ -1,4 +1,4 @@
-import { Palette } from "lucide-react";
+import { SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { KR } from "./contiTypes";
@@ -39,7 +39,7 @@ export const StyleTransferConfirmModal = ({
               <img src={styleThumb} className="w-16 h-10 object-cover shrink-0" style={{ borderRadius: 0 }} loading="lazy" decoding="async" />
             ) : (
               <div className="w-16 h-10 bg-muted shrink-0 flex items-center justify-center" style={{ borderRadius: 0 }}>
-                <Palette className="w-4 h-4 text-muted-foreground" />
+                <SlidersHorizontal className="w-4 h-4 text-muted-foreground" />
               </div>
             )}
             <div className="min-w-0">

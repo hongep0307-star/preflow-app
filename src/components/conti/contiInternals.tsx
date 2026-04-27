@@ -570,7 +570,9 @@ export const MetaRows = ({
     el.focus();
     const len = el.value.length;
     const pos = Math.min(clickOffsetRef.current ?? len, len);
-    el.setSelectionRange(pos, pos);
+    if (el.type !== "number") {
+      el.setSelectionRange(pos, pos);
+    }
     clickOffsetRef.current = null;
   }, [ek]);
 
@@ -1013,10 +1015,10 @@ export const DescriptionField = ({
                     }}
                   >
                     {asset.asset_type === "character"
-                      ? "character"
+                      ? "캐릭터"
                       : asset.asset_type === "item"
-                        ? "item"
-                        : "background"}
+                        ? "아이템"
+                        : "배경"}
                   </span>
                 )}
               </button>
@@ -1222,7 +1224,7 @@ export const SidePanel = ({
       disabled: true,
       hint: t("conti.unavailable"),
     });
-  // "Use as Style" 은 콘티 이미지 호버시 나오는 Palette 퀵 아이콘으로
+  // "Use as Style" 은 콘티 이미지 호버시 나오는 스타일 퀵 아이콘으로
   // 이미 노출되므로 Variants 서브메뉴에서는 중복 제거. 시그니처의
   // onUseAsStyle prop 은 호버 아이콘이 계속 사용하므로 유지.
 

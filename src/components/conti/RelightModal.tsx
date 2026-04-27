@@ -28,7 +28,7 @@
  */
 
 import { useMemo, useRef, useState, useEffect } from "react";
-import { ChevronDown, ChevronUp, Lightbulb, X, Palette as PaletteIcon } from "lucide-react";
+import { ChevronDown, ChevronUp, Lightbulb, X, SlidersHorizontal } from "lucide-react";
 import type { Scene } from "./contiTypes";
 import { IMAGE_SIZE_MAP } from "@/lib/conti";
 import { useT, useUiLanguage, type UiLanguage } from "@/lib/uiLanguage";
@@ -824,7 +824,7 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
         >
           <img
             src={sourceUrl}
-            alt={`Scene ${scene.scene_number}`}
+            alt={`Shot #${String(scene.scene_number).padStart(2, "0")}`}
             style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }}
           />
         </div>
@@ -921,7 +921,7 @@ export function RelightModal({ scene, projectId, videoFormat, onClose, onSubmit 
             {/* Color */}
             <Section
               label={t("variant.lightColor")}
-              icon={<PaletteIcon className="w-3 h-3" />}
+              icon={<SlidersHorizontal className="w-3 h-3" />}
               meta={lightColorMeta}
             >
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>

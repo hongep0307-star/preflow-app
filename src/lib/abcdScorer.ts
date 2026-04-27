@@ -546,9 +546,9 @@ export function scoreABCD(input: ABCDInput): ABCDCompliance | null {
             pass_message: "긴박감 설계됨",
           },
           {
-            check: () => !!pacing && pacing.scene_count.recommended >= 3,
+            check: () => !!pacing && (pacing.shot_count ?? pacing.scene_count).recommended >= 3,
             weight: 2,
-            fail_message: "권장 씬 수 3 미만 — 마지막 CTA 구간 확보 어려움",
+            fail_message: "권장 컷 수 3 미만 — 마지막 CTA 구간 확보 어려움",
           },
         ],
   );

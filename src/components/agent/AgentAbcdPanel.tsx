@@ -7,11 +7,11 @@ type Lang = "ko" | "en";
 
 const L: Record<string, { ko: string; en: string }> = {
   title: { ko: "ABCD 실시간 점수", en: "ABCD Live Score" },
-  subtitle_empty: { ko: "씬을 추가하면 실시간 채점됩니다", en: "Add scenes to start live scoring" },
-  subtitle_scenes: { ko: "씬 {n}개 반영 · Agent 스토리보드 기준", en: "{n} scenes · Agent storyboard-based" },
+  subtitle_empty: { ko: "컷을 추가하면 실시간 채점됩니다", en: "Add shots to start live scoring" },
+  subtitle_scenes: { ko: "컷/드래프트 {n}개 반영 · Agent 스토리보드 기준", en: "{n} shots/drafts · Agent storyboard-based" },
   subtitle_frozen_scenes: {
-    ko: "씬이 비어 채점 중단 — 마지막 점수 유지",
-    en: "No scenes — last score frozen",
+    ko: "컷이 비어 채점 중단 — 마지막 점수 유지",
+    en: "No shots — last score frozen",
   },
   attract: { ko: "Attract · 첫 3초 몰입도", en: "Attract · First 3s Hook" },
   brand: { ko: "Brand · 브랜드·제품 노출", en: "Brand · Brand/Product Exposure" },
@@ -276,8 +276,8 @@ export default function AgentAbcdPanel({
               letterSpacing: "-0.01em",
             }}
           >
-            {total}
-            <span style={{ fontSize: 11, fontWeight: 600, color: COLORS.muted }}>/40</span>
+            {(total / 4).toFixed(1)}
+            <span style={{ fontSize: 11, fontWeight: 600, color: COLORS.muted }}>/10</span>
           </span>
           <span
             style={{

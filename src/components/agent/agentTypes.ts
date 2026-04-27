@@ -57,6 +57,9 @@ export interface Scene {
   duration_sec: number | null;
   tagged_assets: string[];
   conti_image_url: string | null;
+  is_highlight?: boolean;
+  highlight_kind?: "hook" | "hero" | "product" | "emotion" | "cta" | null;
+  highlight_reason?: string | null;
 }
 
 export type BriefField = string[] | { summary: string; detail?: string; memo_link?: string | null };
@@ -103,6 +106,14 @@ export interface HeroVisual {
   logo_placement: LogoPlacement;
 }
 
+export interface KeyVisualCriteria {
+  definition: string;
+  selection_rules: string[];
+  visual_priorities: string[];
+  avoid_patterns: string[];
+  evidence: string[];
+}
+
 export interface HookStrategy {
   primary: HookType;
   alternatives: HookType[];
@@ -113,6 +124,19 @@ export interface HookStrategy {
 export interface Pacing {
   format: VideoAspect;
   duration: VideoDuration;
+  /** Story-level sequence count: larger narrative blocks such as Hook / Body / CTA. */
+  sequence_count?: {
+    min: number;
+    max: number;
+    recommended: number;
+  };
+  /** Storyboard card count: one Shot/cut per image-generation card. */
+  shot_count?: {
+    min: number;
+    max: number;
+    recommended: number;
+  };
+  /** Legacy field name. Prefer shot_count for new analyses. */
   scene_count: {
     min: number;
     max: number;
@@ -206,6 +230,7 @@ export interface Analysis {
 
   product_info?: ProductInfo;
   hero_visual?: HeroVisual;
+  key_visual_criteria?: KeyVisualCriteria;
   hook_strategy?: HookStrategy;
   pacing?: Pacing;
   constraints?: Constraints;
@@ -244,11 +269,14 @@ export type ParsedScene = {
   mood?: string;
   duration_sec?: number;
   tagged_assets?: string[];
+  is_highlight?: boolean;
+  highlight_kind?: "hook" | "hero" | "product" | "emotion" | "cta" | null;
+  highlight_reason?: string | null;
 };
 
 export type StorylineOption = { id: string; title: string; synopsis: string; mood?: string; reference_anchor?: string };
 
-/** GPT-5.x 가 Phase 2 에서 각 씬에 대해 제시하는 대안 변형. */
+/** GPT-5.x 가 Phase 2 에서 각 Shot/Cut에 대해 제시하는 대안 변형. */
 export type ParsedSceneAlt = {
   scene_number: number;
   variant: string;
@@ -706,6 +734,8 @@ export type ChatGenState = {
   pendingExtractedScenes?: ParsedScene[];
   /** pendingExtractedScenes 가 있을 때, 기존 확정 씬이 있으면 replace confirm 을 띄워야 함을 표시 */
   pendingExtractedNeedsReplaceConfirm?: boolean;
+  /** pending draft 에 병합하지 않고 새 추출 목록으로 교체해야 함을 표시 */
+  pendingExtractedReplaceDrafts?: boolean;
 };
 
 export const _chatGenByProject = new Map<string, ChatGenState>();

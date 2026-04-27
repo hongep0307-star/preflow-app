@@ -24,7 +24,8 @@ const TABLE_COLUMNS: Record<string, ReadonlySet<string>> = {
     "id", "project_id", "scene_number", "title", "description", "camera_angle",
     "location", "mood", "duration_sec", "tagged_assets", "conti_image_url",
     "conti_image_history", "source", "conti_image_crop", "is_transition",
-    "is_final", "transition_type", "sketches", "created_at",
+    "is_final", "is_highlight", "highlight_kind", "highlight_reason",
+    "transition_type", "sketches", "created_at",
   ]),
   assets: new Set([
     "id", "project_id", "asset_type", "tag_name", "photo_url", "ai_description",
@@ -77,7 +78,7 @@ export const JSON_COLUMNS = new Set<string>([
   "thumbnail_crop",
 ]);
 
-const BOOLEAN_COLUMNS = new Set<string>(["is_transition", "is_final", "is_active", "is_default"]);
+const BOOLEAN_COLUMNS = new Set<string>(["is_transition", "is_final", "is_highlight", "is_active", "is_default"]);
 
 export function serializeValue(key: string, value: unknown): unknown {
   if (

@@ -31,6 +31,7 @@ import type {
   ProductInfo,
   HeroVisual,
   HookStrategy,
+  KeyVisualCriteria,
   Pacing,
   Constraints,
   AudienceInsight,
@@ -38,6 +39,7 @@ import type {
   NarrativeAnalysis,
 } from "@/components/agent/agentTypes";
 import { scoreABCD, gradeABCD } from "@/lib/abcdScorer";
+import { KNOWLEDGE_BRIEF_ANALYSIS } from "@/lib/directorKnowledgeBase";
 import { useToast } from "@/hooks/use-toast";
 import { toast as sonnerToast } from "sonner";
 import {
@@ -62,7 +64,6 @@ import {
   Target,
   Camera,
   Lightbulb,
-  Palette,
   Scissors,
   Link as LinkIcon,
   Film,
@@ -71,6 +72,7 @@ import {
   Image as ImageIcon,
   EyeOff,
   Pencil,
+  SlidersHorizontal,
   type LucideIcon,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -78,7 +80,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { useT } from "@/lib/uiLanguage";
+import { useT, useUiLanguage } from "@/lib/uiLanguage";
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -227,6 +229,8 @@ interface VisualDirectionStructured {
 interface SceneFlowStructured {
   structure: string;
   total_scenes: string;
+  total_sequences?: string;
+  total_shots?: string;
   hook: { duration: string; description: string };
   body: { duration: string; description: string };
   cta: { duration: string; description: string };
@@ -283,6 +287,7 @@ interface DeepAnalysis {
 
   product_info?: ProductInfo;
   hero_visual?: HeroVisual;
+  key_visual_criteria?: KeyVisualCriteria;
   hook_strategy?: HookStrategy;
   pacing?: Pacing;
   constraints?: Constraints;
@@ -327,6 +332,8 @@ const DEEP_ANALYSIS_SYSTEM_PROMPT = `당신은 게임/프로모션 영상 제작
 1인 프로듀서가 이 분석만으로 씬을 바로 짤 수 있도록, 마케팅 수사보다 "무엇을/언제/어떻게 노출할지"에 집중하세요.
 기반 프레임워크: Meta Creative Best Practices · Google ABCD · Mobile UA Patterns.
 
+${KNOWLEDGE_BRIEF_ANALYSIS}
+
 ═══ STAGE 1 — CONTENT TYPE CLASSIFICATION ═══
 먼저 브리프를 읽고 5개 타입 중 하나로 분류하세요:
 
@@ -364,7 +371,7 @@ confidence < 0.6 이면 secondary_type 도 추가 제시.
   "audience_insight": { "pain_point": "이전 WSUS 시리즈를 놓친 경험", "motivation": "한정 희소성 + FOMO" },
   "usp": { "summary": "…", "items": [{"keyword":"2-4단어","comparison":"…"}], "competitive_edge": "…", "message_hierarchy": "1순위 → 2순위 → 3순위" },
   "tone_manner": { "summary": "…", "keywords": ["…","…","…","…"], "visual_direction": {"camera":"…","lighting":"…","color_grade":"…","editing":"…"}, "reference_mood": "…", "do_not": "…" },
-  "production_notes": { "format_recommendation": "…", "shooting_style": "…", "scene_count_hint": {"structure":"HOOK → BODY → CTA","total_scenes":"3-5개 씬","hook":{"duration":"…","description":"…"},"body":{"duration":"…","description":"…"},"cta":{"duration":"…","description":"…"}}, "budget_efficiency": "…" },
+  "production_notes": { "format_recommendation": "…", "shooting_style": "…", "scene_count_hint": {"structure":"HOOK → BODY → CTA","total_scenes":"3-4개 씬 / 6-10개 컷","total_sequences":"3-4개 씬/시퀀스","total_shots":"6-10개 컷","hook":{"duration":"…","description":"…"},"body":{"duration":"…","description":"…"},"cta":{"duration":"…","description":"…"}}, "budget_efficiency": "…" },
 
   "product_info": {
     "what": "구체적 상품/이벤트명 (예: WSUS 411 한정 스킨)",
@@ -382,6 +389,14 @@ confidence < 0.6 이면 secondary_type 도 추가 제시.
     "logo_placement": "first_frame | last_frame | persistent_corner"
   },
 
+  "key_visual_criteria": {
+    "definition": "이 프로젝트에서 키비주얼/하이라이트 컷이 의미하는 바 1문장",
+    "selection_rules": ["하이라이트 후보를 고르는 기준 3개 — hook/hero/product/emotion/cta 중 근거 명시"],
+    "visual_priorities": ["대표 이미지가 가져야 할 시각 우선순위 3-5개 — 피사체 위계, 실루엣, 깊이, 컬러 포인트 등"],
+    "avoid_patterns": ["반복되면 품질이 떨어지는 구도/표현 2-4개"],
+    "evidence": ["브리프/레퍼런스/ABCD 기준 중 이 정의의 근거 2-4개"]
+  },
+
   "hook_strategy": {
     "primary": "gameplay_first | fail_solve | power_fantasy | unboxing_reveal | before_after | mystery_tease | testimonial | pattern_interrupt",
     "alternatives": ["대안 Hook 타입 2개"],
@@ -392,7 +407,9 @@ confidence < 0.6 이면 secondary_type 도 추가 제시.
   "pacing": {
     "format": "9:16 | 16:9 | 1:1 | 4:5",
     "duration": "6s | 15s | 30s | 45s | 60s",
-    "scene_count": {"min":3,"max":5,"recommended":4},
+    "sequence_count": {"min":3,"max":4,"recommended":3},
+    "shot_count": {"min":6,"max":10,"recommended":8},
+    "scene_count": {"min":6,"max":10,"recommended":8},
     "edit_rhythm": "fast | medium | slow",
     "silent_viewable": true,
     "captions_required": true
@@ -434,16 +451,33 @@ brand_film 인 경우에만 추가:
 - product_launch / event 는 product_reveal_timing = "0-3s" 가 기본값
 - brand_film 은 product_reveal_timing = "5-10s" 도 허용
 
+[key_visual_criteria 규칙]
+- Highlight 체크박스가 후속 씬/이미지 생성에서 참고할 기준이다. 반드시 브리프와 레퍼런스 근거를 evidence 에 적는다.
+- selection_rules 는 "왜 이 컷이 대표 이미지 후보인지"를 판단할 수 있어야 한다. 단순히 "멋있게" 금지.
+- visual_priorities 는 카메라 고정값이 아니라 피사체 위계, 실루엣, 전경/중경/후경 깊이, 조명 분리, 브랜드/제품 가독성처럼 다양한 구도에 적용 가능한 기준으로 작성한다.
+- avoid_patterns 는 과도한 중앙 클로즈업, generic stock hero pose, 로고 단독 첫 프레임, 모든 컷 동일 구도 등 반복 패턴 방지 기준을 포함한다.
+- ABCD 기준과 연결: Attract=첫눈에 이해, Brand=제품/브랜드 명확성, Connect=감정/타겟 공감, Direct=CTA로 이어지는 명확성.
+
+[레퍼런스 분석 규칙]
+- 이미지/영상 레퍼런스는 "분위기"로만 요약하지 말고 hook 방식, 구도 원리, 조명/색, 편집 리듬, 전환 방식, 따라 하면 안 되는 요소로 분해한다.
+- 사용자가 Time range / Focus points 를 달았으면 해당 구간의 timing, staging, subject hierarchy 를 최우선 근거로 삼는다.
+- reference_video_insights.transferable_techniques 에는 후속 Storyboard/Conti가 바로 쓸 수 있는 연출 패턴만 적는다.
+
 [constraints.avoid 규칙]
 - 반드시 네거티브 프롬프트 형태 (예: "logo-only first frame", "flat product shot without motion", "generic stock footage cliché")
 - 최소 2개 이상 제공
 
-[pacing.scene_count 자동 결정]
-- 6s → 1~2 씬
-- 15s → 3~4 씬 (recommended 4)
-- 30s → 5~7 씬 (recommended 6)
-- 45s → 7~10 씬 (recommended 8)
-- 60s → 8~12 씬 (recommended 10)
+[pacing.sequence_count / pacing.shot_count 자동 결정]
+- sequence_count 는 큰 이야기 단락 수다. 예: Hook / 상품 발견 / 기능 비교 / CTA.
+- shot_count 는 후속 Agent/Conti 카드가 될 실제 Shot/컷 수다. 한 컷은 한 이미지 생성 단위다.
+- scene_count 는 기존 저장 데이터 호환용 legacy 필드이며, 새 분석에서는 shot_count 와 같은 값을 넣는다.
+- 6s → sequence_count 1~2 (recommended 1), shot_count 2~4 (recommended 3)
+- 15s → sequence_count 3~4 (recommended 3), shot_count 6~10 (recommended 8)
+- 30s → sequence_count 5~7 (recommended 6), shot_count 10~16 (recommended 12)
+- 45s → sequence_count 7~10 (recommended 8), shot_count 14~22 (recommended 18)
+- 60s → sequence_count 8~12 (recommended 10), shot_count 18~30 (recommended 24)
+- product_launch / event / update 처럼 정보량이 많거나 HUD·제품 디테일·CTA가 필요한 경우 shot_count는 권장 범위의 상단을 선택한다.
+- 단, sequence_count를 늘리는 것과 shot_count를 늘리는 것을 혼동하지 말 것. 15초 3~4씬은 가능하지만, 이를 3~4컷으로 줄이면 안 된다.
 
 [pacing.silent_viewable]
 - 모바일·SNS (9:16, 1:1) 는 기본 true, captions_required = true
@@ -511,6 +545,86 @@ const parseDeepAnalysisJson = (text: string): DeepAnalysis => {
   return JSON.parse(cleaned);
 };
 
+const countRangeForDuration = (
+  duration?: string,
+): { sequence_count: { min: number; max: number; recommended: number }; shot_count: { min: number; max: number; recommended: number } } => {
+  const d = duration ?? "";
+  if (/6/.test(d)) return { sequence_count: { min: 1, max: 2, recommended: 1 }, shot_count: { min: 2, max: 4, recommended: 3 } };
+  if (/30/.test(d)) return { sequence_count: { min: 5, max: 7, recommended: 6 }, shot_count: { min: 10, max: 16, recommended: 12 } };
+  if (/45/.test(d)) return { sequence_count: { min: 7, max: 10, recommended: 8 }, shot_count: { min: 14, max: 22, recommended: 18 } };
+  if (/60/.test(d)) return { sequence_count: { min: 8, max: 12, recommended: 10 }, shot_count: { min: 18, max: 30, recommended: 24 } };
+  return { sequence_count: { min: 3, max: 4, recommended: 3 }, shot_count: { min: 6, max: 10, recommended: 8 } };
+};
+
+const ensureBriefQualityFields = (analysis: DeepAnalysis): DeepAnalysis => {
+  const pacing = analysis.pacing
+    ? (() => {
+        const counts = countRangeForDuration(analysis.pacing.duration);
+        const shot_count = analysis.pacing.shot_count ?? counts.shot_count;
+        const sequence_count = analysis.pacing.sequence_count ?? counts.sequence_count;
+        return {
+          ...analysis.pacing,
+          sequence_count,
+          shot_count,
+          scene_count: analysis.pacing.scene_count ?? shot_count,
+        };
+      })()
+    : undefined;
+
+  const abcd_compliance =
+    analysis.abcd_compliance ??
+    scoreABCD({
+      hook_strategy: analysis.hook_strategy,
+      hero_visual: analysis.hero_visual,
+      product_info: analysis.product_info,
+      pacing,
+      constraints: analysis.constraints,
+      audience_insight: analysis.audience_insight,
+      visual_direction:
+        typeof analysis.tone_manner?.visual_direction === "object"
+          ? analysis.tone_manner.visual_direction
+          : undefined,
+      reference_mood: analysis.tone_manner?.reference_mood,
+    }) ??
+    undefined;
+
+  const key_visual_criteria =
+    analysis.key_visual_criteria ??
+    (analysis.hero_visual
+      ? {
+          definition: `이 프로젝트의 대표 컷은 ${analysis.hero_visual.first_frame}의 시각 의도를 가장 명확히 보여주는 장면입니다.`,
+          selection_rules: [
+            "첫 3초 훅 또는 감정/제품 피크와 직접 연결되는 컷",
+            "hero_visual.must_show 요소가 한눈에 읽히는 컷",
+            "ABCD 기준에서 Attract와 Brand를 동시에 보강하는 컷",
+          ],
+          visual_priorities: [
+            "명확한 피사체 위계",
+            "실루엣 또는 조명 분리",
+            "브랜드/제품/캐릭터 가독성",
+            "전경/중경/후경 깊이감",
+          ],
+          avoid_patterns: [
+            "로고만 보이는 정적 첫 프레임",
+            "모든 컷이 같은 중앙 클로즈업으로 반복되는 구성",
+            "제품/캐릭터가 배경에 묻혀 보이지 않는 구성",
+          ],
+          evidence: [
+            "hero_visual.first_frame",
+            "hero_visual.must_show",
+            "Google ABCD: Attract/Brand",
+          ],
+        }
+      : undefined);
+
+  return {
+    ...analysis,
+    ...(pacing ? { pacing } : {}),
+    ...(abcd_compliance ? { abcd_compliance } : {}),
+    ...(key_visual_criteria ? { key_visual_criteria } : {}),
+  };
+};
+
 const analyzeBriefText = async (briefText: string, lang: Lang = "ko", modelId?: string): Promise<DeepAnalysis> => {
   const langDirective = lang === "en" ? LANG_DIRECTIVE_EN : LANG_DIRECTIVE_KO;
   const resolvedModel = modelId ?? getModel("brief");
@@ -524,11 +638,13 @@ const analyzeBriefText = async (briefText: string, lang: Lang = "ko", modelId?: 
     response_format: isOpenAI ? "json_object" : undefined,
     messages: [{ role: "user", content: `다음 브리프를 분석해주세요:\n\n${briefText}` }],
   });
-  return parseDeepAnalysisJson(result.text);
+  return ensureBriefQualityFields(parseDeepAnalysisJson(result.text));
 };
 
+type BriefAnalysisImage = { base64: string; mediaType: string; label?: string };
+
 const analyzeBriefWithImages = async (
-  images: Array<{ base64: string; mediaType: string }>,
+  images: BriefAnalysisImage[],
   additionalText: string,
   lang: Lang = "ko",
   modelId?: string,
@@ -545,11 +661,13 @@ const analyzeBriefWithImages = async (
   const content: Array<{ type: "text"; text: string } | { type: "image"; mediaType: string; dataBase64: string }> = [];
   images.forEach((img, i) => {
     content.push({ type: "image", mediaType: img.mediaType, dataBase64: img.base64 });
-    if (images.length > 1) content.push({ type: "text", text: `위 이미지는 브리프 ${i + 1}번째 장면입니다.` });
+    if (images.length > 1) {
+      content.push({ type: "text", text: img.label ?? `위 이미지는 브리프 이미지 ${i + 1}입니다.` });
+    }
   });
   content.push({
     type: "text",
-    text: `이 이미지(들)는 광고 브리프입니다.${additionalText ? `\n\n추가 설명: ${additionalText}` : ""}`,
+    text: `첨부 이미지와 레퍼런스를 함께 읽고 광고 브리프를 분석하세요.${additionalText ? `\n\n추가 설명: ${additionalText}` : ""}`,
   });
   const result = await callLLM({
     model: resolvedModel,
@@ -558,7 +676,7 @@ const analyzeBriefWithImages = async (
     response_format: isOpenAI ? "json_object" : undefined,
     messages: [{ role: "user", content }],
   });
-  return parseDeepAnalysisJson(result.text);
+  return ensureBriefQualityFields(parseDeepAnalysisJson(result.text));
 };
 
 /* ━━━━━ i18n 라벨 맵 ━━━━━ */
@@ -1496,7 +1614,7 @@ const CoreStrategyUI = ({
               [
                 { Icon: Camera, label: lang === "ko" ? "카메라" : "Camera", key: "camera" as const },
                 { Icon: Lightbulb, label: lang === "ko" ? "조명" : "Lighting", key: "lighting" as const },
-                { Icon: Palette, label: lang === "ko" ? "색감" : "Color", key: "color_grade" as const },
+                { Icon: SlidersHorizontal, label: lang === "ko" ? "색감" : "Color", key: "color_grade" as const },
                 { Icon: Scissors, label: lang === "ko" ? "편집" : "Editing", key: "editing" as const },
               ] as const
             ).map(({ Icon, label: cellLabel, key }) => (
@@ -1530,6 +1648,53 @@ const CoreStrategyUI = ({
           </div>
         )}
 
+        {analysis.key_visual_criteria && (
+          <div className="mb-6">
+            <Heading2>{lang === "ko" ? "키비주얼 기준" : "Key Visual Criteria"}</Heading2>
+            <div className="space-y-3">
+              <div
+                className="px-3 py-2.5"
+                style={{ borderRadius: 0, background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.16)" }}
+              >
+                <Label3>{lang === "ko" ? "정의" : "Definition"}</Label3>
+                {E(["key_visual_criteria", "definition"], analysis.key_visual_criteria.definition, {
+                  multiline: true,
+                  className: "text-[13px] leading-relaxed text-foreground/85",
+                })}
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  {
+                    label: lang === "ko" ? "선정 기준" : "Selection Rules",
+                    values: analysis.key_visual_criteria.selection_rules ?? [],
+                    path: ["key_visual_criteria", "selection_rules"],
+                  },
+                  {
+                    label: lang === "ko" ? "시각 우선순위" : "Visual Priorities",
+                    values: analysis.key_visual_criteria.visual_priorities ?? [],
+                    path: ["key_visual_criteria", "visual_priorities"],
+                  },
+                  {
+                    label: lang === "ko" ? "피해야 할 패턴" : "Avoid Patterns",
+                    values: analysis.key_visual_criteria.avoid_patterns ?? [],
+                    path: ["key_visual_criteria", "avoid_patterns"],
+                  },
+                  {
+                    label: lang === "ko" ? "근거" : "Evidence",
+                    values: analysis.key_visual_criteria.evidence ?? [],
+                    path: ["key_visual_criteria", "evidence"],
+                  },
+                ].map((section) => (
+                  <div key={section.label} className="px-3 py-2.5" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
+                    <Label3>{section.label}</Label3>
+                    <EditableBulletList items={section.values} basePath={section.path} dot="red" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         <Heading2>{t("scene_flow", lang)}</Heading2>
         <div className="bg-background/80 border border-border px-3 py-2.5" style={{ borderRadius: 0 }}>
           <div className="flex items-start mb-3">
@@ -1556,9 +1721,17 @@ const CoreStrategyUI = ({
               {analysis.production_notes.scene_count_hint}
             </p>
           ) : (
-            <div className="grid grid-cols-3 gap-2">
-              {(["hook", "body", "cta"] as const).map((key) => {
-                const section = (analysis.production_notes.scene_count_hint as SceneFlowStructured)[key];
+            <>
+              {(() => {
+                const flow = analysis.production_notes.scene_count_hint as SceneFlowStructured;
+                const summary = [flow.total_sequences, flow.total_shots].filter(Boolean).join(" · ") || flow.total_scenes;
+                return summary ? (
+                  <p className="mb-2 font-mono text-[10px] text-muted-foreground/70">{summary}</p>
+                ) : null;
+              })()}
+              <div className="grid grid-cols-3 gap-2">
+                {(["hook", "body", "cta"] as const).map((key) => {
+                  const section = (analysis.production_notes.scene_count_hint as SceneFlowStructured)[key];
                 return (
                   <div
                     key={key}
@@ -1581,8 +1754,9 @@ const CoreStrategyUI = ({
                     })}
                   </div>
                 );
-              })}
-            </div>
+                })}
+              </div>
+            </>
           )}
         </div>
       </AccordionCard>
@@ -1961,7 +2135,7 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
             [
               { Icon: Camera, label: l === "ko" ? "카메라" : "Camera", key: "camera" as const },
               { Icon: Lightbulb, label: l === "ko" ? "조명" : "Lighting", key: "lighting" as const },
-              { Icon: Palette, label: l === "ko" ? "색감" : "Color", key: "color_grade" as const },
+              { Icon: SlidersHorizontal, label: l === "ko" ? "색감" : "Color", key: "color_grade" as const },
               { Icon: Scissors, label: l === "ko" ? "편집" : "Editing", key: "editing" as const },
             ] as const
           ).map(({ Icon, label: cellLabel, key }) => (
@@ -2041,9 +2215,15 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
         {typeof a.production_notes.scene_count_hint === "string" ? (
           <p className="text-[13px] text-muted-foreground leading-relaxed">{a.production_notes.scene_count_hint}</p>
         ) : (
-          <div className="grid grid-cols-3 gap-3">
-            {(["hook", "body", "cta"] as const).map((key) => {
-              const section = (a.production_notes.scene_count_hint as SceneFlowStructured)[key];
+          <>
+            {(() => {
+              const flow = a.production_notes.scene_count_hint as SceneFlowStructured;
+              const summary = [flow.total_sequences, flow.total_shots].filter(Boolean).join(" · ") || flow.total_scenes;
+              return summary ? <p className="mb-3 font-mono text-[11px] text-muted-foreground/70">{summary}</p> : null;
+            })()}
+            <div className="grid grid-cols-3 gap-3">
+              {(["hook", "body", "cta"] as const).map((key) => {
+                const section = (a.production_notes.scene_count_hint as SceneFlowStructured)[key];
               return (
                 <div key={key} className="px-4 py-4" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
                   <div className="flex items-center gap-2 mb-2">
@@ -2078,11 +2258,58 @@ const SLIDE_DEFS: ((lang: Lang) => SlideDefinition)[] = [
                   )}
                 </div>
               );
-            })}
-          </div>
+              })}
+            </div>
+          </>
         )}
       </div>
     ),
+  }),
+  (lang) => ({
+    title: lang === "ko" ? "키비주얼 기준" : "Key Visual Criteria",
+    badge: "KEYVIS",
+    group: "direction",
+    show: (a) => !!a.key_visual_criteria,
+    render: (a, l, onU) => {
+      const k = a.key_visual_criteria!;
+      return (
+        <div className="space-y-4">
+          <div className="px-4 py-3" style={{ borderRadius: 0, background: "rgba(249,66,58,0.06)", border: "1px solid rgba(249,66,58,0.16)" }}>
+            <Label3>{l === "ko" ? "정의" : "Definition"}</Label3>
+            {onU ? (
+              <EditableText
+                value={k.definition}
+                onSave={(v) => onU(["key_visual_criteria", "definition"], v)}
+                multiline
+                className="text-[14px] text-foreground/85 leading-relaxed"
+              />
+            ) : (
+              <p className="text-[14px] text-foreground/85 leading-relaxed">{k.definition}</p>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { label: l === "ko" ? "선정 기준" : "Selection Rules", values: k.selection_rules ?? [] },
+              { label: l === "ko" ? "시각 우선순위" : "Visual Priorities", values: k.visual_priorities ?? [] },
+              { label: l === "ko" ? "피해야 할 패턴" : "Avoid Patterns", values: k.avoid_patterns ?? [] },
+              { label: l === "ko" ? "근거" : "Evidence", values: k.evidence ?? [] },
+            ].map((section) => (
+              <div key={section.label} className="px-4 py-3" style={{ borderRadius: 0, background: "rgba(255,255,255,0.03)" }}>
+                <Label3>{section.label}</Label3>
+                <ul className="space-y-1.5">
+                  {section.values.map((item, i) => (
+                    <li key={i} className="flex items-start gap-2 text-[12px] leading-relaxed text-muted-foreground">
+                      <span className="w-1 h-1 shrink-0 mt-[7px] bg-primary" />
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    },
   }),
   (lang) => ({
     title: t("narrative_structure", lang),
@@ -2157,6 +2384,87 @@ const NarrativeSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lan
   );
 };
 
+const containsKorean = (value: string): boolean => /[ㄱ-ㅎㅏ-ㅣ가-힣]/u.test(value);
+
+const localizeAbcdNote = (note: string, lang: Lang): string => {
+  if (lang !== "en" || !containsKorean(note)) return note;
+
+  const replacements: Array<[RegExp, string]> = [
+    [/첫 프레임 시각 정의됨/g, "First-frame visual defined"],
+    [/hero_visual\.first_frame 미정의 — 첫 프레임 시각을 구체화할 것/g, "hero_visual.first_frame is missing - define the first-frame visual"],
+    [/hero_visual\.first_frame 미정의/g, "hero_visual.first_frame is missing"],
+    [/pattern_interrupt 활성/g, "Pattern interrupt enabled"],
+    [/pattern_interrupt 신호 확인됨/g, "Pattern interrupt signal found"],
+    [/스크롤 멈춤\(pattern_interrupt\) 장치 없음/g, "No scroll-stopping pattern interrupt"],
+    [/첫 3초 내 브랜드·제품 노출 설계됨/g, "Brand/product exposure planned within the first 3s"],
+    [/첫 3초 내 제품\/브랜드 노출이 설계되지 않음/g, "Brand/product exposure is not planned within the first 3s"],
+    [/훅 첫 3초 묘사가 비었거나 너무 짧음/g, "First 3s hook description is missing or too short"],
+    [/첫 씬 description 이 비었거나 너무 짧음 — 훅 샷 구체화 필요/g, "First scene description is missing or too short - specify the hook shot"],
+    [/첫 씬 description 구체적/g, "First scene description is specific"],
+    [/첫 씬 camera_angle 미지정/g, "First scene camera_angle is missing"],
+    [/첫 씬 duration 이 너무 짧음 — 훅 인지 불가/g, "First scene duration is too short for the hook to register"],
+    [/첫 씬 duration 훅 구간에 적합/g, "First scene duration fits the hook window"],
+    [/첫 씬 duration 미지정/g, "First scene duration is missing"],
+    [/첫 제품\/브랜드 노출이 ([\d.]+)s — 3초 초과/g, "First product/brand exposure is at $1s - over 3s"],
+    [/첫 ([\d.]+)s 내 브랜드·제품 노출/g, "Brand/product exposure within the first $1s"],
+    [/씬에 제품\/브랜드 키워드 노출 없음/g, "No product/brand keyword exposure in scenes"],
+    [/어떤 씬에도 제품\/브랜드 키워드가 없음/g, "No product/brand keyword appears in any scene"],
+    [/브랜드·제품 노출이 ([\d.]+)s — 3초 초과/g, "Brand/product exposure is at $1s - over 3s"],
+    [/3초 이내 \(([\d.]+)s\) 브랜드 노출/g, "Brand exposure within 3s ($1s)"],
+    [/브랜드 노출이 5초 초과 — Hook 구간 내 진입 필요/g, "Brand exposure is after 5s - move it into the hook window"],
+    [/브랜드 노출 타이밍이 5초 이내에 설계되지 않음/g, "Brand exposure is not planned within 5s"],
+    [/5초 이내 브랜드 노출 \(설계\)/g, "Brand exposure within 5s (planned)"],
+    [/브랜드·제품이 1개 씬에만 등장 — 분산 노출 부족/g, "Brand/product appears in only one scene - distributed exposure is weak"],
+    [/브랜드·제품 분산 노출 없음/g, "No distributed brand/product exposure"],
+    [/(\d+)개 씬에 걸쳐 브랜드·제품 반복 노출/g, "Repeated brand/product exposure across $1 scenes"],
+    [/브랜드·제품 총 노출 ([\d.]+)s \/ ([\d.]+)s \((\d+)%\) — 20% 미만/g, "Total brand/product exposure is $1s / $2s ($3%) - below 20%"],
+    [/총 러닝타임 산출 불가/g, "Total runtime cannot be calculated"],
+    [/브랜드 노출 비중 (\d+)%/g, "Brand exposure share $1%"],
+    [/product_info\.what 누락 — 판매·홍보 대상 불명확/g, "product_info.what is missing - the promoted object is unclear"],
+    [/product_info\.what 누락/g, "product_info.what is missing"],
+    [/logo_placement 미정의/g, "logo_placement is missing"],
+    [/hero_visual\.must_show 자산 2개 미만/g, "Fewer than 2 hero_visual.must_show assets"],
+    [/audience_insight\.pain_point 미정의 — 타겟 페인 포인트 구체화 필요/g, "audience_insight.pain_point is missing - specify the target pain point"],
+    [/audience_insight\.pain_point 미정의/g, "audience_insight.pain_point is missing"],
+    [/훅이 감정 비트를 강조하는 유형이 아님/g, "Hook type does not emphasize an emotional beat"],
+    [/감정 연결형 훅 유형/g, "Emotion-driven hook type"],
+    [/감정 연결형 훅 선택됨/g, "Emotion-driven hook selected"],
+    [/감정 톤을 구체화할 lighting·reference_mood 서술 부족/g, "lighting/reference_mood lacks enough emotional detail"],
+    [/visual_direction\.lighting 이 감정 톤을 구체화하지 못함/g, "visual_direction.lighting does not specify the emotional tone"],
+    [/reference_mood 가 센서리 디테일로 묘사되지 않음/g, "reference_mood lacks sensory detail"],
+    [/필드 씬 (\d+)개 — 스토리 비트 구성 불가 \(3\+ 권장\)/g, "$1 filled scene(s) - not enough for story beats (3+ recommended)"],
+    [/필드 씬 (\d+)개 — 감정 빌드업 공간 부족/g, "$1 filled scene(s) - not enough room for emotional buildup"],
+    [/(\d+)개 씬으로 내러티브 구성 가능/g, "$1 scenes can support narrative structure"],
+    [/CTA 이전 빌드업 씬이 없음 — 감정 곡선 부재/g, "No buildup scene before CTA - emotional arc is missing"],
+    [/CTA 이전 빌드업 씬 존재/g, "Buildup scene exists before CTA"],
+    [/cta_action 이 동사형 10자 이내가 아님/g, "cta_action is not a short verb phrase"],
+    [/cta_action 이 동사형 3-6자 짧은 문구가 아님/g, "cta_action is not a short verb phrase"],
+    [/cta_action 구체적 동사형/g, "cta_action is a concrete verb phrase"],
+    [/cta_destination \(구체적 경로\) 누락/g, "cta_destination is missing"],
+    [/cta_destination 누락/g, "cta_destination is missing"],
+    [/urgency 'none' — 긴박감 장치 없음/g, "urgency is 'none' - no urgency device"],
+    [/urgency 'none'/g, "urgency is 'none'"],
+    [/긴박감\(urgency\) 설계됨/g, "Urgency is planned"],
+    [/긴박감 설계됨/g, "Urgency is planned"],
+    [/마지막 30% 구간 씬에 CTA 키워드 없음/g, "No CTA keyword in the final 30% of scenes"],
+    [/CTA 노출 ([\d.]+)s — 2초 미만, 인지 어려움/g, "CTA exposure is $1s - under 2s, hard to register"],
+    [/CTA 노출 없음/g, "No CTA exposure"],
+    [/CTA 마지막 구간 ([\d.]+)s 노출/g, "CTA exposure in final section: $1s"],
+    [/권장 씬 수 3 미만 — 마지막 CTA 구간 확보 어려움/g, "Recommended shot count is below 3 - hard to secure a final CTA section"],
+    [/권장 컷 수 3 미만 — 마지막 CTA 구간 확보 어려움/g, "Recommended shot count is below 3 - hard to secure a final CTA section"],
+    [/검색어:/g, "keywords:"],
+    [/초반 스크롤 이탈 위험 \(1-5s 권장\)/g, "early scroll-off risk (1-5s recommended)"],
+    [/첫 씬 duration ([\d.]+)s/g, "First scene duration $1s"],
+  ];
+
+  return replacements.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), note);
+};
+
+const localizeAbcdGrade = (grade: string, lang: Lang): string => {
+  if (lang !== "en") return grade;
+  return ({ 탁월: "Excellent", 양호: "Good", 보통: "Fair", 취약: "Weak" } as Record<string, string>)[grade] ?? grade;
+};
+
 /* ━━━━━ ABCD Effectiveness Slide ━━━━━ */
 const AbcdSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: Lang }) => {
   // 브리프 설계값만으로 채점하는 "설계 체크리스트". 저장된 값이 있으면 사용.
@@ -2217,7 +2525,7 @@ const AbcdSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: La
               />
             </div>
             {row.notes && (
-              <p className="text-[11.5px] leading-relaxed text-muted-foreground/80 pl-4 font-light">{row.notes}</p>
+              <p className="text-[11.5px] leading-relaxed text-muted-foreground/80 pl-4 font-light">{localizeAbcdNote(row.notes, lang)}</p>
             )}
           </div>
         );
@@ -2228,13 +2536,15 @@ const AbcdSlideContent = ({ analysis, lang }: { analysis: DeepAnalysis; lang: La
       >
         <div className="flex items-baseline gap-2">
           <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{t("abcd_total", lang)}</span>
-          <span className="font-mono text-[16px] font-bold" style={{ color: colorMap[gradeInfo.color] }}>{total}/40</span>
+          <span className="font-mono text-[16px] font-bold" style={{ color: colorMap[gradeInfo.color] }}>
+            {(total / 4).toFixed(1)}/10
+          </span>
         </div>
         <span
           className="text-[12px] font-bold uppercase tracking-wider"
           style={{ color: colorMap[gradeInfo.color] }}
         >
-          {gradeInfo.grade}
+          {localizeAbcdGrade(gradeInfo.grade, lang)}
         </span>
       </div>
     </div>
@@ -2669,47 +2979,50 @@ const NextStepModal = ({
   onGoAssets: () => void;
   onGoAgent: () => void;
   analysisLang?: "ko" | "en";
-}) => (
-  <Dialog open onOpenChange={(o) => !o && onClose()}>
-    <DialogContent className="max-w-[380px] bg-card border-border" style={{ borderRadius: 0 }}>
-      <DialogHeader>
-        <DialogTitle className="text-[15px] font-semibold text-foreground">Choose next step</DialogTitle>
-      </DialogHeader>
-      <p className="text-[12px] text-muted-foreground leading-relaxed">
-        Registering assets (characters, items, backgrounds) first helps the agent build more detailed scenes.
-      </p>
-      <div className="space-y-2 mt-1">
-        {[
-          {
-            Icon: Package,
-            title: "Set Up Assets First",
-            desc: "Register characters, items, backgrounds then go to Ideation",
-            onClick: () => {
-              onClose();
-              onGoAssets();
+}) => {
+  const t = useT();
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-[380px] bg-card border-border" style={{ borderRadius: 0 }}>
+        <DialogHeader>
+          <DialogTitle className="text-[15px] font-semibold text-foreground">{t("brief.nextStepTitle")}</DialogTitle>
+        </DialogHeader>
+        <p className="text-[12px] text-muted-foreground leading-relaxed">
+          {t("brief.nextStepDesc")}
+        </p>
+        <div className="space-y-2 mt-1">
+          {[
+            {
+              Icon: Package,
+              title: t("brief.nextStepAssetsTitle"),
+              desc: t("brief.nextStepAssetsDesc"),
+              onClick: () => {
+                onClose();
+                onGoAssets();
+              },
             },
-          },
-          {
-            Icon: MessageSquare,
-            title: "Go to Ideation Directly",
-            desc: "Start building the story without assets",
-            onClick: () => {
-              onClose();
-              onGoAgent();
+            {
+              Icon: MessageSquare,
+              title: t("brief.nextStepIdeationTitle"),
+              desc: t("brief.nextStepIdeationDesc"),
+              onClick: () => {
+                onClose();
+                onGoAgent();
+              },
             },
-          },
-        ].map((opt) => (
-          <NextStepOption key={opt.title} {...opt} />
-        ))}
-      </div>
-      <DialogFooter>
-        <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>
-          Cancel
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-);
+          ].map((opt) => (
+            <NextStepOption key={opt.title} {...opt} />
+          ))}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" className="text-[13px] h-9" onClick={onClose}>
+            {t("common.cancel")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
 
 /* ━━━━━ LangToggle — shared toggle UI ━━━━━ */
 const LangToggle = ({
@@ -2750,6 +3063,7 @@ const LangToggle = ({
 export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props) => {
   const { toast } = useToast();
   const t = useT();
+  const { language: uiLanguage } = useUiLanguage();
   const isMobile = useIsMobile();
 
   const getInitialDraft = useCallback((): DraftState => {
@@ -2866,10 +3180,25 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
   const [viewMode, setViewMode] = useState<"list" | "slide">("list");
 
   /* ━━━━━ KO/EN — analysis lang + bidirectional sync ━━━━━ */
-  const [analysisLang, setAnalysisLang] = useState<Lang>("en");
+  const [analysisLang, setAnalysisLang] = useState<Lang>(() => uiLanguage);
   const [analysisEn, setAnalysisEn] = useState<Analysis | null>(null);
   const [translating, setTranslating] = useState(false);
   const [fieldSyncing, setFieldSyncing] = useState<string | null>(null);
+  const analysisLangTouchedRef = useRef(false);
+  const previousProjectIdRef = useRef(projectId);
+
+  useEffect(() => {
+    if (previousProjectIdRef.current === projectId) return;
+    previousProjectIdRef.current = projectId;
+    analysisLangTouchedRef.current = false;
+    setAnalysisLang(uiLanguage);
+  }, [projectId, uiLanguage]);
+
+  useEffect(() => {
+    if (!analysis && !existingBrief && !analysisLangTouchedRef.current) {
+      setAnalysisLang(uiLanguage);
+    }
+  }, [uiLanguage, analysis, existingBrief]);
 
   /* Analysis result lang toggle — lazy translate on first EN click */
   const handleLangToggle = useCallback(
@@ -3039,10 +3368,15 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       setExistingBrief(data as unknown as Brief);
 
       if (data.analysis) {
-        const a = data.analysis as unknown as DeepAnalysis;
+        const rawAnalysis = data.analysis as unknown as Analysis;
+        const a = isDeepAnalysis(rawAnalysis) ? ensureBriefQualityFields(rawAnalysis) : rawAnalysis;
         setAnalysis(a);
         setAnalyzedAt(data.created_at);
         setSourceType(((data as any).source_type as "text" | "image" | "pdf") || "text");
+
+        if (isDeepAnalysis(a) && JSON.stringify(a) !== JSON.stringify(data.analysis)) {
+          await supabase.from("briefs").update({ analysis: a }).eq("id", data.id);
+        }
 
         // ★ Load lang from DB
         if ((data as any).lang) {
@@ -3050,11 +3384,12 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
         }
 
         if ((data as any).analysis_en) {
-          setAnalysisEn((data as any).analysis_en as unknown as Analysis);
+          const rawAnalysisEn = (data as any).analysis_en as unknown as Analysis;
+          setAnalysisEn(isDeepAnalysis(rawAnalysisEn) ? ensureBriefQualityFields(rawAnalysisEn) : rawAnalysisEn);
         }
 
         const currentDraft = loadFromLS(projectId);
-        if (!currentDraft.ideaNote && a.idea_note) {
+        if (!currentDraft.ideaNote && isDeepAnalysis(a) && a.idea_note) {
           setIdeaNote(a.idea_note);
         }
       }
@@ -3353,18 +3688,10 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       let imageAnalysis = "";
       let videoInsightsBlock = "";
 
-      // ── 1) 이미지 레퍼런스: 종래 Gemini 기반 스타일 분석 호출 ──
+      // ── 1) 이미지 레퍼런스: 선택한 브리프 모델이 직접 함께 읽는다 ──
       const refImagesUsable = refItems.filter(
         (it): it is RefImageItem => it.kind === "image" && !it.ignoredByModel,
       );
-      if (refImagesUsable.length > 0) {
-        try {
-          const { data: rd, error: re } = await supabase.functions.invoke("analyze-reference-images", {
-            body: { images: refImagesUsable.map((i) => ({ base64: i.base64, mediaType: i.mediaType })) },
-          });
-          if (!re && rd?.analysis) imageAnalysis = rd.analysis;
-        } catch {}
-      }
 
       // ── 2) YouTube/Video 레퍼런스: GPT-5.x 일 때만 텍스트 + 프레임 첨부 ──
       const youtubesUsable = refItems.filter(
@@ -3416,8 +3743,8 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
         const annLines = formatAnnotationLines(ann, { includeRange: !rangeApplied });
         return [head, ...annLines].join("\n");
       });
-      // 이미지 레퍼런스 부연설명 — 이미지 자체는 별도 분석 파이프라인으로 넘기지만,
-      // 사용자가 적은 포인트는 메인 분석 프롬프트에 텍스트로 합류시켜 가중치를 높인다.
+      // 이미지 레퍼런스 부연설명 — 이미지 자체와 함께 메인 분석 모델에 전달한다.
+      // 사용자가 적은 포인트는 텍스트 힌트로 합류시켜 가중치를 높인다.
       const imgNoteLines: string[] = [];
       const imageIdxMap = new Map<string, number>();
       {
@@ -3462,14 +3789,32 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
         });
       }
 
-      // ── 3) 모델 호출: image-frame 첨부는 GPT-5.x 일 때만 ──
-      const extraFrameImages: Array<{ base64: string; mediaType: string }> = modelSupportsVideo
-        ? sampledVideos.flatMap(({ frames }) => frames).slice(0, 16) // 안전 상한
+      // ── 3) 모델 호출: 모든 시각 레퍼런스는 선택한 브리프 모델이 일관되게 분석 ──
+      const extraFrameImages: BriefAnalysisImage[] = modelSupportsVideo
+        ? sampledVideos.flatMap(({ item, frames }) =>
+            frames.map((frame) => ({
+              base64: frame.base64,
+              mediaType: frame.mediaType,
+              label: `위 이미지는 영상 레퍼런스 "${item.fileName}"의 ${frame.t.toFixed(1)}초 프레임입니다.`,
+            })),
+          ).slice(0, 16) // 안전 상한
+        : [];
+      const refImageInputs: BriefAnalysisImage[] = briefMeta?.supportsVision
+        ? refImagesUsable.map((img, index) => ({
+            base64: img.base64,
+            mediaType: img.mediaType,
+            label: `위 이미지는 레퍼런스 이미지 ${index + 1}입니다. 브리프 원본이 아니라 시각 스타일, 분위기, 구성, 연출 힌트로만 참고하세요.`,
+          }))
         : [];
 
-      if (briefImages.length > 0 || extraFrameImages.length > 0) {
-        const allImages = [
-          ...briefImages.map((i) => ({ base64: i.base64, mediaType: i.mediaType })),
+      if (briefImages.length > 0 || refImageInputs.length > 0 || extraFrameImages.length > 0) {
+        const allImages: BriefAnalysisImage[] = [
+          ...briefImages.map((i, index) => ({
+            base64: i.base64,
+            mediaType: i.mediaType,
+            label: `위 이미지는 사용자가 첨부한 브리프 이미지 ${index + 1}입니다.`,
+          })),
+          ...refImageInputs,
           ...extraFrameImages,
         ];
         result = await analyzeBriefWithImages(
@@ -3920,8 +4265,8 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
               background: refDragOver ? "rgba(249,66,58,0.04)" : "transparent",
             }}
           >
-            <ImagePlus className="w-4 h-4 text-muted-foreground/30" />
-            <p className="font-mono text-[10px] text-muted-foreground/40">{dropHintLabel}</p>
+            <ImagePlus className="w-4 h-4 text-muted-foreground/30 shrink-0" />
+            <p className="font-mono text-[10px] text-muted-foreground/40 whitespace-nowrap">{dropHintLabel}</p>
           </div>
         ) : (
           <div
@@ -4014,6 +4359,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                 <LangToggle
                   lang={analysisLang}
                   onChange={(l) => {
+                    analysisLangTouchedRef.current = true;
                     if (hasAnalysis) handleLangToggle(l);
                     else setAnalysisLang(l);
                   }}
@@ -4271,7 +4617,11 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
             </div>
             <div className="flex flex-col flex-1 px-3 pt-4 pb-4 gap-4">
               {analyzing ? (
-                <AnalysisLoader active={analyzing} variant="compact" />
+                <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center">
+                  <span className="font-mono text-[10px] text-muted-foreground/30 uppercase leading-relaxed">
+                    {t("brief.analyzing")}
+                  </span>
+                </div>
               ) : (
                 <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center">
                   <span className="font-mono text-[10px] text-muted-foreground/30 uppercase leading-relaxed">
@@ -4329,6 +4679,7 @@ interface RefNoteEditorProps {
   onSave: (next: RefAnnotation | undefined) => void;
 }
 const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorProps) => {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [rangeText, setRangeText] = useState(item.annotation?.rangeText ?? "");
   const [notes, setNotes] = useState(item.annotation?.notes ?? "");
@@ -4353,7 +4704,7 @@ const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorPr
         startSec = parsed.startSec;
         endSec = parsed.endSec;
       } else if (!rangeError) {
-        setRangeError("Invalid format — frame sampling will stay on the full clip (expected e.g. 00:12~00:15). Click Save again to keep text only.");
+        setRangeError(t("brief.referenceRangeError"));
         return;
       }
     }
@@ -4388,7 +4739,7 @@ const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorPr
             e.stopPropagation();
             setOpen((v) => !v);
           }}
-          aria-label={hasExisting ? "Edit reference note" : "Add reference note"}
+          aria-label={hasExisting ? t("brief.referenceNoteEdit") : t("brief.referenceNoteAdd")}
           className={
             "absolute -bottom-1.5 -right-1.5 w-4 h-4 bg-foreground text-background flex items-center justify-center " +
             (hasExisting ? "opacity-100" : "opacity-0 group-hover:opacity-100") +
@@ -4407,11 +4758,11 @@ const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorPr
       >
         <div className="flex flex-col gap-3">
           <div className="text-[11px] font-medium tracking-wide text-primary">
-            Reference Note
+            {t("brief.referenceNote")}
           </div>
           {includeRange && (
             <label className="flex flex-col gap-1">
-              <span className="text-[11px] text-muted-foreground">Time range</span>
+              <span className="text-[11px] text-muted-foreground">{t("brief.referenceTimeRange")}</span>
               <input
                 type="text"
                 value={rangeText}
@@ -4429,11 +4780,11 @@ const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorPr
             </label>
           )}
           <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-muted-foreground">Points to focus on</span>
+            <span className="text-[11px] text-muted-foreground">{t("brief.referenceFocusPoints")}</span>
             <Textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder={"- How the weapon enters via the scan line\n- Timing of the UI overlay"}
+              placeholder={t("brief.referenceNotePlaceholder")}
               className="min-h-[90px] text-[12px]"
             />
           </label>
@@ -4443,7 +4794,7 @@ const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorPr
               onClick={handleClear}
               className="h-8 px-2 text-[12px] text-muted-foreground hover:text-foreground"
             >
-              Clear
+              {t("brief.clear")}
             </button>
             <div className="flex items-center gap-2">
               <button
@@ -4452,7 +4803,7 @@ const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorPr
                 className="h-8 px-3 text-[12px] border border-border hover:bg-secondary"
                 style={{ borderRadius: 0 }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 type="button"
@@ -4460,7 +4811,7 @@ const RefNoteEditor = ({ item, includeRange, disabled, onSave }: RefNoteEditorPr
                 className="h-8 px-3 text-[12px] bg-primary text-primary-foreground hover:bg-primary/85"
                 style={{ borderRadius: 0 }}
               >
-                Save
+                {t("common.save")}
               </button>
             </div>
           </div>
@@ -4485,6 +4836,8 @@ const ANALYSIS_STAGES = [
   "Finalizing strategy...",
 ];
 
+const FAKE_ANALYSIS_PROGRESS_TAU_SEC = 20;
+
 function useFakeAnalysisProgress(active: boolean) {
   const [pct, setPct] = useState(0);
   const [stageIdx, setStageIdx] = useState(0);
@@ -4495,11 +4848,11 @@ function useFakeAnalysisProgress(active: boolean) {
       return;
     }
     const started = Date.now();
-    // 1 - e^(-t/tau), tau=8s → 10s 지점 ~71%, 20s 지점 ~92%, 상한 95%.
+    // 1 - e^(-t/tau), tau=20s keeps the visual-only bar 2.5x slower before the 95% cap.
     // tick 120ms 면 바의 transition-[width] duration-500 과 어우러져 부드럽게 차오름.
     const tick = setInterval(() => {
       const t = (Date.now() - started) / 1000;
-      const eased = 1 - Math.exp(-t / 8);
+      const eased = 1 - Math.exp(-t / FAKE_ANALYSIS_PROGRESS_TAU_SEC);
       setPct(Math.min(95, eased * 100));
     }, 120);
     const rotate = setInterval(() => {

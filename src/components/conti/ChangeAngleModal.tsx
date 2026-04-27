@@ -740,7 +740,7 @@ export function ChangeAngleModal({
         >
           <img
             src={sourceUrl}
-            alt={`Scene ${scene.scene_number}`}
+            alt={`Shot #${String(scene.scene_number).padStart(2, "0")}`}
             style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }}
           />
         </div>

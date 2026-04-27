@@ -264,11 +264,16 @@ export async function handleAnalyzeReferenceImages(body: any) {
   }
   if (parts.length === 0) return { error: "이미지가 없습니다." };
   parts.push({ text: prompt });
-  const data = await callVertexGemini(settings, "gemini-2.5-flash", {
-    contents: [{ parts }],
-    generationConfig: { maxOutputTokens: isStyleOnly ? 256 : 512, temperature: 0.3 },
-  });
-  return { analysis: data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "" };
+  try {
+    const data = await callVertexGemini(settings, "gemini-2.5-flash", {
+      contents: [{ parts }],
+      generationConfig: { maxOutputTokens: isStyleOnly ? 256 : 512, temperature: 0.3 },
+    });
+    return { analysis: data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "" };
+  } catch (err: any) {
+    console.warn("[analyze-reference-images] skipped:", err?.message ?? err);
+    return { analysis: "", skipped: true };
+  }
 }
 
 export async function handleOpenaiImage(body: any) {

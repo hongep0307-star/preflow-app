@@ -106,6 +106,9 @@ function createTables() {
       conti_image_crop TEXT,
       is_transition INTEGER DEFAULT 0,
       is_final INTEGER DEFAULT 0,
+      is_highlight INTEGER DEFAULT 0,
+      highlight_kind TEXT,
+      highlight_reason TEXT,
       transition_type TEXT,
       sketches TEXT DEFAULT '[]',
       created_at TEXT DEFAULT (datetime('now')),
@@ -125,6 +128,18 @@ function createTables() {
   // automatic project status sync. Legacy local DBs need this migration.
   try {
     d.exec(`ALTER TABLE scenes ADD COLUMN is_final INTEGER DEFAULT 0`);
+  } catch (_) { /* column already exists */ }
+
+  // Highlight: soft key-visual marker used by prompt generation. Optional
+  // fields so legacy scenes keep rendering even before the user marks any.
+  try {
+    d.exec(`ALTER TABLE scenes ADD COLUMN is_highlight INTEGER DEFAULT 0`);
+  } catch (_) { /* column already exists */ }
+  try {
+    d.exec(`ALTER TABLE scenes ADD COLUMN highlight_kind TEXT`);
+  } catch (_) { /* column already exists */ }
+  try {
+    d.exec(`ALTER TABLE scenes ADD COLUMN highlight_reason TEXT`);
   } catch (_) { /* column already exists */ }
 
   d.exec(`

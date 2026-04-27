@@ -129,7 +129,7 @@ const sheetCache = new Map<string, ContactSheetSession>();
 /* Concurrency per modal session. NB2 tolerates 5-wide burst comfortably. */
 const CONCURRENCY = 5;
 
-/* ━━━ Palette ━━━ */
+/* ━━━ Color Tokens ━━━ */
 const ACCENT = "hsl(var(--primary))";
 const ACCENT_SOFT_BG = "hsl(var(--primary) / 0.12)";
 const ACCENT_SOFT_BORDER = "hsl(var(--primary) / 0.55)";
@@ -332,7 +332,7 @@ export function CameraVariationsModal({
                 textAlign: "center",
               }}
             >
-              No source scene image yet — generate the scene first, then use Camera Variations.
+              No source shot image yet — generate the shot first, then use Camera Variations.
             </div>
           ) : tab === "presets" ? (
             <PresetsTab
@@ -989,9 +989,9 @@ function ContactSheetTab({
               }}
             >
               One Nano Banana 2 call renders a 3×3 contact sheet of nine different camera
-              angles of your scene in a single 2K image. We then split the
+              angles of your shot in a single 2K image. We then split the
               sheet into nine clickable tiles on your machine. Click the tile
-              you like → <b>Apply</b> replaces the scene image with that tile.
+              you like → <b>Apply</b> replaces the shot image with that tile.
               Nine angles for the latency cost of one call, with stronger
               identity consistency than running nine separate generations.
             </div>
@@ -1209,7 +1209,7 @@ function ContactSheetTab({
                 lineHeight: 1.55,
               }}
             >
-              Press <b>Generate contact sheet</b> to render 9 camera angles of this scene in one call.
+              Press <b>Generate contact sheet</b> to render 9 camera angles of this shot in one call.
             </div>
           )}
         </div>
@@ -1272,7 +1272,7 @@ function ContactSheetTab({
               title={
                 selectedTile == null
                   ? "Click a tile first"
-                  : "Replace scene image with selected tile"
+                  : "Replace shot image with selected tile"
               }
             >
               {applying ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
@@ -1319,7 +1319,7 @@ function SourcePreview({
       >
         <img
           src={sourceUrl}
-          alt={`Scene ${scene.scene_number}`}
+          alt={`Shot #${String(scene.scene_number).padStart(2, "0")}`}
           style={{
             maxWidth: "100%",
             maxHeight: 220,
@@ -1340,7 +1340,7 @@ function SourcePreview({
         }}
       >
         <div>
-          <div style={miniLabelStyle}>Scene description</div>
+          <div style={miniLabelStyle}>Shot description</div>
           <div style={{ color: "rgba(255,255,255,0.82)", fontSize: 12, lineHeight: 1.5 }}>
             {scene.description || <span style={{ opacity: 0.5 }}>No description set</span>}
           </div>
@@ -1626,7 +1626,7 @@ function ResultCard({
             justifyContent: "center",
             gap: 4,
           }}
-          title="Replace scene image with this variation"
+          title="Replace shot image with this variation"
         >
           {applying ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
           Apply

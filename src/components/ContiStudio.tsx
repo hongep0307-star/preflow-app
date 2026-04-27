@@ -117,7 +117,7 @@ export interface ContiStudioProps {
 
 /* ━━━━━ 상수 ━━━━━ */
 const KR = "#f9423a";
-const TYPE_LABEL: Record<string, string> = { character: "Character", item: "Item", background: "Background" };
+const TYPE_LABEL: Record<string, string> = { character: "캐릭터", item: "아이템", background: "배경" };
 export type TabId = "view" | "editor" | "edit" | "sketches" | "history" | "compare";
 const TABS: { id: TabId; labelKey: string; icon: typeof Eye }[] = [
   { id: "view", labelKey: "studio.view", icon: Eye },
@@ -143,7 +143,7 @@ const FORMAT_RATIO: Record<VideoFormat, number> = {
 };
 const MAX_INPAINT_UNDO = 20;
 const formatSceneRefLabel = (scene: Pick<Scene, "scene_number" | "is_transition" | "transition_type">) =>
-  scene.is_transition || scene.transition_type ? "TR" : `S${String(scene.scene_number).padStart(2, "0")}`;
+  scene.is_transition || scene.transition_type ? "TR" : `#${String(scene.scene_number).padStart(2, "0")}`;
 
 /* ━━━ 원본 이미지 비율 보존 imageSize 계산 ━━━
  * 실제 W/H 비율로 GPT/NB2가 지원하는 3가지 크기 중 가장 가까운 것을 선택.
@@ -1487,10 +1487,10 @@ export const ContiStudio = ({
     const isAlreadySelected = selectedSceneRefs.find((x) => x.id === s.id);
     if (isAlreadySelected) {
       setSelectedSceneRefs((p) => p.filter((x) => x.id !== s.id));
-      removePromptTag(`[S${s.scene_number}]`);
+      removePromptTag(`[#${String(s.scene_number).padStart(2, "0")}]`);
     } else {
       setSelectedSceneRefs((p) => [...p, s]);
-      insertPromptTagAtCursor(`[S${s.scene_number}]`);
+      insertPromptTagAtCursor(`[#${String(s.scene_number).padStart(2, "0")}]`);
     }
   };
 
@@ -1575,7 +1575,7 @@ export const ContiStudio = ({
       if (!error && data?.enhanced) {
         let p = data.enhanced as string;
         if (selectedSceneRefs.length > 0)
-          p += `\nMatch the visual style, color grading, and art direction of the referenced scenes.`;
+          p += `\nMatch the visual style, color grading, and art direction of the referenced shots.`;
         return p + "\n\nSafe for all audiences. No violence, weapons, or real celebrities.";
       }
     } catch {}
@@ -1748,7 +1748,7 @@ export const ContiStudio = ({
 
           maskPrefix = `INPAINT REGION EDIT — precision mode.
 
-You receive a CROPPED region of a larger scene plus a binary mask.
+You receive a CROPPED region of a larger shot plus a binary mask.
 
 Reference images (exact order):
   [1] SOURCE — a cropped region of a scene. This is the canvas you must respect.
@@ -1806,7 +1806,7 @@ Edit instruction (applies strictly inside the WHITE mask region):
             maskPrefix = `INPAINT EDIT — full-image mode with binary mask.
 
 Reference images (exact order):
-  [1] SOURCE — the original full scene. This is your canvas.
+  [1] SOURCE — the original full shot. This is your canvas.
   [2] MASK   — binary mask aligned 1:1 with SOURCE. WHITE = the area you MUST edit. BLACK = the area you MUST preserve pixel-for-pixel.${magentaOverlayUrl ? `
   [3] OVERLAY — SOURCE with edit region painted magenta (#FF00FF). Redundant visual cue; magenta must NOT appear in the output.` : ""}${hasTagRef ? `
   [${magentaOverlayUrl ? 4 : 3}] TAG_ASSET — identity reference for the object to paint inside the WHITE region.` : ""}
@@ -1829,7 +1829,7 @@ Edit instruction (applies strictly inside the WHITE mask region):
             maskPrefix = `INPAINT EDIT — tag-driven edit (no brush mask).
 
 Reference images (exact order):
-  [1] SOURCE — the current scene. Preserve composition, camera angle, framing, lighting, color grading, and every subject/element that is NOT the target of the user's edit request.
+  [1] SOURCE — the current shot. Preserve composition, camera angle, framing, lighting, color grading, and every subject/element that is NOT the target of the user's edit request.
   [2] TAG_ASSET — identity reference for the object/character the user @-tagged. Treat this as the authoritative source for the tagged subject's identity (shape, proportions, colors, materials, markings, logos, distinctive details).${nbRefUrls.length > 1 ? `
   [3+] STYLE/MOOD REFS — use only for style, color, and mood cues. Do NOT copy their subjects or composition.` : ""}
 
@@ -1934,7 +1934,7 @@ Edit instruction:
     if (!currentScene.conti_image_url) return;
     const a = document.createElement("a");
     a.href = currentScene.conti_image_url;
-    a.download = `scene-${currentScene.scene_number}.png`;
+    a.download = `shot-${String(currentScene.scene_number).padStart(2, "0")}.png`;
     a.target = "_blank";
     a.rel = "noopener noreferrer";
     a.click();
@@ -1980,7 +1980,7 @@ Edit instruction:
                 className="font-mono text-[11px] font-bold px-1.5 py-0.5 text-white"
                 style={{ background: KR, borderRadius: 2 }}
               >
-                S
+                #
                 {(() => {
                   let dn = 0;
                   for (const s of allScenes) {
@@ -2254,7 +2254,7 @@ Edit instruction:
               src={displayUrl}
               className="rounded-none"
               style={{ width: canvasSize.w || undefined, height: canvasSize.h || undefined, objectFit: "contain" }}
-              alt={`Scene ${currentScene.scene_number}`} loading="lazy" decoding="async" />
+              alt={`Shot #${String(currentScene.scene_number).padStart(2, "0")}`} loading="lazy" decoding="async" />
           ) : (
             <div className="text-muted-foreground text-sm">
               {(currentScene as any).is_transition ? t("studio.transition") : t("studio.noContiImage")}
@@ -2588,7 +2588,7 @@ Edit instruction:
                               disabled={deletingHistoryUrl !== null}
                               onClick={() => {
                                 onRollback(url);
-                                toast({ title: t("studio.sceneRestored", { scene: currentScene.scene_number }) });
+                                toast({ title: t("studio.sceneRestored", { scene: String(currentScene.scene_number).padStart(2, "0") }) });
                               }}
                               className="gap-1 text-[11px] h-6 px-2"
                               style={{ color: KR }}
@@ -2607,7 +2607,7 @@ Edit instruction:
                               try {
                                 if (previewUrl === url) setPreviewUrl(null);
                                 await onDeleteHistory(url);
-                                toast({ title: t("studio.historyDeleted", { scene: currentScene.scene_number }) });
+                                toast({ title: t("studio.historyDeleted", { scene: String(currentScene.scene_number).padStart(2, "0") }) });
                               } finally {
                                 setDeletingHistoryUrl(null);
                               }

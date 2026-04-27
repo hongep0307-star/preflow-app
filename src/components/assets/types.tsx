@@ -60,9 +60,9 @@ export interface Asset {
 }
 
 export const TYPE_LABEL: Record<AssetType, string> = {
-  character: "Character",
-  item: "Item",
-  background: "Background",
+  character: "캐릭터",
+  item: "아이템",
+  background: "배경",
 };
 
 export const TYPE_META: Record<
@@ -77,27 +77,27 @@ export const TYPE_META: Record<
   }
 > = {
   character: {
-    label: "Character",
+    label: "캐릭터",
     icon: <Users className="w-3.5 h-3.5" />,
     gridCols: "grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6",
     emptyIcon: <Users className="w-12 h-12 text-border mb-4" />,
     emptyText: "Register characters to @tag them in scenes and reference during conti generation",
-    addLabel: "Add Character",
+    addLabel: "캐릭터 추가",
   },
   item: {
-    label: "Item",
+    label: "아이템",
     icon: <Package className="w-3.5 h-3.5" />,
     gridCols: "grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6",
     emptyIcon: <Package className="w-12 h-12 text-border mb-4" />,
     emptyText: "Register props to auto-inject material and detail info when tagging scenes",
-    addLabel: "Add Item",
+    addLabel: "아이템 추가",
   },
   background: {
-    label: "Background",
+    label: "배경",
     icon: <MapPin className="w-3.5 h-3.5" />,
     gridCols: "grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6",
     emptyIcon: <MapPin className="w-12 h-12 text-border mb-4" />,
     emptyText: "Register locations to maintain spatial consistency across tagged scenes",
-    addLabel: "Add Background",
+    addLabel: "배경 추가",
   },
 };

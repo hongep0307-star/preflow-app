@@ -63,7 +63,7 @@ export const useVersionHistory = ({ projectId, onRestore }: Props) => {
         .order('scene_number');
 
       if (!currentScenes || currentScenes.length === 0) {
-        toast({ title: 'No scenes to save', variant: 'destructive' });
+        toast({ title: 'No shots to save', variant: 'destructive' });
         return;
       }
 

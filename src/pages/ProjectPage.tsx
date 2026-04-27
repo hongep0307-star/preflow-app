@@ -19,7 +19,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { VideoFormat } from "@/lib/conti";
 import { BrandLogo } from "@/components/common/BrandLogo";
-import { useT } from "@/lib/uiLanguage";
+import { useT, useUiLanguage } from "@/lib/uiLanguage";
 
 const BriefTab = lazy(() => import("@/components/BriefTab").then((m) => ({ default: m.BriefTab })));
 const AgentTab = lazy(() => import("@/components/AgentTab").then((m) => ({ default: m.AgentTab })));
@@ -56,6 +56,7 @@ const ProjectPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const t = useT();
+  const { language: uiLanguage } = useUiLanguage();
   const [searchParams] = useSearchParams();
   // URL 에 ?tab=... 이 있으면 그 탭으로 바로 진입. 없으면 null 로 두고
   // 중앙 4 버튼 선택 화면 (시작점 선택 picker) 을 보여준다.
@@ -77,7 +78,7 @@ const ProjectPage = () => {
   const [editingField, setEditingField] = useState<"format" | "client" | "deadline" | null>(null);
   const [editClient, setEditClient] = useState("");
   const [editDeadline, setEditDeadline] = useState("");
-  const [briefLang, setBriefLang] = useState<"ko" | "en">("en");
+  const [briefLang, setBriefLang] = useState<"ko" | "en">(() => uiLanguage);
   const [editingTitle, setEditingTitle] = useState(false);
   const [editTitle, setEditTitle] = useState("");
 

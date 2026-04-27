@@ -1,12 +1,15 @@
 import { KR } from "./agentTypes";
 import type { StorylineOption } from "./prompts";
+import type { ReactNode } from "react";
 
 interface Props {
   options: StorylineOption[];
   onSelect: (text: string) => void;
+  renderText?: (text: string) => ReactNode;
 }
 
-export const StorylinesCard = ({ options, onSelect }: Props) => {
+export const StorylinesCard = ({ options, onSelect, renderText }: Props) => {
+  const render = renderText ?? ((text: string) => text);
   return (
     <div className="my-2 space-y-2">
       {options.map((opt, i) => {
@@ -27,13 +30,13 @@ export const StorylinesCard = ({ options, onSelect }: Props) => {
               >
                 {label}
               </span>
-              <span className="text-[14px] font-bold uppercase tracking-wide text-foreground flex-1">{opt.title}</span>
+              <span className="text-[14px] font-bold uppercase tracking-wide text-foreground flex-1">{render(opt.title)}</span>
               {opt.mood && (
-                <span className="font-mono text-[11px] text-muted-foreground/50 shrink-0 uppercase">{opt.mood}</span>
+                <span className="font-mono text-[11px] text-muted-foreground/50 shrink-0 uppercase">{render(opt.mood)}</span>
               )}
             </div>
             <div className="px-3 py-2.5">
-              <p className="text-[14px] text-muted-foreground leading-relaxed">{opt.synopsis}</p>
+              <p className="text-[14px] text-muted-foreground leading-relaxed">{render(opt.synopsis)}</p>
               <button
                 onClick={() => onSelect(`${label}안 "${opt.title}" 선택합니다.`)}
                 className="mt-2.5 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider px-3 py-1.5 transition-opacity hover:opacity-80"

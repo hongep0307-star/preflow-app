@@ -10,9 +10,10 @@ import {
   RotateCcw,
   Move,
   X,
-  Palette,
   Check,
   ChevronDown,
+  Images,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -1123,21 +1124,50 @@ export const SortableContiCard = memo(
                 TR
               </span>
             ) : (
-              <button
-                type="button"
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void onSceneUpdate(scene.scene_number, { is_final: !scene.is_final });
-                }}
-                title={scene.is_final ? "Unmark as final" : "Mark as final"}
-                aria-pressed={!!scene.is_final}
-                className="font-mono text-[10px] font-bold px-1.5 py-0.5 text-white shrink-0 inline-flex items-center gap-0.5 cursor-pointer hover:brightness-110 transition-[filter]"
-                style={{ background: KR, borderRadius: 0 }}
-              >
-                {scene.is_final && <Check className="w-2.5 h-2.5" strokeWidth={3} />}
-                <span>S{String(displayNumber ?? scene.scene_number).padStart(2, "0")}</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void onSceneUpdate(scene.scene_number, { is_final: !scene.is_final });
+                  }}
+                  title={scene.is_final ? "Unmark as final" : "Mark as final"}
+                  aria-pressed={!!scene.is_final}
+                  className="font-mono text-[10px] font-bold px-1.5 py-0.5 text-white shrink-0 inline-flex items-center gap-0.5 cursor-pointer hover:brightness-110 transition-[filter]"
+                  style={{ background: KR, borderRadius: 0 }}
+                >
+                  {scene.is_final && <Check className="w-2.5 h-2.5" strokeWidth={3} />}
+                  <span>#{String(displayNumber ?? scene.scene_number).padStart(2, "0")}</span>
+                </button>
+                <button
+                  type="button"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const next = !scene.is_highlight;
+                    void onSceneUpdate(scene.scene_number, {
+                      is_highlight: next,
+                      highlight_kind: next ? (scene.highlight_kind ?? "hero") : null,
+                      highlight_reason: next
+                        ? (scene.highlight_reason ?? "User-marked key visual candidate.")
+                        : null,
+                    });
+                  }}
+                  title={scene.is_highlight ? t("conti.unmarkHighlight") : t("conti.markHighlight")}
+                  aria-pressed={!!scene.is_highlight}
+                  className="font-mono text-[9px] font-bold px-1.5 py-0.5 shrink-0 inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  style={{
+                    borderRadius: 0,
+                    border: scene.is_highlight ? `1px solid ${KR}` : "1px solid rgba(255,255,255,0.12)",
+                    background: scene.is_highlight ? "rgba(249,66,58,0.14)" : "rgba(255,255,255,0.03)",
+                    color: scene.is_highlight ? "#fff" : "rgba(255,255,255,0.38)",
+                  }}
+                >
+                  <Sparkles className="w-2.5 h-2.5" />
+                  <span>H</span>
+                </button>
+              </>
             )}
             <div className="flex-1" />
             {historyCount > 0 && (
@@ -1281,7 +1311,7 @@ export const SortableContiCard = memo(
                       for (let j = 0; j <= i; j++) {
                         if (!allScenes[j].is_transition) dn++;
                       }
-                      prevLabel = `S${String(dn).padStart(2, "0")}`;
+                      prevLabel = `#${String(dn).padStart(2, "0")}`;
                       break;
                     }
                   }
@@ -1293,7 +1323,7 @@ export const SortableContiCard = memo(
                       for (let j = 0; j <= i; j++) {
                         if (!allScenes[j].is_transition) dn++;
                       }
-                      nextLabel = `S${String(dn).padStart(2, "0")}`;
+                      nextLabel = `#${String(dn).padStart(2, "0")}`;
                       break;
                     }
                   }
@@ -1653,7 +1683,7 @@ export const SortableContiCard = memo(
                         cursor: "pointer",
                       }}
                     >
-                      <Sparkles className="w-3.5 h-3.5" />
+                      <Images className="w-3.5 h-3.5" />
                       {sketchCount > 0 && (
                         <span className="text-[10px] font-bold tracking-wide">{sketchCount}</span>
                       )}
@@ -1674,7 +1704,7 @@ export const SortableContiCard = memo(
                       cursor: "pointer",
                     }}
                   >
-                    <Palette className="w-3.5 h-3.5" />
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
                   </button>
                 )}
               </div>
@@ -1823,7 +1853,7 @@ export const SortableContiCard = memo(
                       setLocalTitle(v);
                       saveField({ title: v });
                     }}
-                    placeholder="Scene title"
+                    placeholder="Shot title"
                     style={{ fontSize: 12, fontWeight: 600, color: "#f0f0f0", lineHeight: 1.4 } as any}
                   />
                 )}

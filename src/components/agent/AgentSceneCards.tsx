@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from "react";
-import { GripVertical, Trash2, X } from "lucide-react";
+import { GripVertical, Sparkles, Trash2, X } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
@@ -81,6 +81,30 @@ export const TagChip = React.memo(({ name, assetType }: { name: string; assetTyp
     </span>
   );
 });
+
+const getClickTextOffset = (e: React.MouseEvent<HTMLElement>, fallback: number): number => {
+  const root = e.currentTarget;
+  const doc = root.ownerDocument;
+  const point = doc.caretPositionFromPoint?.(e.clientX, e.clientY);
+  const range = point
+    ? null
+    : typeof doc.caretRangeFromPoint === "function"
+      ? doc.caretRangeFromPoint(e.clientX, e.clientY)
+      : null;
+  const node = point?.offsetNode ?? range?.startContainer ?? null;
+  const offset = point?.offset ?? range?.startOffset ?? 0;
+  if (!node || !root.contains(node)) return fallback;
+
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let total = 0;
+  let current = walker.nextNode();
+  while (current) {
+    if (current === node) return total + offset;
+    total += current.textContent?.length ?? 0;
+    current = walker.nextNode();
+  }
+  return fallback;
+};
 TagChip.displayName = "TagChip";
 
 /* ━━━━━ MentionDropdown ━━━━━ */
@@ -125,7 +149,7 @@ export const MentionDropdown = React.memo(function MentionDropdown({
       {suggestions.map((a, idx) => {
         const isSel = idx === selIdx;
         const focalSt = getFocalStyle(a, focalMap);
-        const typeLabel = a.asset_type === "character" ? "Character" : a.asset_type === "item" ? "Item" : "Background";
+        const typeLabel = a.asset_type === "character" ? "캐릭터" : a.asset_type === "item" ? "아이템" : "배경";
         const cfg = ACFG[a.asset_type || "character"] || ACFG.character;
         return (
           <button
@@ -239,13 +263,16 @@ export const AgentInlineField = ({
   const t = useT();
   const [editing, setEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const clickOffsetRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (editing && inputRef.current) {
       const el = inputRef.current;
       el.focus();
       const len = el.value.length;
-      el.setSelectionRange(len, len);
+      const pos = Math.min(clickOffsetRef.current ?? len, len);
+      el.setSelectionRange(pos, pos);
+      clickOffsetRef.current = null;
     }
   }, [editing]);
 
@@ -288,7 +315,10 @@ export const AgentInlineField = ({
 
   return (
     <span
-      onClick={() => setEditing(true)}
+      onClick={(e) => {
+        clickOffsetRef.current = getClickTextOffset(e, value.length);
+        setEditing(true);
+      }}
       onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
       onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
       style={{
@@ -321,17 +351,26 @@ export const AgentDescriptionField = ({
   projectId?: string;
   onChange: (v: string, tags: string[]) => void;
 }) => {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(value);
   const [mentionState, setMentionState] = useState<{ query: string; startIdx: number } | null>(null);
   const [selIdx, setSelIdx] = useState(-1);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const clickOffsetRef = useRef<number | null>(null);
   const focalMap = useMemo(() => loadFocalMap(projectId), [projectId]);
   // ✅ IME 조합 중 여부
   const isComposing = useRef(false);
 
   useEffect(() => {
-    if (editing && taRef.current) taRef.current.focus();
+    if (editing && taRef.current) {
+      const ta = taRef.current;
+      ta.focus();
+      const len = ta.value.length;
+      const pos = Math.min(clickOffsetRef.current ?? len, len);
+      ta.setSelectionRange(pos, pos);
+      clickOffsetRef.current = null;
+    }
   }, [editing]);
   useEffect(() => {
     if (!editing) setVal(value);
@@ -468,7 +507,10 @@ export const AgentDescriptionField = ({
 
   return (
     <div
-      onClick={() => setEditing(true)}
+      onClick={(e) => {
+        clickOffsetRef.current = getClickTextOffset(e, value.length);
+        setEditing(true);
+      }}
       onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
       onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
       style={{
@@ -520,12 +562,20 @@ export const AgentLocationField = ({
   const [mentionState, setMentionState] = useState<{ query: string; startIdx: number } | null>(null);
   const [selIdx, setSelIdx] = useState(-1);
   const inpRef = useRef<HTMLInputElement>(null);
+  const clickOffsetRef = useRef<number | null>(null);
   const focalMap = useMemo(() => loadFocalMap(projectId), [projectId]);
   // ✅ IME 조합 중 여부
   const isComposing = useRef(false);
 
   useEffect(() => {
-    if (editing && inpRef.current) inpRef.current.focus();
+    if (editing && inpRef.current) {
+      const input = inpRef.current;
+      input.focus();
+      const len = input.value.length;
+      const pos = Math.min(clickOffsetRef.current ?? len, len);
+      input.setSelectionRange(pos, pos);
+      clickOffsetRef.current = null;
+    }
   }, [editing]);
   useEffect(() => {
     if (!editing) setVal(value);
@@ -643,7 +693,10 @@ export const AgentLocationField = ({
 
   return (
     <span
-      onClick={() => setEditing(true)}
+      onClick={(e) => {
+        clickOffsetRef.current = getClickTextOffset(e, value.length);
+        setEditing(true);
+      }}
       onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
       onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
       style={{
@@ -694,6 +747,7 @@ export const AgentMetaRows = ({
   const [ek, setEk] = useState<string | null>(null);
   // ✅ 각 input ref를 map으로 관리
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const clickOffsetRefs = useRef<Record<string, number | null>>({});
 
   // commit 시점에만 부모에게 값 전달
   const commitField = (k: string) => {
@@ -702,14 +756,19 @@ export const AgentMetaRows = ({
     onUpdate(k, newVal);
   };
 
-  const startEdit = (k: string) => {
+  const startEdit = (k: string, offset?: number) => {
+    clickOffsetRefs.current[k] = typeof offset === "number" ? offset : null;
     setEk(k);
     setTimeout(() => {
       const el = inputRefs.current[k];
       if (el) {
         el.focus();
         const len = el.value.length;
-        el.setSelectionRange(len, len);
+        if (el.type !== "number") {
+          const pos = Math.min(clickOffsetRefs.current[k] ?? len, len);
+          el.setSelectionRange(pos, pos);
+        }
+        clickOffsetRefs.current[k] = null;
       }
     }, 0);
   };
@@ -784,7 +843,7 @@ export const AgentMetaRows = ({
               />
             ) : (
               <span
-                onClick={() => startEdit(k)}
+                onClick={(e) => startEdit(k, getClickTextOffset(e, val.length))}
                 onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "hsl(var(--muted))")}
                 onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
                 style={{
@@ -941,13 +1000,36 @@ export const EditablePendingSceneCard = React.memo(function EditablePendingScene
           className="font-mono text-[9px] font-bold px-1.5 py-0.5 text-white shrink-0"
           style={{ background: KR, borderRadius: 0 }}
         >
-          S{String(scene.scene_number).padStart(2, "0")}
+          #{String(scene.scene_number).padStart(2, "0")}
         </span>
+        <button
+          type="button"
+          onClick={() => {
+            const next = !local.is_highlight;
+            update({
+              is_highlight: next,
+              highlight_kind: next ? (local.highlight_kind ?? "hero") : null,
+              highlight_reason: next ? (local.highlight_reason ?? "User-marked key visual candidate.") : null,
+            });
+          }}
+          title={local.is_highlight ? "Unmark Highlight" : "Mark as Highlight"}
+          aria-pressed={!!local.is_highlight}
+          className="font-mono text-[9px] font-bold px-1.5 py-0.5 shrink-0 inline-flex items-center gap-1 cursor-pointer"
+          style={{
+            borderRadius: 0,
+            border: local.is_highlight ? `1px solid ${KR}` : "1px solid rgba(255,255,255,0.12)",
+            background: local.is_highlight ? "rgba(249,66,58,0.14)" : "rgba(255,255,255,0.03)",
+            color: local.is_highlight ? "#fff" : "rgba(255,255,255,0.38)",
+          }}
+        >
+          <Sparkles className="w-2.5 h-2.5" />
+          <span>H</span>
+        </button>
         <div style={{ flex: 1 }}>
           <AgentInlineField
             value={local.title ?? ""}
             onChange={(v) => update({ title: v })}
-            placeholder="Scene title"
+            placeholder="Shot title"
             style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--foreground))" } as any}
           />
         </div>
@@ -1317,13 +1399,36 @@ export const SortableSceneCard = React.memo(function SortableSceneCard({
               flexShrink: 0,
             }}
           >
-            S{String(scene.scene_number).padStart(2, "0")}
+            #{String(scene.scene_number).padStart(2, "0")}
           </span>
+          <button
+            type="button"
+            onClick={() => {
+              const next = !scene.is_highlight;
+              onUpdate(scene.id, {
+                is_highlight: next,
+                highlight_kind: next ? (scene.highlight_kind ?? "hero") : null,
+                highlight_reason: next ? (scene.highlight_reason ?? "User-marked key visual candidate.") : null,
+              });
+            }}
+            title={scene.is_highlight ? "Unmark Highlight" : "Mark as Highlight"}
+            aria-pressed={!!scene.is_highlight}
+            className="font-mono text-[9px] font-bold px-1.5 py-0.5 shrink-0 inline-flex items-center gap-1 cursor-pointer"
+            style={{
+              borderRadius: 0,
+              border: scene.is_highlight ? `1px solid ${KR}` : "1px solid rgba(255,255,255,0.12)",
+              background: scene.is_highlight ? "rgba(249,66,58,0.14)" : "rgba(255,255,255,0.03)",
+              color: scene.is_highlight ? "#fff" : "rgba(255,255,255,0.38)",
+            }}
+          >
+            <Sparkles className="w-2.5 h-2.5" />
+            <span>H</span>
+          </button>
           <div style={{ flex: 1, minWidth: 0 }}>
             <AgentInlineField
               value={scene.title ?? ""}
               onChange={(v) => onUpdate(scene.id, { title: v })}
-              placeholder="Scene title"
+              placeholder="Shot title"
               style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" } as any}
             />
           </div>

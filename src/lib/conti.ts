@@ -1,6 +1,6 @@
 import { supabase } from "./supabase";
 import { deleteStoredFile } from "./storageUtils";
-import type { HeroVisual, HookStrategy, ProductInfo, Constraints } from "@/components/agent/agentTypes";
+import type { HeroVisual, HookStrategy, ProductInfo, Constraints, KeyVisualCriteria } from "@/components/agent/agentTypes";
 import { buildHookMoodAddendum } from "./hookLibrary";
 
 /* ━━━━━ 타입 ━━━━━ */
@@ -33,6 +33,11 @@ interface SceneForConti {
   mood: string | null;
   duration_sec?: number | null;
   tagged_assets: string[];
+  is_transition?: boolean;
+  is_final?: boolean;
+  is_highlight?: boolean;
+  highlight_kind?: "hook" | "hero" | "product" | "emotion" | "cta" | null;
+  highlight_reason?: string | null;
 }
 
 export type VideoFormat = "vertical" | "horizontal" | "square";
@@ -48,6 +53,7 @@ export interface BriefAnalysis {
 
   // ── v2 fields (optional; injected into per-scene image prompt) ──
   hero_visual?: HeroVisual;
+  key_visual_criteria?: KeyVisualCriteria;
   hook_strategy?: HookStrategy;
   product_info?: ProductInfo;
   constraints?: Constraints;
@@ -191,6 +197,68 @@ const isSparseScene = (scene: SceneForConti): boolean => {
     (v) => v && v.trim().length > 2,
   ).length;
   return filledFields <= 1;
+};
+
+const describeFinalCut = (label: string, scene: SceneForConti): string => {
+  const parts = [
+    `${label} S${scene.scene_number}`,
+    scene.title ? `"${scene.title}"` : null,
+    scene.camera_angle ? `camera: ${sanitizeImagePrompt(scene.camera_angle)}` : null,
+    scene.mood ? `mood: ${sanitizeImagePrompt(scene.mood)}` : null,
+  ].filter(Boolean);
+  return `- ${parts.join(" | ")}`;
+};
+
+const buildCompletedCutDiversityNote = (
+  allScenes: SceneForConti[],
+  sceneIndex: number,
+): string => {
+  if (sceneIndex < 0) return "";
+
+  const findFinal = (dir: -1 | 1) => {
+    for (let i = sceneIndex + dir; i >= 0 && i < allScenes.length; i += dir) {
+      const candidate = allScenes[i];
+      if (candidate.is_transition) continue;
+      if (candidate.is_final) return candidate;
+      // Only adjacent completed cuts matter; stop at the first editable real scene.
+      if (!candidate.is_transition) return null;
+    }
+    return null;
+  };
+
+  const prevFinal = findFinal(-1);
+  const nextFinal = findFinal(1);
+  const refs = [
+    prevFinal ? describeFinalCut("Previous completed cut", prevFinal) : null,
+    nextFinal ? describeFinalCut("Next completed cut", nextFinal) : null,
+  ].filter(Boolean);
+
+  if (!refs.length) return "";
+  return `\n═══ COMPOSITION CONTINUITY NOTE (SOFT) ═══
+Completed neighboring cuts are treated as camera-fixed reference points:
+${refs.join("\n")}
+→ Keep story continuity, but avoid repeating the same shot size, camera angle, movement, and subject placement.
+→ Prefer a complementary composition that creates visual rhythm between these locked cuts.
+═══════════════════════════════════════════`;
+};
+
+const buildHighlightBlock = (scene: SceneForConti, criteria?: KeyVisualCriteria): string => {
+  if (!scene.is_highlight) return "";
+  const kind = scene.highlight_kind ? `\nHighlight type: ${scene.highlight_kind}` : "";
+  const reason = scene.highlight_reason ? `\nReason: ${sanitizeImagePrompt(scene.highlight_reason)}` : "";
+  const criteriaBlock = criteria
+    ? `\nBrief-defined key visual criteria:
+- Definition: ${sanitizeImagePrompt(criteria.definition)}
+${criteria.visual_priorities?.length ? `- Visual priorities: ${criteria.visual_priorities.map(sanitizeImagePrompt).join(" / ")}` : ""}
+${criteria.avoid_patterns?.length ? `- Avoid patterns: ${criteria.avoid_patterns.map(sanitizeImagePrompt).join(" / ")}` : ""}`
+    : "";
+  return `\n═══ KEY VISUAL / HIGHLIGHT EMPHASIS (SOFT) ═══${kind}${reason}
+${criteriaBlock}
+This scene is a key visual candidate. Make the frame instantly readable as a representative image:
+- clear subject hierarchy, strong silhouette or lighting separation, intentional foreground/midground/background depth
+- emotionally or commercially memorable, but still faithful to the scene action
+- do NOT default to a fixed centered close-up; choose the composition that best serves this specific beat
+═══════════════════════════════════════════`;
 };
 
 /* ━━━━━ 프리뷰 비율로 source 이미지 자르기 ━━━━━
@@ -541,6 +609,8 @@ const buildContiPrompt = (
   const isLastScene = scene.scene_number === totalScenes && totalScenes > 1;
 
   const shotDirective = resolveShotType(scene.scene_number, totalScenes, scene.camera_angle);
+  const highlightBlock = buildHighlightBlock(scene, briefAnalysis?.key_visual_criteria);
+  const completedCutDiversityNote = buildCompletedCutDiversityNote(allScenes, sceneIndex);
 
   const visualDirStr = formatVisualDir(briefAnalysis?.visual_direction);
   const briefContext = briefAnalysis
@@ -638,6 +708,7 @@ If the scene description implies someone/something off-camera, keep them off-cam
     topDirective,
     `\n${shotDirective}\n`,
     sceneDetail,
+    highlightBlock,
     firstFrameBlock,
     mustShowBlock,
     ctaBlock,
@@ -647,6 +718,7 @@ If the scene description implies someone/something off-camera, keep them off-cam
     castLockBlock,
     briefContext,
     flowContext,
+    completedCutDiversityNote,
     styleRules,
     negativePromptBlock,
   ]
@@ -858,6 +930,7 @@ export const generateConti = async ({
         hero_visual: briefAnalysis.hero_visual
           ? { ...briefAnalysis.hero_visual, must_show: filteredMustShow }
           : undefined,
+        key_visual_criteria: briefAnalysis.key_visual_criteria,
         hook_strategy: briefAnalysis.hook_strategy,
         product_info: briefAnalysis.product_info,
         constraints: briefAnalysis.constraints,

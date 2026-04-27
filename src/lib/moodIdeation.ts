@@ -36,6 +36,9 @@ export interface MoodGenerateOptions {
     location?: string | null;
     mood?: string | null;
     tagged_assets?: string[];
+    is_highlight?: boolean;
+    highlight_kind?: "hook" | "hero" | "product" | "emotion" | "cta" | null;
+    highlight_reason?: string | null;
   }[];
   assets: {
     tag_name: string;
@@ -502,6 +505,8 @@ function buildSingleSceneContext(opts: MoodGenerateOptions, assignments: ShotAss
     }
   }
 
+  lines.push(...buildSketchHighlightNote(scene));
+
   lines.push(`\nASSIGNED CAMERA VARIANTS — each shot (in array order) MUST use its variant. No two shots may share a variant.`);
   assignments.forEach((a, i) => {
     lines.push(
@@ -513,6 +518,28 @@ function buildSingleSceneContext(opts: MoodGenerateOptions, assignments: ShotAss
   );
 
   return lines.join("\n");
+}
+
+function buildSketchHighlightNote(
+  scene: MoodGenerateOptions["scenes"][number],
+): string[] {
+  if (!scene.is_highlight) return [];
+  const lines = [
+    `\nKEY VISUAL EMPHASIS — SOFT SIGNAL`,
+    `This scene is marked as a Highlight / key visual candidate.`,
+  ];
+  if (scene.highlight_kind) lines.push(`Highlight type: ${scene.highlight_kind}`);
+  if (scene.highlight_reason) lines.push(`Reason: ${cleanTagsInText(scene.highlight_reason)}`);
+  lines.push(
+    `Across the sketch candidates, let 1-2 options feel more suitable as a representative image for the scene.`,
+  );
+  lines.push(
+    `Prioritize clear subject hierarchy, recognizable silhouette, expressive body language, depth layering, distinctive lighting/color accent, and uncluttered negative space.`,
+  );
+  lines.push(
+    `Keep cast, props, and location locked. Do not force a generic centered close-up or stock hero pose.`,
+  );
+  return lines;
 }
 
 /** Multi-scene shot plan: one row per shot, explicitly pinned to a
