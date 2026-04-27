@@ -4090,7 +4090,22 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               borderRadius: 0,
             }}
           >
-            <Palette className="w-3.5 h-3.5" />
+            {currentStyle?.thumbnail_url ? (
+              <span
+                className="h-5 w-5 shrink-0 overflow-hidden border border-white/10 bg-black/40"
+                style={{ borderRadius: 0 }}
+              >
+                <img
+                  src={currentStyle.thumbnail_url}
+                  alt=""
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </span>
+            ) : (
+              <Palette className="w-3.5 h-3.5" />
+            )}
             {currentStyle ? currentStyle.name : t("projectModal.style")}
           </button>
           {currentStyle && (
