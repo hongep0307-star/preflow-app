@@ -20,7 +20,7 @@ import {
 import path from "path";
 import fs from "fs";
 
-import { LOCAL_SERVER_PORT, setLocalServerPort } from "./constants";
+import { getLocalServerAuthToken, LOCAL_SERVER_PORT, setLocalServerPort } from "./constants";
 export { LOCAL_SERVER_PORT };
 
 function parseBody(req: http.IncomingMessage): Promise<any> {
@@ -69,6 +69,33 @@ function resolveBucketPath(bucket: string, sub: string): string {
   return target;
 }
 
+function resolveStorageReadPath(relative: string): string {
+  const base = path.resolve(getStorageBasePath());
+  const target = path.resolve(base, relative);
+  const rel = path.relative(base, target);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Path traversal detected: ${relative}`);
+  }
+  return target;
+}
+
+function isAuthorized(req: http.IncomingMessage): boolean {
+  if (req.headers["x-preflow-token"] === getLocalServerAuthToken()) return true;
+  // In dev the renderer is served from Vite and can be reloaded directly
+  // without Electron's query token. Keep production strict while allowing
+  // the known dev origin to talk to the local server.
+  const devOrigin = process.env.VITE_DEV_SERVER_URL;
+  if (devOrigin) {
+    const allowed = new URL(devOrigin).origin;
+    const origin = req.headers.origin;
+    const referer = req.headers.referer;
+    if (origin === allowed || (typeof referer === "string" && referer.startsWith(allowed))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** 실제로 한 번 listen 시도. 실패하면 Error(code 포함) 을 reject. */
 function listenOnce(server: http.Server, port: number): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -94,7 +121,7 @@ export function startLocalServer(): Promise<number> {
     const server = http.createServer(async (req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Preflow-Token");
 
       if (req.method === "OPTIONS") {
         res.writeHead(200);
@@ -108,9 +135,10 @@ export function startLocalServer(): Promise<number> {
         // ?t=cacheBuster 같은 쿼리스트링이 붙어 들어와도 파일 lookup이 깨지지 않도록 strip
         const rawRelative = url.slice("/storage/file/".length).split(/[?#]/)[0];
         const relative = decodeURIComponent(rawRelative);
-        const base = getStorageBasePath();
-        const fullPath = path.join(base, relative);
-        if (!fullPath.startsWith(base)) {
+        let fullPath: string;
+        try {
+          fullPath = resolveStorageReadPath(relative);
+        } catch {
           res.writeHead(403);
           res.end();
           return;
@@ -135,6 +163,12 @@ export function startLocalServer(): Promise<number> {
       if (req.method !== "POST") {
         res.writeHead(405);
         res.end();
+        return;
+      }
+
+      if (!isAuthorized(req)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unauthorized" }));
         return;
       }
 

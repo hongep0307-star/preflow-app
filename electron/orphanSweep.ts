@@ -109,12 +109,13 @@ function collectReferencedKeys(): Set<string> {
     collectUrlsFromJson(safeJsonParse(row.image_urls), urls);
   }
 
-  // scenes.conti_image_url + scenes.conti_image_history
+  // scenes.conti_image_url + scenes.conti_image_history + scenes.sketches
   for (const row of db
-    .prepare(`SELECT conti_image_url, conti_image_history FROM scenes`)
-    .all() as { conti_image_url: string | null; conti_image_history: string | null }[]) {
+    .prepare(`SELECT conti_image_url, conti_image_history, sketches FROM scenes`)
+    .all() as { conti_image_url: string | null; conti_image_history: string | null; sketches: string | null }[]) {
     addUrl(row.conti_image_url);
     collectUrlsFromJson(safeJsonParse(row.conti_image_history), urls);
+    collectUrlsFromJson(safeJsonParse(row.sketches), urls);
   }
 
   // assets.photo_url + assets.photo_variations

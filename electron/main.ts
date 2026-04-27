@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { initDatabase, closeDb } from "./db";
 import { startLocalServer } from "./local-server";
-import { getLocalServerPort } from "./constants";
+import { getLocalServerAuthToken, getLocalServerPort } from "./constants";
 import { sweepOrphanFiles } from "./orphanSweep";
 
 // Chromium의 native UI(달력 피커, context menu 등) 언어를 영문으로 강제.
@@ -22,6 +22,20 @@ if (!gotTheLock) {
 let mainWindow: BrowserWindow | null = null;
 
 const DIST = path.join(__dirname, "../dist");
+
+function resolveStorageFilePath(rawUrl: string): string {
+  const raw = rawUrl.replace(/^local-file:\/\//i, "");
+  const noQuery = raw.split(/[?#]/)[0];
+  const decoded = decodeURIComponent(noQuery);
+  const cleaned = decoded.replace(/^\/+/, "");
+  const filePath = path.resolve(path.normalize(cleaned));
+  const storageRoot = path.resolve(app.getPath("userData"), "storage");
+  const rel = path.relative(storageRoot, filePath);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Blocked local-file outside storage: ${filePath}`);
+  }
+  return filePath;
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -42,7 +56,7 @@ function createWindow() {
   // startLocalServer() 가 19876 이 아닌 다른 포트로 fallback 했을 때도
   // 렌더러가 올바른 URL 로 통신하게 된다.
   const port = getLocalServerPort();
-  const portQuery = `preflowPort=${port}`;
+  const portQuery = `preflowPort=${port}&preflowToken=${encodeURIComponent(getLocalServerAuthToken())}`;
 
   if (process.env.VITE_DEV_SERVER_URL) {
     const devUrl = new URL(process.env.VITE_DEV_SERVER_URL);
@@ -60,12 +74,7 @@ app.whenReady().then(async () => {
   protocol.handle("local-file", async (request) => {
     // local-file://C:/path/to/file.png?t=12345 → 디스크에서 직접 읽어 Response로 반환
     try {
-      const raw = request.url.replace(/^local-file:\/\//i, "");
-      const noQuery = raw.split(/[?#]/)[0];
-      const decoded = decodeURIComponent(noQuery);
-      // Windows: 선행 슬래시 제거 (e.g. "/C:/foo" → "C:/foo"). path.normalize로 슬래시 정규화.
-      const cleaned = decoded.replace(/^\/+/, "");
-      const filePath = path.normalize(cleaned);
+      const filePath = resolveStorageFilePath(request.url);
       const data = await fs.promises.readFile(filePath);
       const ext = path.extname(filePath).toLowerCase();
       const mime =

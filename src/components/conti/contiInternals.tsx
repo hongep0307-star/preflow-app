@@ -280,6 +280,7 @@ export const LocationField = ({
   const [mentionStart, setMentionStart] = useState(0);
   const [selIdx, setSelIdx] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
+  const valRef = useRef(value);
   // 클릭 위치 오프셋 — editing 전환 후 커서 배치용
   const clickOffsetRef = useRef<number | null>(null);
   // ✅ IME 조합 중 여부 추적
@@ -296,7 +297,10 @@ export const LocationField = ({
     }
   }, [editing]);
   useEffect(() => {
-    if (!editing) setVal(value);
+    if (!editing) {
+      setVal(value);
+      valRef.current = value;
+    }
   }, [value, editing]);
   useEffect(() => {
     setSelIdx(-1);
@@ -317,7 +321,7 @@ export const LocationField = ({
   const commit = () => {
     setEditing(false);
     setMentionQuery(null);
-    onChange(val);
+    onChange(valRef.current);
   };
 
   const detectMention = (v: string, pos: number) => {
@@ -333,6 +337,7 @@ export const LocationField = ({
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = e.target.value;
     setVal(v);
+    valRef.current = v;
     // ✅ IME 조합 중에는 mention 감지 건너뜀
     if (!isComposing.current) {
       detectMention(v, e.target.selectionStart ?? v.length);
@@ -354,6 +359,7 @@ export const LocationField = ({
     const after = val.slice(atEnd);
     const newVal = `${before}@${name} ${after}`;
     setVal(newVal);
+    valRef.current = newVal;
     setMentionQuery(null);
     onChange(newVal);
     setEditing(false);
@@ -365,7 +371,9 @@ export const LocationField = ({
     const hasContent = value && value.trim().length > 0;
     return (
       <span
+        onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
+          e.stopPropagation();
           clickOffsetRef.current = getCaretOffsetFromPoint(
             e.currentTarget as HTMLElement,
             e.clientX,
@@ -408,7 +416,11 @@ export const LocationField = ({
 
   // ── 편집 모드 ──
   return (
-    <div style={{ flex: 1, position: "relative" }}>
+    <div
+      onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      style={{ flex: 1, position: "relative" }}
+    >
       <input
         ref={inputRef}
         value={val}
@@ -483,6 +495,7 @@ export const LocationField = ({
                 type="button"
                 onMouseDown={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   insertTag(a);
                 }}
                 onMouseEnter={() => setSelIdx(idx)}
@@ -801,6 +814,7 @@ export const DescriptionField = ({
   const [selectedIdx, setSelectedIdx] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const clickOffsetRef = useRef<number | null>(null);
+  const valRef = useRef(value);
   // ✅ IME 조합 중 여부 추적
   const isComposing = useRef(false);
 
@@ -823,7 +837,10 @@ export const DescriptionField = ({
   }, [editing]);
 
   useEffect(() => {
-    if (!editing) setVal(value);
+    if (!editing) {
+      setVal(value);
+      valRef.current = value;
+    }
   }, [value, editing]);
 
   const extractTags = (text: string) => {
@@ -837,16 +854,13 @@ export const DescriptionField = ({
           .filter((n): n is string => n !== null),
       ),
     ];
-    const existingRaw = existingTags
-      .map((t) => (t.startsWith("@") ? t.slice(1) : t))
-      .filter((name) => assets.some((a) => a.tag_name === name || a.tag_name === `@${name}`));
-    return [...new Set([...fromText, ...existingRaw])];
+    return fromText;
   };
 
   const commit = () => {
     setEditing(false);
     setMentionState(null);
-    onChange(val, extractTags(val));
+    onChange(valRef.current, extractTags(valRef.current));
   };
 
   const detectMention = (v: string, pos: number) => {
@@ -863,6 +877,7 @@ export const DescriptionField = ({
     const v = e.target.value;
     const pos = e.target.selectionStart ?? v.length;
     setVal(v);
+    valRef.current = v;
     if (textareaRef.current) autoResize(textareaRef.current);
     // ✅ IME 조합 중에는 mention 감지 건너뜀
     if (!isComposing.current) {
@@ -886,7 +901,9 @@ export const DescriptionField = ({
     const after = val.slice(atEnd);
     const newVal = `${before}@${name} ${after}`;
     setVal(newVal);
+    valRef.current = newVal;
     setMentionState(null);
+    onChange(newVal, extractTags(newVal));
     const newPos = before.length + name.length + 2;
     requestAnimationFrame(() => {
       ta.focus();
@@ -905,7 +922,11 @@ export const DescriptionField = ({
 
   if (editing)
     return (
-      <div style={{ position: "relative" }}>
+      <div
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        style={{ position: "relative" }}
+      >
         <textarea
           ref={textareaRef}
           value={val}
@@ -984,6 +1005,7 @@ export const DescriptionField = ({
                 type="button"
                 onMouseDown={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   handleMentionSelect(asset);
                 }}
                 onMouseEnter={() => setSelectedIdx(idx)}
@@ -1032,6 +1054,7 @@ export const DescriptionField = ({
   const parts = value ? value.split(/(@[\w가-힣]+)/g) : [];
   return (
     <div
+      onPointerDown={(e) => e.stopPropagation()}
       onMouseDown={(e) => {
         e.preventDefault();
         e.stopPropagation();

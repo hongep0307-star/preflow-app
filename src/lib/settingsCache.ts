@@ -11,7 +11,7 @@
  * 형식: 카탈로그/디스패처가 settings 형태에 강하게 결합되지 않도록
  * `Record<string, string>` 으로만 다룬다 (settings DB 가 string-only 스키마).
  */
-import { LOCAL_SERVER_BASE_URL } from "@shared/constants";
+import { LOCAL_SERVER_AUTH_HEADERS, LOCAL_SERVER_BASE_URL } from "@shared/constants";
 
 type SettingsSnapshot = Record<string, string>;
 
@@ -21,7 +21,10 @@ const listeners = new Set<(s: SettingsSnapshot) => void>();
 
 async function fetchSettings(): Promise<SettingsSnapshot> {
   try {
-    const res = await fetch(`${LOCAL_SERVER_BASE_URL}/settings/get`, { method: "POST" });
+    const res = await fetch(`${LOCAL_SERVER_BASE_URL}/settings/get`, {
+      method: "POST",
+      headers: LOCAL_SERVER_AUTH_HEADERS,
+    });
     const json = (await res.json()) as Record<string, any>;
     const flat: SettingsSnapshot = {};
     for (const [k, v] of Object.entries(json)) {

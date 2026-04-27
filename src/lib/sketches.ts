@@ -24,6 +24,8 @@ import {
   type MoodGenerateOptions,
   type MoodImageModel,
 } from "./moodIdeation";
+import { generateTransitionFrame } from "./transitions";
+import type { BriefAnalysis, ContiModel, VideoFormat } from "./conti";
 import type { Sketch } from "@/components/conti/contiTypes";
 
 /** Default model for the Sketches tab differs from Mood Ideation:
@@ -64,6 +66,43 @@ export interface GenerateSketchesOptions {
   model?: MoodImageModel;
 }
 
+export interface GenerateTransitionSketchesOptions {
+  projectId: string;
+  prev: {
+    scene_number: number;
+    title?: string | null;
+    description?: string | null;
+    camera_angle?: string | null;
+    mood?: string | null;
+    location?: string | null;
+    conti_image_url: string;
+  };
+  next: {
+    scene_number: number;
+    title?: string | null;
+    description?: string | null;
+    camera_angle?: string | null;
+    mood?: string | null;
+    location?: string | null;
+    conti_image_url: string;
+  };
+  tr: {
+    scene_number: number;
+    description?: string | null;
+    transition_type?: string | null;
+  };
+  allScenes?: Array<{
+    scene_number: number;
+    title?: string | null;
+    description?: string | null;
+    is_transition?: boolean;
+  }>;
+  briefAnalysis: BriefAnalysis | null;
+  videoFormat: VideoFormat | string;
+  count: number;
+  model?: MoodImageModel;
+}
+
 /**
  * Generate N composition candidates for a single scene. Returns a flat URL
  * array. Does NOT write to `briefs.mood_image_urls` or `scenes.sketches`.
@@ -93,6 +132,40 @@ export async function generateSceneSketches(
     },
     onBatchDone,
   );
+}
+
+function sketchModelToContiModel(model: MoodImageModel | undefined): ContiModel {
+  return model === "nano-banana-2" ? "nano-banana-2" : "gpt";
+}
+
+export async function generateTransitionSketches(
+  opts: GenerateTransitionSketchesOptions,
+  onBatchDone?: (urls: string[]) => void,
+): Promise<string[]> {
+  const urls: string[] = [];
+  const count = Math.max(1, opts.count);
+  for (let i = 0; i < count; i++) {
+    const url = await generateTransitionFrame({
+      projectId: opts.projectId,
+      prev: opts.prev,
+      next: opts.next,
+      tr: {
+        ...opts.tr,
+        // Give each candidate a tiny variation hint while preserving the
+        // selected transition technique and anchor discipline.
+        description: [opts.tr.description, `Sketch candidate ${i + 1}: vary the composition and timing within the same transition beat.`]
+          .filter(Boolean)
+          .join("\n"),
+      },
+      allScenes: opts.allScenes,
+      briefAnalysis: opts.briefAnalysis,
+      videoFormat: opts.videoFormat as VideoFormat,
+      model: sketchModelToContiModel(opts.model),
+    });
+    urls.push(url);
+    onBatchDone?.([url]);
+  }
+  return urls;
 }
 
 export function makeSketchFromUrl(url: string, model: MoodImageModel): Sketch {

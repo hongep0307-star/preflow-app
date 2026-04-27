@@ -109,7 +109,12 @@ const MoodCard = ({
 }) => {
   const t = useT();
   const [hovered, setHovered] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
   const showOverlay = hovered || selected;
+
+  useEffect(() => {
+    setImageLoaded(false);
+  }, [img.url]);
 
   // ── url === null : 스켈레톤을 MoodCard 안에서 직접 렌더링
   // 이렇게 하면 key={img.id}인 같은 컴포넌트가 유지되면서
@@ -174,6 +179,7 @@ const MoodCard = ({
         overflow: "hidden",
         cursor: "pointer",
         aspectRatio: imgAspect,
+        background: "hsl(var(--muted))",
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -196,15 +202,38 @@ const MoodCard = ({
           height: "100%",
           objectFit: "cover",
           display: "block",
-          opacity: 0,
+          opacity: imageLoaded ? 1 : 0,
           transition: "opacity 0.45s ease",
         }}
         loading="lazy"
         onLoad={(e) => {
-          (e.currentTarget as HTMLImageElement).style.opacity = "1";
+          setImageLoaded(true);
         }}
         onError={() => onBroken?.()}
         decoding="async" />
+      {!imageLoaded && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 4,
+            background: "hsl(var(--muted))",
+            pointerEvents: "none",
+          }}
+        >
+          <Loader2
+            className="animate-spin"
+            style={{ width: 14, height: 14, color: "hsl(var(--muted-foreground))", opacity: 0.6 }}
+          />
+          <span style={{ fontSize: 9, fontWeight: 500, color: "hsl(var(--muted-foreground))", opacity: 0.5 }}>
+            loading
+          </span>
+        </div>
+      )}
       <div
         style={{
           position: "absolute",

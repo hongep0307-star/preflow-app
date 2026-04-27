@@ -6,7 +6,7 @@
  * 실패 시 fallback 결과 (videoId + 썸네일 추정 URL) 를 반환해 UI 가
  * 항상 칩을 그릴 수 있게 한다.
  */
-import { LOCAL_SERVER_BASE_URL } from "@shared/constants";
+import { LOCAL_SERVER_AUTH_HEADERS, LOCAL_SERVER_BASE_URL } from "@shared/constants";
 
 export interface YoutubeIngestResult {
   videoId: string;
@@ -29,7 +29,7 @@ export function isYoutubeUrl(input: string): boolean {
 export async function ingestYoutube(url: string): Promise<YoutubeIngestResult> {
   const res = await fetch(`${LOCAL_SERVER_BASE_URL}/api/youtube-ingest`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...LOCAL_SERVER_AUTH_HEADERS },
     body: JSON.stringify({ url }),
   });
   if (!res.ok) {

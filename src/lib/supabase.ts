@@ -3,12 +3,12 @@
  * running in the Electron main process.
  */
 
-import { LOCAL_SERVER_BASE_URL } from "@shared/constants";
+import { LOCAL_SERVER_AUTH_HEADERS, LOCAL_SERVER_BASE_URL } from "@shared/constants";
 
 async function localPost(endpoint: string, body: any = {}) {
   const res = await fetch(`${LOCAL_SERVER_BASE_URL}${endpoint}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...LOCAL_SERVER_AUTH_HEADERS },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -221,7 +221,7 @@ const functionsAdapter = {
     try {
       const res = await fetch(`${LOCAL_SERVER_BASE_URL}/api/${functionName}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...LOCAL_SERVER_AUTH_HEADERS },
         body: JSON.stringify(options.body),
       });
       if (!res.ok) {

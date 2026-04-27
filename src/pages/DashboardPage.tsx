@@ -65,6 +65,42 @@ export interface Folder {
   created_at: string;
 }
 
+type DashboardCache = {
+  projects: Project[];
+  folders: Folder[];
+  sceneStatsMap: Record<string, SceneStats>;
+};
+
+const DASHBOARD_CACHE_KEY = "preflow.dashboard.cache.v1";
+let dashboardCache: DashboardCache | null = null;
+
+const readDashboardCache = (): DashboardCache | null => {
+  if (dashboardCache) return dashboardCache;
+  try {
+    const raw = sessionStorage.getItem(DASHBOARD_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DashboardCache;
+    if (!Array.isArray(parsed.projects) || !Array.isArray(parsed.folders)) return null;
+    dashboardCache = {
+      projects: parsed.projects,
+      folders: parsed.folders,
+      sceneStatsMap: parsed.sceneStatsMap ?? {},
+    };
+    return dashboardCache;
+  } catch {
+    return null;
+  }
+};
+
+const writeDashboardCache = (next: DashboardCache) => {
+  dashboardCache = next;
+  try {
+    sessionStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify(next));
+  } catch {
+    // Cache is best-effort only.
+  }
+};
+
 /* ── FolderModal ── */
 const FolderModal = ({
   isOpen,
@@ -401,16 +437,17 @@ const ProjectGroup = ({
 /* ═══════════════════════ 메인 페이지 ═══════════════════════ */
 const DashboardPage = () => {
   const t = useT();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [folders, setFolders] = useState<Folder[]>([]);
-  const [loading, setLoading] = useState(true);
+  const initialCache = readDashboardCache();
+  const [projects, setProjects] = useState<Project[]>(initialCache?.projects ?? []);
+  const [folders, setFolders] = useState<Folder[]>(initialCache?.folders ?? []);
+  const [loading, setLoading] = useState(!initialCache);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
   const [editProject, setEditProject] = useState<Project | null>(null);
   const [editFolder, setEditFolder] = useState<Folder | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "completed">("all");
-  const [sceneStatsMap, setSceneStatsMap] = useState<Record<string, SceneStats>>({});
+  const [sceneStatsMap, setSceneStatsMap] = useState<Record<string, SceneStats>>(initialCache?.sceneStatsMap ?? {});
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -429,9 +466,22 @@ const DashboardPage = () => {
     ]);
     if (pErr) toast({ variant: "destructive", title: "Error", description: pErr.message });
     else {
-      setProjects(pData || []);
-      if (pData?.length) {
-        const ids = pData.map((p) => p.id);
+      const projectRows = pData || [];
+      const folderRows = (fData ?? []) as Folder[];
+      setProjects(projectRows);
+      setFolders(folderRows);
+      writeDashboardCache({ projects: projectRows, folders: folderRows, sceneStatsMap });
+      setLoading(false);
+
+      // Project cards should not wait for the heavier scene/version JSON
+      // pass. During conti generation, scene_versions.scenes changes often,
+      // so calculate progress after the dashboard shell is already visible.
+      if (projectRows.length === 0) {
+        setSceneStatsMap({});
+        return;
+      }
+      {
+        const ids = projectRows.map((p) => p.id);
         const [{ data: sc }, { data: sv }] = await Promise.all([
           supabase
             .from("scenes")
@@ -439,7 +489,7 @@ const DashboardPage = () => {
             .in("project_id", ids),
           supabase.from("scene_versions").select("id, project_id, scenes").in("project_id", ids),
         ]);
-        const statsMap = pData.reduce(
+        const statsMap = projectRows.reduce(
           (acc, p) => {
             const activeVersionId = (p as any).active_version_id;
 
@@ -517,9 +567,9 @@ const DashboardPage = () => {
           {} as Record<string, SceneStats>,
         );
         setSceneStatsMap(statsMap);
+        writeDashboardCache({ projects: projectRows, folders: folderRows, sceneStatsMap: statsMap });
       }
     }
-    if (fData) setFolders(fData);
     setLoading(false);
   };
 
@@ -555,7 +605,11 @@ const DashboardPage = () => {
         : dropZone.replace("sidebar-folder-", "").replace("folder-", "");
     const project = projects.find((p) => p.id === projectId);
     if (!project || (project.folder_id ?? null) === (newFolderId ?? null)) return;
-    setProjects((prev) => prev.map((p) => (p.id === projectId ? { ...p, folder_id: newFolderId } : p)));
+    setProjects((prev) => {
+      const next = prev.map((p) => (p.id === projectId ? { ...p, folder_id: newFolderId } : p));
+      writeDashboardCache({ projects: next, folders, sceneStatsMap });
+      return next;
+    });
     const { error } = await (supabase as any).from("projects").update({ folder_id: newFolderId }).eq("id", projectId);
     if (error) {
       toast({ variant: "destructive", title: "Move failed", description: error.message });

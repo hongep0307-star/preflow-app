@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { LOCAL_SERVER_BASE_URL } from "@shared/constants";
+import { LOCAL_SERVER_AUTH_HEADERS, LOCAL_SERVER_BASE_URL } from "@shared/constants";
 import ModelPicker from "@/components/common/ModelPicker";
 import { invalidateSettingsCache } from "@/lib/settingsCache";
 import { BrandLogo } from "@/components/common/BrandLogo";
@@ -28,13 +28,16 @@ import {
 
 const settingsApi = {
   get: async () => {
-    const res = await fetch(`${LOCAL_SERVER_BASE_URL}/settings/get`, { method: "POST" });
+    const res = await fetch(`${LOCAL_SERVER_BASE_URL}/settings/get`, {
+      method: "POST",
+      headers: LOCAL_SERVER_AUTH_HEADERS,
+    });
     return res.json();
   },
   set: async (s: any) => {
     const res = await fetch(`${LOCAL_SERVER_BASE_URL}/settings/set`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...LOCAL_SERVER_AUTH_HEADERS },
       body: JSON.stringify(s),
     });
     return res.json();

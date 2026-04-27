@@ -1791,18 +1791,24 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
       const oldIndex = versions.findIndex((v) => v.id === active.id);
       const newIndex = versions.findIndex((v) => v.id === over.id);
       if (oldIndex === -1 || newIndex === -1) return;
+      const previous = versions;
       const reordered = arrayMove(versions, oldIndex, newIndex);
       setVersions(reordered);
-      await Promise.all(
-        reordered.map((v, i) =>
-          supabase
-            .from("scene_versions")
-            .update({ display_order: i + 1 })
-            .eq("id", v.id),
-        ),
-      );
+      try {
+        await Promise.all(
+          reordered.map((v, i) =>
+            supabase
+              .from("scene_versions")
+              .update({ display_order: i + 1 })
+              .eq("id", v.id),
+          ),
+        );
+      } catch (err: any) {
+        setVersions(previous);
+        toast({ title: "Version reorder failed", description: err.message, variant: "destructive" });
+      }
     },
-    [versions],
+    [toast, versions],
   );
 
   const briefAnalysisRef = useRef<BriefAnalysis | null>(null);
@@ -2089,37 +2095,48 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   };
 
   const activeVersionIdRef = useRef<string | null>(activeVersionId);
+  const updateVersionScenesQueueRef = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
     activeVersionIdRef.current = activeVersionId;
   }, [activeVersionId]);
 
   const updateVersionScenes = useCallback(
-    async (updatedScenes: Scene[]) => {
-      // history 의 source of truth 는 scene 객체의 conti_image_history 필드.
-      // imageHistoryRef 는 scene_number 키라 insert/delete/reorder 직후에는 꼬이기 때문에
-      // 절대 fallback 으로 쓰면 안 된다 (예: TR 삽입 시 새 TR(#2) 이 구 #2 의 history 를 물려받는 버그).
-      // scene 객체에 history 가 없으면 빈 배열로 취급한다 — legacy 데이터는 별도 hydrate 단계에서 채운다.
-      const enriched = updatedScenes.map((s) => ({
-        ...s,
-        conti_image_history: Array.isArray(s.conti_image_history) ? s.conti_image_history : [],
-      }));
-      // ⚠️ 모듈 store 를 React state updater **바깥**에서 동기 갱신한다.
-      // 컴포넌트 언마운트 후에도 in-flight 스타일 트랜스퍼/생성 루프가 다음 이터레이션에서
-      // getSceneState() 로 최신 상태를 읽어 누적 업데이트 해야, 이전 이터레이션의 URL 이
-      // 덮어쓰기로 롤백되는 사고(탭 이동 후 "생성이 안되" 버그)가 없어진다.
-      const curActiveVid = getSceneState(projectId)?.activeVersionId ?? activeVersionIdRef.current ?? null;
-      saveSceneState(projectId, enriched, curActiveVid);
-      setActiveScenes(enriched);
-      const vid = activeVersionIdRef.current;
-      if (vid) {
-        await supabase
-          .from("scene_versions")
-          .update({ scenes: enriched as any })
-          .eq("id", vid);
-        setVersions((prev) => prev.map((v) => (v.id === vid ? { ...v, scenes: enriched as any } : v)));
-      }
+    async (updatedScenesOrUpdater: Scene[] | ((current: Scene[]) => Scene[])) => {
+      const run = async () => {
+        const currentScenes = getSceneState(projectId)?.scenes ?? activeScenes;
+        const updatedScenes =
+          typeof updatedScenesOrUpdater === "function"
+            ? updatedScenesOrUpdater(currentScenes)
+            : updatedScenesOrUpdater;
+        // history 의 source of truth 는 scene 객체의 conti_image_history 필드.
+        // imageHistoryRef 는 scene_number 키라 insert/delete/reorder 직후에는 꼬이기 때문에
+        // 절대 fallback 으로 쓰면 안 된다 (예: TR 삽입 시 새 TR(#2) 이 구 #2 의 history 를 물려받는 버그).
+        // scene 객체에 history 가 없으면 빈 배열로 취급한다 — legacy 데이터는 별도 hydrate 단계에서 채운다.
+        const enriched = updatedScenes.map((s) => ({
+          ...s,
+          conti_image_history: Array.isArray(s.conti_image_history) ? s.conti_image_history : [],
+        }));
+        // ⚠️ 모듈 store 를 React state updater **바깥**에서 동기 갱신한다.
+        // 컴포넌트 언마운트 후에도 in-flight 스타일 트랜스퍼/생성 루프가 다음 이터레이션에서
+        // getSceneState() 로 최신 상태를 읽어 누적 업데이트 해야, 이전 이터레이션의 URL 이
+        // 덮어쓰기로 롤백되는 사고(탭 이동 후 "생성이 안되" 버그)가 없어진다.
+        const curActiveVid = getSceneState(projectId)?.activeVersionId ?? activeVersionIdRef.current ?? null;
+        saveSceneState(projectId, enriched, curActiveVid);
+        setActiveScenes(enriched);
+        const vid = activeVersionIdRef.current;
+        if (vid) {
+          await supabase
+            .from("scene_versions")
+            .update({ scenes: enriched as any })
+            .eq("id", vid);
+          setVersions((prev) => prev.map((v) => (v.id === vid ? { ...v, scenes: enriched as any } : v)));
+        }
+      };
+      const queued = updateVersionScenesQueueRef.current.then(run, run);
+      updateVersionScenesQueueRef.current = queued.catch(() => undefined);
+      return queued;
     },
-    [setActiveScenes, projectId],
+    [activeScenes, setActiveScenes, projectId],
   );
 
   const handleSceneUpdate = async (sceneNumber: number, fields: Partial<Scene>) => {
@@ -4610,10 +4627,11 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             setStudioScene(null);
             setStudioInitialTab(undefined);
           }}
-          onSaveInpaint={async (url) => {
+          onSaveInpaint={async (url, targetScene = studioScene) => {
+            if (!targetScene) return;
             const current = getSceneState(projectId)?.scenes ?? activeScenes;
-            const liveScene = current.find((s) => s.id === studioScene.id);
-            pushHistory(studioScene.id, liveScene?.conti_image_url ?? studioScene.conti_image_url);
+            const liveScene = current.find((s) => s.id === targetScene.id);
+            pushHistory(targetScene.id, liveScene?.conti_image_url ?? targetScene.conti_image_url);
             // ContiStudio 의 handleInpaint 가 이미 scenes 테이블에
             // conti_image_url + conti_image_crop:null 을 기록했으므로 여기서는
             // 로컬 state (active version scenes) 만 동기화하면 된다.
@@ -4622,21 +4640,22 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             const latest = getSceneState(projectId)?.scenes ?? current;
             await updateVersionScenes(
               latest.map((s) =>
-                s.id === studioScene.id ? { ...s, conti_image_url: url, conti_image_crop: null } : s,
+                s.id === targetScene.id ? { ...s, conti_image_url: url, conti_image_crop: null } : s,
               ),
             );
-            bumpCache(studioScene.scene_number);
+            bumpCache(targetScene.scene_number);
           }}
-          onRollback={(url) => handleRollback(studioScene, url)}
-          onDeleteHistory={async (url) => {
-            const sceneNumber = studioScene.scene_number;
+          onRollback={(url, targetScene = studioScene) => targetScene && handleRollback(targetScene, url)}
+          onDeleteHistory={async (url, targetScene = studioScene) => {
+            if (!targetScene) return;
+            const sceneNumber = targetScene.scene_number;
             const currentHistory = imageHistoryRef.current[sceneNumber] ?? [];
             const updatedHist = currentHistory.filter((u) => u !== url);
             setImageHistory((prev) => ({ ...prev, [sceneNumber]: updatedHist }));
-            await supabase.from("scenes").update({ conti_image_history: updatedHist }).eq("id", studioScene.id);
+            await supabase.from("scenes").update({ conti_image_history: updatedHist }).eq("id", targetScene.id);
             const latest = getSceneState(projectId)?.scenes ?? activeScenes;
             await updateVersionScenes(
-              latest.map((s) => (s.id === studioScene.id ? { ...s, conti_image_history: updatedHist } : s)),
+              latest.map((s) => (s.id === targetScene.id ? { ...s, conti_image_history: updatedHist } : s)),
             );
           }}
           onEditGeneratingChange={(sceneId, generating) => {
@@ -4660,9 +4679,8 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           // hand back a stale `scene.sketches` prop that would clobber
           // the freshly-saved list.
           onSketchesUpdated={(sceneId, updater) => {
-            const latest = getSceneState(projectId)?.scenes ?? activeScenes;
             void updateVersionScenes(
-              latest.map((s) =>
+              (current) => current.map((s) =>
                 s.id === sceneId
                   ? { ...s, sketches: updater(Array.isArray(s.sketches) ? s.sketches : []) }
                   : s,

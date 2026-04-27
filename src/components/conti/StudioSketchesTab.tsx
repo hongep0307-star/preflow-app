@@ -28,6 +28,7 @@ import {
   SKETCH_MODEL_LABELS,
   SKETCH_MODEL_USES_ASSET_REFS,
   generateSceneSketches,
+  generateTransitionSketches,
   makeSketchFromUrl,
   type SketchModel,
 } from "@/lib/sketches";
@@ -75,8 +76,25 @@ export interface StudioSketchesTabProps {
     mood: string | null;
     tagged_assets: string[];
     conti_image_url: string | null;
+    is_transition?: boolean;
+    transition_type?: string | null;
+    is_highlight?: boolean;
+    highlight_kind?: "hook" | "hero" | "product" | "emotion" | "cta" | null;
+    highlight_reason?: string | null;
     sketches?: Sketch[];
   };
+  allScenes?: Array<{
+    id: string;
+    scene_number: number;
+    title: string | null;
+    description: string | null;
+    camera_angle: string | null;
+    location: string | null;
+    mood: string | null;
+    conti_image_url: string | null;
+    is_transition?: boolean;
+    transition_type?: string | null;
+  }>;
   assets: Array<{
     tag_name: string;
     photo_url: string | null;
@@ -93,6 +111,7 @@ export interface StudioSketchesTabProps {
    *  the DB `scenes.conti_image_url` must already be written; the parent
    *  pushes the previous URL to history and syncs local state. */
   onSetAsSceneImage: (url: string) => void;
+  onAddToEditRefs?: (url: string) => void;
   /** Currently-previewed url in the parent canvas (mirrors ContiStudio's
    *  History tab `previewUrl`). Sketches with this url get a "Previewing"
    *  affordance so the user knows where the canvas is showing from. */
@@ -123,7 +142,9 @@ export function StudioSketchesTab({
   assets,
   videoFormat,
   briefAnalysis,
+  allScenes,
   onSetAsSceneImage,
+  onAddToEditRefs,
   previewUrl,
   onPreview,
   onSketchesUpdated,
@@ -203,6 +224,7 @@ export function StudioSketchesTab({
   );
   const sketchesRef = useRef(sketches);
   sketchesRef.current = sketches;
+  const previousSceneIdRef = useRef(scene.id);
 
   // ── Hydrate-from-prop policy ──
   //
@@ -222,35 +244,32 @@ export function StudioSketchesTab({
   // and updates `activeScenes`, so `scene.sketches` is fresh on every
   // remount. Hydrate from the prop and trust that it's authoritative.
   //
-  // ── Why we ALSO depend on `scene.sketches` (not just `scene.id`) ──
-  //
-  // An earlier version of this effect deliberately ran only on scene-id
-  // change to avoid "mid-generation re-renders clobbering optimistic
-  // state". That concern made sense back when skeleton placeholders were
-  // stored inside the local `sketches` array; today they live in the
-  // module-level gen store (sketchState.ts) instead, so local `sketches`
-  // only ever contains REAL completed images. Syncing it to the parent
-  // prop is now strictly safe.
-  //
-  // Why we need to sync: handleGenerate's finally block calls
-  //   1) setSketches((prev) => [...new, ...prev])
-  //   2) onSketchesUpdated → setActiveScenes  (parent prop refresh)
-  //   3) await persistSketches(...)   ← async boundary
-  //   4) setSketchGen(null) → notify → setGenTick re-render
-  // The await in (3) splits (1)+(2) and (4) into two React batches.
-  // Between them the parent re-renders with the new `scene.sketches`
-  // prop, but if the local setSketches commit is somehow delayed or if a
-  // sibling-batch (NB2 + GPT2 racing) updates the parent ahead of the
-  // local state, the gallery render at step (4) sees skeletons cleared
-  // (gen store is empty) AND an outdated local `sketches` — symptom: the
-  // skeletons fade out but no new image cards appear in their place
-  // until the user navigates away or refreshes.
-  //
-  // Adding `scene.sketches` as a dep makes the local state follow the
-  // authoritative parent value whenever it changes, eliminating that
-  // window without affecting normal scene-switch hydration.
+  // Same-scene prop refreshes can briefly carry an older empty
+  // `scene.sketches` snapshot while the async version JSON write catches up.
+  // Replacing local state with that stale prop makes generated sketches
+  // disappear until refresh. On scene switches we fully hydrate from props;
+  // on same-scene refreshes we merge by URL so optimistic/generated cards
+  // survive stale parent snapshots while still picking up persisted sketches.
   useEffect(() => {
-    setSketches(Array.isArray(scene.sketches) ? scene.sketches : []);
+    const propSketches = Array.isArray(scene.sketches) ? scene.sketches : [];
+    if (previousSceneIdRef.current !== scene.id) {
+      previousSceneIdRef.current = scene.id;
+      setSketches(propSketches);
+      return;
+    }
+
+    setSketches((prev) => {
+      if (prev.length === 0) return propSketches;
+      if (propSketches.length === 0) return prev;
+      const seen = new Set<string>();
+      const merged: Sketch[] = [];
+      for (const sketch of [...propSketches, ...prev]) {
+        if (seen.has(sketch.url)) continue;
+        seen.add(sketch.url);
+        merged.push(sketch);
+      }
+      return merged;
+    });
   }, [scene.id, scene.sketches]);
 
   // ── In-flight generation subscription ──
@@ -329,37 +348,93 @@ export function StudioSketchesTab({
     const genPromise = (async () => {
       let generationError: any = null;
       try {
-        await generateSceneSketches(
-          {
-            projectId,
-            sceneNumber: scene.scene_number,
-            scene: {
-              scene_number: scene.scene_number,
-              title: scene.title,
-              description: scene.description,
-              camera_angle: scene.camera_angle,
-              location: scene.location,
-              mood: scene.mood,
-              tagged_assets: scene.tagged_assets,
-              is_highlight: scene.is_highlight,
-              highlight_kind: scene.highlight_kind,
-              highlight_reason: scene.highlight_reason,
+        if (scene.is_transition) {
+          const board = allScenes ?? [];
+          const idx = board.findIndex((s) => s.id === scene.id);
+          const prev = idx >= 0 ? [...board.slice(0, idx)].reverse().find((s) => !s.is_transition) : null;
+          const next = idx >= 0 ? board.slice(idx + 1).find((s) => !s.is_transition) : null;
+          if (!prev?.conti_image_url || !next?.conti_image_url) {
+            throw new Error(t("conti.transitionNeedsImages"));
+          }
+          await generateTransitionSketches(
+            {
+              projectId,
+              prev: {
+                scene_number: prev.scene_number,
+                title: prev.title,
+                description: prev.description,
+                camera_angle: prev.camera_angle,
+                mood: prev.mood,
+                location: prev.location,
+                conti_image_url: prev.conti_image_url,
+              },
+              next: {
+                scene_number: next.scene_number,
+                title: next.title,
+                description: next.description,
+                camera_angle: next.camera_angle,
+                mood: next.mood,
+                location: next.location,
+                conti_image_url: next.conti_image_url,
+              },
+              tr: {
+                scene_number: scene.scene_number,
+                description: scene.description,
+                transition_type: scene.transition_type,
+              },
+              allScenes: board.map((s) => ({
+                scene_number: s.scene_number,
+                title: s.title,
+                description: s.description,
+                is_transition: !!s.is_transition,
+              })),
+              briefAnalysis,
+              videoFormat,
+              count,
+              model: genModel,
             },
-            briefAnalysis,
-            assets,
-            videoFormat,
-            count,
-            model: genModel,
-          },
-          (batchUrls) => {
-            const cur = getSketchGen(projectId, scene.id, genModel);
-            if (cur) {
-              patchSketchGen(projectId, scene.id, genModel, {
-                arrivedUrls: [...cur.arrivedUrls, ...batchUrls],
-              });
-            }
-          },
-        );
+            (batchUrls) => {
+              const cur = getSketchGen(projectId, scene.id, genModel);
+              if (cur) {
+                patchSketchGen(projectId, scene.id, genModel, {
+                  arrivedUrls: [...cur.arrivedUrls, ...batchUrls],
+                });
+              }
+            },
+          );
+        } else {
+          await generateSceneSketches(
+            {
+              projectId,
+              sceneNumber: scene.scene_number,
+              scene: {
+                scene_number: scene.scene_number,
+                title: scene.title,
+                description: scene.description,
+                camera_angle: scene.camera_angle,
+                location: scene.location,
+                mood: scene.mood,
+                tagged_assets: scene.tagged_assets,
+                is_highlight: scene.is_highlight,
+                highlight_kind: scene.highlight_kind,
+                highlight_reason: scene.highlight_reason,
+              },
+              briefAnalysis,
+              assets,
+              videoFormat,
+              count,
+              model: genModel,
+            },
+            (batchUrls) => {
+              const cur = getSketchGen(projectId, scene.id, genModel);
+              if (cur) {
+                patchSketchGen(projectId, scene.id, genModel, {
+                  arrivedUrls: [...cur.arrivedUrls, ...batchUrls],
+                });
+              }
+            },
+          );
+        }
       } catch (err: any) {
         generationError = err;
       } finally {
@@ -903,6 +978,7 @@ export function StudioSketchesTab({
                 aspectClass={aspect}
                 isPreviewing={previewUrl === s.url}
                 onSetAsScene={() => handleSetAsScene(s)}
+                onAddToEditRefs={onAddToEditRefs ? () => onAddToEditRefs(s.url) : undefined}
                 onToggleLike={() => handleToggleLike(s.id)}
                 onDelete={() => handleDelete(s.id)}
                 onPreview={onPreview ? () => onPreview(previewUrl === s.url ? null : s.url) : undefined}
@@ -1008,6 +1084,7 @@ function SketchCard({
   aspectClass,
   isPreviewing,
   onSetAsScene,
+  onAddToEditRefs,
   onToggleLike,
   onDelete,
   onPreview,
@@ -1019,6 +1096,7 @@ function SketchCard({
    *  sketch the canvas mirror is showing, even after the cursor leaves. */
   isPreviewing?: boolean;
   onSetAsScene: () => void;
+  onAddToEditRefs?: () => void;
   onToggleLike: () => void;
   onDelete: () => void;
   /** Clicking the image toggles the parent canvas preview to this sketch
@@ -1049,7 +1127,7 @@ function SketchCard({
       {/* Liked indicator (persists without hover) */}
       {sketch.liked && (
         <div
-          className="absolute top-1.5 left-1.5 w-5 h-5 flex items-center justify-center rounded-full"
+          className="absolute top-1.5 left-1.5 w-5 h-5 flex items-center justify-center rounded-none"
           style={{ background: KR }}
         >
           <Heart className="w-2.5 h-2.5 text-white" fill="#fff" />
@@ -1070,7 +1148,7 @@ function SketchCard({
           <div className="flex items-center justify-between pointer-events-auto">
             <button
               onClick={(e) => { e.stopPropagation(); onToggleLike(); }}
-              className="w-6 h-6 flex items-center justify-center rounded-full transition-colors"
+              className="w-6 h-6 flex items-center justify-center rounded-none transition-colors"
               style={{ background: sketch.liked ? KR : "rgba(0,0,0,0.55)" }}
               title={sketch.liked ? t("studio.unlike") : t("studio.like")}
             >
@@ -1081,17 +1159,14 @@ function SketchCard({
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onDelete(); }}
-              className="w-6 h-6 flex items-center justify-center rounded-full"
+              className="w-6 h-6 flex items-center justify-center rounded-none"
               style={{ background: "rgba(0,0,0,0.55)" }}
               title={t("common.delete")}
             >
               <Trash2 className="w-3 h-3 text-white" />
             </button>
           </div>
-          <div className="flex flex-col gap-1 pointer-events-auto">
-            {/* Compact CTA — stays readable at low column counts where
-                "Set as scene image" used to wrap onto two lines. Tooltip
-                preserves the long-form intent for first-time users. */}
+          <div className="grid grid-cols-2 gap-1 pointer-events-auto">
             <button
               onClick={(e) => { e.stopPropagation(); onSetAsScene(); }}
               className="w-full flex items-center justify-center gap-1 h-6 text-[10.5px] font-semibold text-white rounded-none"
@@ -1101,6 +1176,20 @@ function SketchCard({
               <Check className="w-3 h-3" />
               {t("studio.use")}
             </button>
+            {onAddToEditRefs && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onAddToEditRefs(); }}
+                className="w-full flex items-center justify-center gap-1 h-6 text-[10.5px] font-semibold rounded-none"
+                style={{
+                  background: "rgba(0,0,0,0.62)",
+                  color: "#fff",
+                  border: "1px solid rgba(255,255,255,0.18)",
+                }}
+                title={t("studio.addedToEditRefs")}
+              >
+                {t("studio.addToEdit")}
+              </button>
+            )}
           </div>
         </div>
       )}

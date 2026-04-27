@@ -30,3 +30,21 @@ function computeBaseUrl(): string {
 }
 
 export const LOCAL_SERVER_BASE_URL = computeBaseUrl();
+
+function computeAuthToken(): string {
+  const g = globalThis as { location?: { search?: string } };
+  if (g.location && typeof g.location.search === "string") {
+    try {
+      const params = new URLSearchParams(g.location.search);
+      return params.get("preflowToken") ?? "";
+    } catch {
+      /* fall through */
+    }
+  }
+  return "";
+}
+
+export const LOCAL_SERVER_AUTH_TOKEN = computeAuthToken();
+export const LOCAL_SERVER_AUTH_HEADERS: Record<string, string> = LOCAL_SERVER_AUTH_TOKEN
+  ? { "X-Preflow-Token": LOCAL_SERVER_AUTH_TOKEN }
+  : {};

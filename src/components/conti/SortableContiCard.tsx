@@ -1,4 +1,4 @@
-import { useState, useRef, memo, useEffect, useCallback } from "react";
+import { useState, useRef, memo, useEffect, useCallback, useSyncExternalStore } from "react";
 import type { GeneratingStage } from "@/lib/conti";
 import {
   Sparkles,
@@ -37,6 +37,7 @@ import {
   type TransitionSpec,
 } from "@/lib/transitionGrammar";
 import { useUiLanguage, useT } from "@/lib/uiLanguage";
+import { getAllSketchGensForScene, subscribeSketchGen } from "./sketchState";
 
 // Walks free-form scene text (description / location / etc) and returns the
 // set of canonical asset tag names referenced via `@mention`. Uses
@@ -398,20 +399,24 @@ function AdjustImageModal({
 
   const inputStyle: React.CSSProperties = {
     width: 48,
+    height: 30,
     fontSize: 11,
+    lineHeight: "30px",
     color: "#fff",
     textAlign: "center",
     background: "rgba(255,255,255,0.08)",
     border: "1px solid rgba(255,255,255,0.18)",
     borderRadius: 0,
-    padding: "2px 4px",
+    padding: "0 4px",
     outline: "none",
     cursor: "text",
+    boxSizing: "border-box",
   };
 
   const btnGhost: React.CSSProperties = {
     display: "flex",
     alignItems: "center",
+    justifyContent: "center",
     gap: 6,
     height: 34,
     padding: "0 16px",
@@ -422,9 +427,17 @@ function AdjustImageModal({
     border: "1px solid rgba(255,255,255,0.10)",
     borderRadius: 0,
     cursor: "pointer",
+    whiteSpace: "nowrap",
+    wordBreak: "keep-all",
+    minWidth: 68,
+    lineHeight: 1,
+    boxSizing: "border-box",
   };
 
   const btnWhite: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     height: 34,
     padding: "0 16px",
     fontSize: 13,
@@ -435,9 +448,17 @@ function AdjustImageModal({
     borderRadius: 0,
     cursor: capturing ? "default" : "pointer",
     opacity: capturing ? 0.6 : 1,
+    whiteSpace: "nowrap",
+    wordBreak: "keep-all",
+    minWidth: 96,
+    lineHeight: 1,
+    boxSizing: "border-box",
   };
 
   const btnPrimary: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     height: 34,
     padding: "0 16px",
     fontSize: 13,
@@ -447,6 +468,11 @@ function AdjustImageModal({
     border: "none",
     borderRadius: 0,
     cursor: "pointer",
+    whiteSpace: "nowrap",
+    wordBreak: "keep-all",
+    minWidth: 68,
+    lineHeight: 1,
+    boxSizing: "border-box",
   };
 
   return (
@@ -554,13 +580,13 @@ function AdjustImageModal({
             whiteSpace: "nowrap",
           }}
         >
-          Drag to reposition · This frame = output
+          {t("conti.dragToReposition")}
         </div>
       </div>
 
       {/* Zoom 슬라이더 */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, width: wProp, minWidth: 260 }}>
-        <span style={{ fontSize: 11, color: "#666", width: 36 }}>Zoom</span>
+        <span style={{ fontSize: 11, color: "#666", width: 36 }}>{t("conti.zoom")}</span>
         <input
           type="range"
           min={-0.15}
@@ -609,7 +635,7 @@ function AdjustImageModal({
 
       {/* Rotate 슬라이더 */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, width: wProp, minWidth: 260 }}>
-        <span style={{ fontSize: 11, color: "#666", width: 36 }}>Rotate</span>
+        <span style={{ fontSize: 11, color: "#666", width: 36 }}>{t("conti.rotate")}</span>
         <input
           type="range"
           min={-180}
@@ -658,16 +684,16 @@ function AdjustImageModal({
       {/* 하단 버튼 */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, width: wProp, minWidth: 260 }}>
         <button onClick={handleReset} style={{ ...btnGhost, flex: 1 }}>
-          <RotateCcw size={13} /> {t("conti.reset")}
+          {t("conti.reset")}
         </button>
-        <button onClick={onClose} style={{ ...btnGhost, flex: 1, justifyContent: "center" }}>
+        <button onClick={onClose} style={{ ...btnGhost, flex: 1 }}>
           {t("common.cancel")}
         </button>
         {onCapture && (
           <button
             onClick={captureAsImage}
             disabled={capturing}
-            style={{ ...btnWhite, flex: 1, justifyContent: "center", whiteSpace: "nowrap" }}
+            style={{ ...btnWhite, flex: 1 }}
           >
             {capturing ? t("conti.capturing") : t("conti.setAsImage")}
           </button>
@@ -678,7 +704,7 @@ function AdjustImageModal({
             onSave({ ...crop, scale: displayScale, _v: 2, fmt: videoFormat, ia });
             onClose();
           }}
-          style={{ ...btnPrimary, flex: 1, justifyContent: "center" }}
+          style={{ ...btnPrimary, flex: 1 }}
         >
           {t("conti.apply")}
         </button>
@@ -992,6 +1018,28 @@ export const SortableContiCard = memo(
     const hasImage = !!imgSrc && !isBusy;
     const showImgOverlay = imgHov || selected;
     const showMoreBtn = imgHov || menuOpen;
+    const sketchGenSnapshot = useSyncExternalStore(
+      useCallback(
+        (onStoreChange) => subscribeSketchGen(scene.project_id, scene.id, onStoreChange),
+        [scene.project_id, scene.id],
+      ),
+      useCallback(
+        () =>
+          getAllSketchGensForScene(scene.project_id, scene.id)
+            .map((g) => `${g.model}:${g.arrivedUrls.length}/${g.count}:${g.promise ? "1" : "0"}`)
+            .join("|"),
+        [scene.project_id, scene.id],
+      ),
+      () => "",
+    );
+    const sketchGenStates = sketchGenSnapshot
+      ? getAllSketchGensForScene(scene.project_id, scene.id)
+      : [];
+    const sketchGeneratingTotal = sketchGenStates.reduce((sum, g) => sum + g.count, 0);
+    const sketchGeneratingDone = sketchGenStates.reduce((sum, g) => sum + g.arrivedUrls.length, 0);
+    const isSketchGenerating = sketchGenStates.some((g) => !!g.promise);
+    const sketchProgressRatio =
+      sketchGeneratingTotal > 0 ? Math.min(1, sketchGeneratingDone / sketchGeneratingTotal) : 0;
 
     const STAGE_LABELS: Record<GeneratingStage, string> = {
       queued: t("conti.queued"),
@@ -1132,7 +1180,7 @@ export const SortableContiCard = memo(
                     e.stopPropagation();
                     void onSceneUpdate(scene.scene_number, { is_final: !scene.is_final });
                   }}
-                  title={scene.is_final ? "Unmark as final" : "Mark as final"}
+                  title={scene.is_final ? t("conti.unmarkFinal") : t("conti.markFinal")}
                   aria-pressed={!!scene.is_final}
                   className="font-mono text-[10px] font-bold px-1.5 py-0.5 text-white shrink-0 inline-flex items-center gap-0.5 cursor-pointer hover:brightness-110 transition-[filter]"
                   style={{ background: KR, borderRadius: 0 }}
@@ -1172,6 +1220,7 @@ export const SortableContiCard = memo(
             <div className="flex-1" />
             {historyCount > 0 && (
               <button
+                title={t("conti.history")}
                 onClick={(e) => {
                   e.stopPropagation();
                   onHistory();
@@ -1189,6 +1238,7 @@ export const SortableContiCard = memo(
                 download
                 target="_blank"
                 rel="noopener noreferrer"
+                title={t("conti.downloadImage")}
                 className="w-4 h-4 flex items-center justify-center hover:text-foreground transition-colors"
                 style={{ color: "rgba(255,255,255,0.25)" }}
               >
@@ -1387,7 +1437,7 @@ export const SortableContiCard = memo(
                             e.stopPropagation();
                             onGenerate();
                           }}
-                          title="Generate"
+                          title={t("conti.generate")}
                           style={{
                             display: "flex",
                             alignItems: "center",
@@ -1408,7 +1458,7 @@ export const SortableContiCard = memo(
                             e.stopPropagation();
                             fileInputRef.current?.click();
                           }}
-                          title="Upload Image"
+                          title={t("conti.uploadImage")}
                           style={{
                             display: "flex",
                             alignItems: "center",
@@ -1473,7 +1523,7 @@ export const SortableContiCard = memo(
                         e.stopPropagation();
                         onGenerate();
                       }}
-                      title="Generate"
+                      title={t("conti.generate")}
                       style={{
                         display: "flex",
                         alignItems: "center",
@@ -1494,7 +1544,7 @@ export const SortableContiCard = memo(
                         e.stopPropagation();
                         fileInputRef.current?.click();
                       }}
-                      title="Upload Image"
+                      title={t("conti.uploadImage")}
                       style={{
                         display: "flex",
                         alignItems: "center",
@@ -1669,8 +1719,8 @@ export const SortableContiCard = memo(
                     <button
                       title={
                         sketchCount > 0
-                          ? `Sketches (${sketchCount})`
-                          : "Sketches — generate composition drafts"
+                          ? t("conti.openSketchesCount", { count: sketchCount })
+                          : t("conti.openSketches")
                       }
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1678,21 +1728,60 @@ export const SortableContiCard = memo(
                       }}
                       className="flex items-center justify-center gap-1 min-w-[28px] h-7 px-1.5 rounded-none text-white hover:opacity-90"
                       style={{
-                        background: sketchCount > 0 ? KR : "rgba(0,0,0,0.55)",
-                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: isSketchGenerating || sketchCount > 0 ? KR : "rgba(0,0,0,0.55)",
+                        border: isSketchGenerating ? "1px solid rgba(255,255,255,0.55)" : "1px solid rgba(255,255,255,0.12)",
                         cursor: "pointer",
                       }}
                     >
-                      <Images className="w-3.5 h-3.5" />
-                      {sketchCount > 0 && (
-                        <span className="text-[10px] font-bold tracking-wide">{sketchCount}</span>
+                      {isSketchGenerating ? (
+                        <span style={{ position: "relative", width: 15, height: 15, display: "inline-flex" }}>
+                          <svg width="15" height="15" viewBox="0 0 15 15" style={{ transform: "rotate(-90deg)" }}>
+                            <circle
+                              cx="7.5"
+                              cy="7.5"
+                              r="5.7"
+                              fill="none"
+                              stroke="rgba(255,255,255,0.28)"
+                              strokeWidth="2"
+                            />
+                            <circle
+                              cx="7.5"
+                              cy="7.5"
+                              r="5.7"
+                              fill="none"
+                              stroke="#fff"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeDasharray={`${2 * Math.PI * 5.7}`}
+                              strokeDashoffset={`${2 * Math.PI * 5.7 * (1 - sketchProgressRatio)}`}
+                              style={{ transition: "stroke-dashoffset 0.2s ease" }}
+                            />
+                          </svg>
+                          <span
+                            className="animate-spin"
+                            style={{
+                              position: "absolute",
+                              inset: 1,
+                              border: "1.5px solid transparent",
+                              borderTopColor: "rgba(255,255,255,0.85)",
+                              borderRadius: "50%",
+                            }}
+                          />
+                        </span>
+                      ) : (
+                        <Images className="w-3.5 h-3.5" />
+                      )}
+                      {(isSketchGenerating || sketchCount > 0) && (
+                        <span className="text-[10px] font-bold tracking-wide">
+                          {isSketchGenerating ? `${sketchGeneratingDone}/${sketchGeneratingTotal}` : sketchCount}
+                        </span>
                       )}
                     </button>
                   );
                 })()}
                 {hasImage && onUseAsStyle && (
                   <button
-                    title="Use as Style"
+                    title={t("conti.useAsStyle")}
                     onClick={(e) => {
                       e.stopPropagation();
                       onUseAsStyle();
@@ -1733,7 +1822,7 @@ export const SortableContiCard = memo(
                   className="flex items-center gap-1 text-[11px] font-semibold px-3 h-7 rounded-none text-white hover:opacity-85 disabled:opacity-40"
                   style={{ background: KR, border: "none", cursor: "pointer" }}
                 >
-                  <RefreshCw className="w-3 h-3" /> Regenerate
+                  <RefreshCw className="w-3 h-3" /> {t("conti.regenerate")}
                 </button>
               </div>
             )}

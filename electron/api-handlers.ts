@@ -12,6 +12,16 @@ function storageFileUrl(fullPath: string): string {
   return `${getLocalServerBaseUrl()}/storage/file/${relative}`;
 }
 
+function resolveStorageFilePath(rawPath: string): string {
+  const base = path.resolve(getStorageBasePath());
+  const target = path.resolve(path.normalize(rawPath.replace(/^\/+/, "")));
+  const rel = path.relative(base, target);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Blocked file outside storage: ${target}`);
+  }
+  return target;
+}
+
 export async function handleClaudeProxy(body: any) {
   const settings = getSettings();
   const apiKey = settings.anthropic_api_key;
@@ -908,12 +918,17 @@ async function callGptInpaint(
 async function downloadImage(url: string): Promise<Buffer> {
   if (url.startsWith("local-file://")) {
     const stripped = url.replace(/^local-file:\/\//i, "").split(/[?#]/)[0];
-    return (await fs.promises.readFile(decodeURIComponent(stripped))) as unknown as Buffer;
+    return (await fs.promises.readFile(resolveStorageFilePath(decodeURIComponent(stripped)))) as unknown as Buffer;
   }
   const localPrefix = `${getLocalServerBaseUrl()}/storage/file/`;
   if (url.startsWith(localPrefix)) {
     const relative = decodeURIComponent(url.slice(localPrefix.length));
-    const fullPath = path.join(getStorageBasePath(), relative);
+    const fullPath = path.resolve(getStorageBasePath(), relative);
+    const base = path.resolve(getStorageBasePath());
+    const rel = path.relative(base, fullPath);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      throw new Error(`Blocked file outside storage: ${relative}`);
+    }
     return (await fs.promises.readFile(fullPath)) as unknown as Buffer;
   }
   const res = await fetch(url);

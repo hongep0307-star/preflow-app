@@ -26,7 +26,6 @@ import {
   RotateCcw,
   Eraser,
   Heart,
-  Plus,
   PenLine,
   Undo2,
   Sparkles,
@@ -56,6 +55,9 @@ interface Scene {
   is_transition?: boolean;
   transition_type?: string | null;
   conti_image_crop?: unknown;
+  is_highlight?: boolean;
+  highlight_kind?: "hook" | "hero" | "product" | "emotion" | "cta" | null;
+  highlight_reason?: string | null;
   /** Per-scene composition candidates generated in the Sketches tab.
    *  Lives on the scene row so deleting the scene cascades the sketches. */
   sketches?: Sketch[];
@@ -97,9 +99,9 @@ export interface ContiStudioProps {
   moodBookmarks?: string[];
   initialTab?: TabId;
   onClose: () => void;
-  onSaveInpaint: (url: string) => void;
-  onRollback: (url: string) => void;
-  onDeleteHistory?: (url: string) => Promise<void> | void;
+  onSaveInpaint: (url: string, scene?: Scene) => void;
+  onRollback: (url: string, scene?: Scene) => void;
+  onDeleteHistory?: (url: string, scene?: Scene) => Promise<void> | void;
   onEditGeneratingChange?: (sceneId: string, generating: boolean) => void;
   onStageChange?: (sceneId: string, stage: GeneratingStage | null) => void;
   /** Notified by StudioSketchesTab whenever the persisted sketch list for
@@ -184,8 +186,9 @@ export const ContiStudio = ({
   const { toast } = useToast();
   const t = useT();
 
-  const [currentIndex, setCurrentIndex] = useState(() => allScenes.findIndex((s) => s.id === initialScene.id));
+  const [currentIndex, setCurrentIndex] = useState(() => Math.max(0, allScenes.findIndex((s) => s.id === initialScene.id)));
   const currentScene = allScenes[currentIndex] ?? initialScene;
+  const currentSceneIdRef = useRef(currentScene.id);
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < allScenes.length - 1;
 
@@ -194,6 +197,26 @@ export const ContiStudio = ({
     : (imageHistory[currentScene.scene_number] ?? []);
 
   const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? "view");
+
+  useEffect(() => {
+    const nextIndex = allScenes.findIndex((s) => s.id === currentSceneIdRef.current);
+    if (nextIndex >= 0 && nextIndex !== currentIndex) {
+      setCurrentIndex(nextIndex);
+    }
+  }, [allScenes, currentIndex]);
+
+  const goToIndex = useCallback(
+    (next: number | ((prev: number) => number)) => {
+      setCurrentIndex((prev) => {
+        if (allScenes.length === 0) return prev;
+        const raw = typeof next === "function" ? next(prev) : next;
+        const clamped = Math.max(0, Math.min(allScenes.length - 1, raw));
+        currentSceneIdRef.current = allScenes[clamped]?.id ?? currentSceneIdRef.current;
+        return clamped;
+      });
+    },
+    [allScenes],
+  );
 
   /* ── 캔버스 refs ── */
   const imageCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -330,7 +353,7 @@ export const ContiStudio = ({
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       const isEditing = tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable;
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !isEditing) onClose();
       if ((e.metaKey || e.ctrlKey) && e.key === "z" && activeTab === "edit") {
         e.preventDefault();
         handleUndoInpaint();
@@ -387,8 +410,8 @@ export const ContiStudio = ({
         }
       }
 
-      if (e.key === "ArrowLeft" && hasPrev) setCurrentIndex((i) => i - 1);
-      if (e.key === "ArrowRight" && hasNext) setCurrentIndex((i) => i + 1);
+      if (e.key === "ArrowLeft" && hasPrev) goToIndex((i) => i - 1);
+      if (e.key === "ArrowRight" && hasNext) goToIndex((i) => i + 1);
     };
     const upHandler = (e: KeyboardEvent) => {
       if (e.code === "Space") {
@@ -401,7 +424,7 @@ export const ContiStudio = ({
       window.removeEventListener("keydown", handler);
       window.removeEventListener("keyup", upHandler);
     };
-  }, [onClose, hasPrev, hasNext, activeTab, resetZoom]);
+  }, [onClose, hasPrev, hasNext, activeTab, resetZoom, goToIndex]);
 
   const otherScenes = allScenes.filter((s) => s.id !== currentScene.id && s.conti_image_url) as (Scene & {
     conti_image_url: string;
@@ -1610,21 +1633,22 @@ export const ContiStudio = ({
 
   const handleInpaint = async () => {
     if (!inpaintPrompt.trim() || !currentScene.conti_image_url) return;
+    const targetScene = currentScene;
     setIsGenerating(true);
-    onEditGeneratingChange?.(currentScene.id, true);
-    const sceneId = currentScene.id;
+    onEditGeneratingChange?.(targetScene.id, true);
+    const sceneId = targetScene.id;
     // ── 프리뷰 비율로 사전-크롭된 URL 이 있으면 그걸 원본으로 사용 (style transfer 와 동일) ──
     // 캔버스에 그려진 이미지와 마스크는 이미 이 크롭 결과 위에서 그려졌으므로,
     // 모델에게도 동일한 크롭된 이미지를 넘겨야 mask 좌표계가 정확히 일치한다.
     const preflightSourceUrl = preflightSourceUrlRef.current;
     const effectiveSceneImageUrl =
-      preflightSourceUrl && preflightedSceneImageUrlRef.current === currentScene.conti_image_url
+      preflightSourceUrl && preflightedSceneImageUrlRef.current === targetScene.conti_image_url
         ? preflightSourceUrl
-        : currentScene.conti_image_url;
+        : targetScene.conti_image_url;
     const sceneImageUrl = effectiveSceneImageUrl;
-    const usedPreflight = sceneImageUrl !== currentScene.conti_image_url;
-    const sceneProjectId = currentScene.project_id;
-    const sceneNumber = currentScene.scene_number;
+    const usedPreflight = sceneImageUrl !== targetScene.conti_image_url;
+    const sceneProjectId = targetScene.project_id;
+    const sceneNumber = targetScene.scene_number;
     const promptText = inpaintPrompt;
     const maskEmptyVal = isMaskEmpty();
     const maskB64 = maskEmptyVal ? null : extractMaskBase64();
@@ -1913,7 +1937,7 @@ Edit instruction:
         const sceneUpdate: Record<string, any> = { conti_image_url: publicUrl };
         if (usedPreflight) sceneUpdate.conti_image_crop = null;
         await supabase.from("scenes").update(sceneUpdate).eq("id", sceneId);
-        onSaveInpaint(publicUrl);
+        onSaveInpaint(publicUrl, targetScene);
         toast({ title: t("studio.inpaintComplete") });
         // inpaint 성공 후 preflight 임시 파일 정리.
         // - preflightSourceUrl 은 이 호출 전에 snapshot 된 로컬 변수라서,
@@ -1953,14 +1977,14 @@ Edit instruction:
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1">
             <button
-              onClick={() => hasPrev && setCurrentIndex((i) => i - 1)}
+              onClick={() => hasPrev && goToIndex((i) => i - 1)}
               disabled={!hasPrev}
               className="p-1 rounded text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
             <button
-              onClick={() => hasNext && setCurrentIndex((i) => i + 1)}
+              onClick={() => hasNext && goToIndex((i) => i + 1)}
               disabled={!hasNext}
               className="p-1 rounded text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
             >
@@ -2014,7 +2038,7 @@ Edit instruction:
                   videoFormat,
                   briefAnalysis: briefAnalysis ?? undefined,
                 });
-                onSaveInpaint(newUrl);
+                onSaveInpaint(newUrl, currentScene);
                 toast({ title: t("studio.regenComplete") });
               } catch (e: any) {
                 toast({ title: t("studio.regenFailed"), description: e.message, variant: "destructive" });
@@ -2059,11 +2083,11 @@ Edit instruction:
               sceneNumber={currentScene.scene_number}
               videoFormat={videoFormat}
               onApply={(url) => {
-                onSaveInpaint(url);
+                onSaveInpaint(url, currentScene);
                 onClose();
               }}
               onRestore={(originalUrl) => {
-                onSaveInpaint(originalUrl);
+                onSaveInpaint(originalUrl, currentScene);
               }}
             />
           ) : activeTab === "edit" ? (
@@ -2516,12 +2540,12 @@ Edit instruction:
                         {compareSelectedRefs.map((url, i) => (
                           <div
                             key={i}
-                            className="relative group w-16 h-16 rounded overflow-hidden border border-white/[0.06]"
+                            className="relative group w-16 h-16 rounded-none overflow-hidden border border-white/[0.06]"
                           >
                             <img src={url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                             <button
                               onClick={() => setCompareSelectedRefs((prev) => prev.filter((_, idx) => idx !== i))}
-                              className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                              className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center rounded-none opacity-0 group-hover:opacity-100 transition-opacity"
                               style={{ background: "rgba(0,0,0,0.7)" }}
                             >
                               <X className="w-2.5 h-2.5 text-white" />
@@ -2540,10 +2564,15 @@ Edit instruction:
               <StudioSketchesTab
                 projectId={currentScene.project_id}
                 scene={currentScene}
+                allScenes={allScenes}
                 assets={assets}
                 videoFormat={videoFormat}
                 briefAnalysis={briefAnalysis ?? null}
-                onSetAsSceneImage={(url) => onSaveInpaint(url)}
+                onSetAsSceneImage={(url) => onSaveInpaint(url, currentScene)}
+                onAddToEditRefs={(url) => {
+                  setCompareSelectedRefs((prev) => (prev.includes(url) ? prev : [...prev, url]));
+                  toast({ title: t("studio.addedToEditRefs") });
+                }}
                 // Reuse the same previewUrl state the History tab drives.
                 // `displayUrl` (line ~1926) already prefers `previewUrl` over
                 // `currentScene.conti_image_url`, so passing the setter
@@ -2587,7 +2616,7 @@ Edit instruction:
                               variant="ghost"
                               disabled={deletingHistoryUrl !== null}
                               onClick={() => {
-                                onRollback(url);
+                                onRollback(url, currentScene);
                                 toast({ title: t("studio.sceneRestored", { scene: String(currentScene.scene_number).padStart(2, "0") }) });
                               }}
                               className="gap-1 text-[11px] h-6 px-2"
@@ -2606,7 +2635,7 @@ Edit instruction:
                               setDeletingHistoryUrl(url);
                               try {
                                 if (previewUrl === url) setPreviewUrl(null);
-                                await onDeleteHistory(url);
+                                await onDeleteHistory(url, currentScene);
                                 toast({ title: t("studio.historyDeleted", { scene: String(currentScene.scene_number).padStart(2, "0") }) });
                               } finally {
                                 setDeletingHistoryUrl(null);
@@ -2645,7 +2674,7 @@ Edit instruction:
                 const hasAnyContent = sortedMoods.length > 0 || hasSceneImages;
                 const hasExistingConti = !!currentScene.conti_image_url;
                 const onReplaceWithImage = (url: string) => {
-                  onSaveInpaint(url);
+                  onSaveInpaint(url, currentScene);
                   toast({ title: hasExistingConti ? t("studio.imageReplaced") : t("studio.setAsConti") });
                   setComparePreviewUrl(null);
                 };
@@ -2663,24 +2692,24 @@ Edit instruction:
                         <div className="flex flex-col items-center gap-2 w-full px-4 py-3">
                           <img
                             src={comparePreviewUrl}
-                            className="max-h-[320px] w-auto object-contain rounded"
+                            className="max-h-[320px] w-auto object-contain rounded-none"
                             alt="preview" loading="lazy" decoding="async" />
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => onReplaceWithImage(comparePreviewUrl)}
-                              className="px-3 py-1.5 rounded text-[11px] font-semibold text-white transition-colors"
+                              className="px-3 py-1.5 rounded-none text-[11px] font-semibold text-white transition-colors"
                               style={{ background: KR }}
                             >
-                              {hasExistingConti ? t("studio.replace") : t("studio.useAsConti")}
+                              {t("studio.use")}
                             </button>
                             {hasExistingConti && (
                               <button
                                 onClick={() => addToEditRefs(comparePreviewUrl)}
-                                className="px-3 py-1.5 rounded text-[11px] font-semibold border transition-colors"
+                                className="px-3 py-1.5 rounded-none text-[11px] font-semibold border transition-colors"
                                 style={{ borderColor: "rgba(255,255,255,0.15)", color: "hsl(var(--foreground))" }}
                               >
                                 <span className="flex items-center gap-1">
-                                  <Plus className="w-3 h-3" /> {t("studio.addToEdit")}
+                                  {t("studio.addToEdit")}
                                 </span>
                               </button>
                             )}
@@ -2710,7 +2739,7 @@ Edit instruction:
                             return (
                               <div key={v.id} className="mb-3">
                                 <div style={{ fontSize: 11, color: "#666" }} className="mb-1.5">
-                                  v{v.version_number}
+                                  {t("conti.versionShort", { num: v.version_number })}
                                 </div>
                                 <div className="flex flex-wrap gap-1.5">
                                   {vScenes.map((vScene) => {
@@ -2719,7 +2748,7 @@ Edit instruction:
                                       <button
                                         key={`${v.id}-${vScene.scene_number}`}
                                         onClick={() => setComparePreviewUrl(vScene.conti_image_url!)}
-                                        className="relative rounded overflow-hidden transition-all"
+                                        className="relative rounded-none overflow-hidden transition-all"
                                         style={{
                                           width: 64,
                                           height: 64,
@@ -2731,7 +2760,7 @@ Edit instruction:
                                           className="w-full h-full object-cover"
                                           loading="lazy" decoding="async" />
                                         <div
-                                          className="absolute top-0.5 left-0.5 text-[8px] font-bold px-1 py-0.5 rounded text-white"
+                                          className="absolute top-0.5 left-0.5 text-[8px] font-bold px-1 py-0.5 rounded-none text-white"
                                           style={{ background: "rgba(0,0,0,0.6)" }}
                                         >
                                           {formatSceneRefLabel(vScene)}
@@ -2758,7 +2787,7 @@ Edit instruction:
                                 <button
                                   key={i}
                                   onClick={() => setComparePreviewUrl(url)}
-                                  className="relative rounded overflow-hidden transition-all"
+                                  className="relative rounded-none overflow-hidden transition-all"
                                   style={{
                                     width: 64,
                                     height: 64,
@@ -2768,7 +2797,7 @@ Edit instruction:
                                   <img src={url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                                   {isBookmarked && (
                                     <div
-                                      className="absolute top-0.5 right-0.5 flex items-center justify-center rounded-full"
+                                      className="absolute top-0.5 right-0.5 flex items-center justify-center rounded-none"
                                       style={{ width: 14, height: 14, background: KR }}
                                     >
                                       <Heart className="w-2 h-2 text-white fill-white" />
