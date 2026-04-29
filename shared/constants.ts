@@ -48,3 +48,10 @@ export const LOCAL_SERVER_AUTH_TOKEN = computeAuthToken();
 export const LOCAL_SERVER_AUTH_HEADERS: Record<string, string> = LOCAL_SERVER_AUTH_TOKEN
   ? { "X-Preflow-Token": LOCAL_SERVER_AUTH_TOKEN }
   : {};
+
+/** Reference Library 업로드의 절대 상한 (bytes).
+ *  렌더러와 local-server 양쪽이 동일한 값을 써야 한쪽 우회로 200 MiB 를 넘는
+ *  파일이 디스크에 들어가는 일을 막을 수 있다. UX 메시지("200MB 이하…") 도
+ *  여기서 파생된다. */
+export const REFERENCE_UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
+export const REFERENCE_UPLOAD_MAX_LABEL = "200MB";

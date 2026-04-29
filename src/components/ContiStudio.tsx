@@ -29,10 +29,15 @@ import {
   PenLine,
   Undo2,
   Sparkles,
+  Library,
+  Film,
+  ImageIcon,
+  Youtube,
 } from "lucide-react";
 import { AnnotationEditor } from "@/components/conti/AnnotationEditor";
 import { StudioSketchesTab } from "@/components/conti/StudioSketchesTab";
 import type { Sketch } from "@/components/conti/contiTypes";
+import { getReferencePreviewImageUrl, type ReferenceItem } from "@/lib/referenceLibrary";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import MentionInput from "@/components/MentionInput";
@@ -97,6 +102,16 @@ export interface ContiStudioProps {
   moodReferenceUrl?: string;
   moodImages?: string[];
   moodBookmarks?: string[];
+  /** Library references attached to the project's Conti track. The Compare
+   *  panel renders these in their own "Library" section with kind-aware
+   *  thumbnails — animated raster (gif / animated webp / apng) gets a static
+   *  MEDIA placeholder, video gets its poster, etc. — instead of being
+   *  squashed into bare URLs in `moodImages`. */
+  libraryReferences?: ReferenceItem[];
+  /** Opens the parent's Library picker. Wired into the Compare panel's
+   *  "Library" section header so the user can attach more references
+   *  without leaving the Studio. */
+  onOpenLibraryPicker?: () => void;
   initialTab?: TabId;
   onClose: () => void;
   onSaveInpaint: (url: string, scene?: Scene) => void;
@@ -146,6 +161,18 @@ const FORMAT_RATIO: Record<VideoFormat, number> = {
 const MAX_INPAINT_UNDO = 20;
 const formatSceneRefLabel = (scene: Pick<Scene, "scene_number" | "is_transition" | "transition_type">) =>
   scene.is_transition || scene.transition_type ? "TR" : `#${String(scene.scene_number).padStart(2, "0")}`;
+const PLAYABLE_MEDIA_URL_RE = /\.(gif|apng|mp4|webm|mov|m4v)(?:[?#].*)?$/i;
+const isPlayableMediaUrl = (url: string | null | undefined): boolean => {
+  if (!url) return false;
+  return PLAYABLE_MEDIA_URL_RE.test(url.split("?")[0] ?? url);
+};
+
+const MediaPlaceholder = ({ className = "" }: { className?: string }) => (
+  <div className={`flex flex-col items-center justify-center gap-2 bg-black/70 text-white/65 ${className}`}>
+    <Columns2 className="h-5 w-5" />
+    <span className="font-mono text-[10px]">MEDIA</span>
+  </div>
+);
 
 /* ━━━ 원본 이미지 비율 보존 imageSize 계산 ━━━
  * 실제 W/H 비율로 GPT/NB2가 지원하는 3가지 크기 중 가장 가까운 것을 선택.
@@ -173,6 +200,8 @@ export const ContiStudio = ({
   moodReferenceUrl,
   moodImages,
   moodBookmarks,
+  libraryReferences,
+  onOpenLibraryPicker,
   initialTab,
   onClose,
   onSaveInpaint,
@@ -347,6 +376,31 @@ export const ContiStudio = ({
 
   const [compareSelectedRefs, setCompareSelectedRefs] = useState<string[]>([]);
   const [comparePreviewUrl, setComparePreviewUrl] = useState<string | null>(null);
+  // URLs whose underlying file is missing from storage (e.g. the matching
+  // mood image got deleted while the parent state hadn't refreshed yet).
+  // Filtering them out prevents the Compare panel from rendering a broken
+  // image-X icon for already-orphaned references.
+  const [brokenMoodUrls, setBrokenMoodUrls] = useState<Set<string>>(new Set());
+  const markMoodUrlBroken = useCallback((url: string) => {
+    setBrokenMoodUrls((prev) => {
+      if (prev.has(url)) return prev;
+      const next = new Set(prev);
+      next.add(url);
+      return next;
+    });
+  }, []);
+  // Library thumbnails whose <img> failed to load. We keep these per-reference
+  // (not per-URL) so a thumbnail-vs-file_url fallback can be retried inside
+  // the same card before collapsing to the kind-glyph placeholder.
+  const [brokenLibraryRefIds, setBrokenLibraryRefIds] = useState<Set<string>>(new Set());
+  const markLibraryRefBroken = useCallback((refId: string) => {
+    setBrokenLibraryRefIds((prev) => {
+      if (prev.has(refId)) return prev;
+      const next = new Set(prev);
+      next.add(refId);
+      return next;
+    });
+  }, []);
 
   /* ━━━ 키보드 ━━━ */
   useEffect(() => {
@@ -2274,11 +2328,15 @@ Edit instruction:
               )}
             </div>
           ) : displayUrl ? (
+            isPlayableMediaUrl(displayUrl) ? (
+              <MediaPlaceholder className="h-full w-full" />
+            ) : (
             <img
               src={displayUrl}
               className="rounded-none"
               style={{ width: canvasSize.w || undefined, height: canvasSize.h || undefined, objectFit: "contain" }}
               alt={`Shot #${String(currentScene.scene_number).padStart(2, "0")}`} loading="lazy" decoding="async" />
+            )
           ) : (
             <div className="text-muted-foreground text-sm">
               {(currentScene as any).is_transition ? t("studio.transition") : t("studio.noContiImage")}
@@ -2662,7 +2720,21 @@ Edit instruction:
             {/* ━━━ Compare ━━━ */}
             {activeTab === "compare" &&
               (() => {
-                const allMoodUrls = moodImages ?? [];
+                // Library URLs known to belong to attached library references.
+                // We strip these from the legacy mood list because library
+                // imports now live in their own section below — that section
+                // renders kind-aware previews so animated raster doesn't leak
+                // into a bare <img>.
+                const libraryUrlSet = new Set<string>();
+                for (const ref of libraryReferences ?? []) {
+                  const previewUrl = getReferencePreviewImageUrl(ref);
+                  if (previewUrl) libraryUrlSet.add(previewUrl);
+                  if (ref.file_url) libraryUrlSet.add(ref.file_url);
+                  if (ref.thumbnail_url) libraryUrlSet.add(ref.thumbnail_url);
+                }
+                const allMoodUrls = (moodImages ?? [])
+                  .filter((u) => !brokenMoodUrls.has(u))
+                  .filter((u) => !libraryUrlSet.has(u));
                 const bookmarkSet = new Set(moodBookmarks ?? []);
                 const sortedMoods = [
                   ...allMoodUrls.filter((u) => bookmarkSet.has(u)),
@@ -2671,9 +2743,14 @@ Edit instruction:
                 const hasSceneImages = versions.some((v) =>
                   (v.scenes as Scene[]).some((s) => s.conti_image_url && s.id !== currentScene.id),
                 );
-                const hasAnyContent = sortedMoods.length > 0 || hasSceneImages;
+                const visibleLibraryRefs = (libraryReferences ?? []).filter(
+                  (ref) => ref.kind !== "link" && !ref.deleted_at && Boolean(getReferencePreviewImageUrl(ref)),
+                );
+                const hasLibraryRefs = visibleLibraryRefs.length > 0;
+                const hasAnyContent = sortedMoods.length > 0 || hasSceneImages || hasLibraryRefs;
                 const hasExistingConti = !!currentScene.conti_image_url;
                 const onReplaceWithImage = (url: string) => {
+                  if (isPlayableMediaUrl(url)) return;
                   onSaveInpaint(url, currentScene);
                   toast({ title: hasExistingConti ? t("studio.imageReplaced") : t("studio.setAsConti") });
                   setComparePreviewUrl(null);
@@ -2681,6 +2758,27 @@ Edit instruction:
                 const addToEditRefs = (url: string) => {
                   setCompareSelectedRefs((prev) => (prev.includes(url) ? prev : [...prev, url]));
                   toast({ title: t("studio.addedToEditRefs") });
+                };
+                // Pick the URL that should populate the comparePreview when
+                // the user clicks a library reference card. For animated
+                // raster (kind=gif) prefer the static thumbnail so the
+                // preview stays still; the corresponding "Use" action will
+                // store that thumbnail as conti_image_url for export safety.
+                const referenceCompareUrl = (ref: ReferenceItem): string | null => {
+                  if (ref.kind === "gif") return ref.thumbnail_url || ref.file_url || null;
+                  if (ref.kind === "video" || ref.kind === "youtube") return ref.thumbnail_url || null;
+                  return ref.file_url || ref.thumbnail_url || null;
+                };
+                const referenceKindBadge = (ref: ReferenceItem): string => {
+                  if (ref.kind === "gif") return "GIF";
+                  if (ref.kind === "video") return "VIDEO";
+                  if (ref.kind === "youtube") return "YT";
+                  return "IMG";
+                };
+                const referenceKindIcon = (ref: ReferenceItem) => {
+                  if (ref.kind === "video") return Film;
+                  if (ref.kind === "youtube") return Youtube;
+                  return ImageIcon;
                 };
                 return (
                   <div className="flex flex-col h-full">
@@ -2690,15 +2788,20 @@ Edit instruction:
                     >
                       {comparePreviewUrl ? (
                         <div className="flex flex-col items-center gap-2 w-full px-4 py-3">
-                          <img
-                            src={comparePreviewUrl}
-                            className="max-h-[320px] w-auto object-contain rounded-none"
-                            alt="preview" loading="lazy" decoding="async" />
+                          {isPlayableMediaUrl(comparePreviewUrl) ? (
+                            <MediaPlaceholder className="h-[220px] w-full max-w-[360px]" />
+                          ) : (
+                            <img
+                              src={comparePreviewUrl}
+                              className="max-h-[320px] w-auto object-contain rounded-none"
+                              alt="preview" loading="lazy" decoding="async" />
+                          )}
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => onReplaceWithImage(comparePreviewUrl)}
+                              disabled={isPlayableMediaUrl(comparePreviewUrl)}
                               className="px-3 py-1.5 rounded-none text-[11px] font-semibold text-white transition-colors"
-                              style={{ background: KR }}
+                              style={{ background: KR, opacity: isPlayableMediaUrl(comparePreviewUrl) ? 0.45 : 1 }}
                             >
                               {t("studio.use")}
                             </button>
@@ -2755,10 +2858,14 @@ Edit instruction:
                                           border: isRef ? `2px solid ${KR}` : "2px solid rgba(255,255,255,0.06)",
                                         }}
                                       >
-                                        <img
-                                          src={vScene.conti_image_url!}
-                                          className="w-full h-full object-cover"
-                                          loading="lazy" decoding="async" />
+                                        {isPlayableMediaUrl(vScene.conti_image_url) ? (
+                                          <MediaPlaceholder className="h-full w-full" />
+                                        ) : (
+                                          <img
+                                            src={vScene.conti_image_url!}
+                                            className="w-full h-full object-cover"
+                                            loading="lazy" decoding="async" />
+                                        )}
                                         <div
                                           className="absolute top-0.5 left-0.5 text-[8px] font-bold px-1 py-0.5 rounded-none text-white"
                                           style={{ background: "rgba(0,0,0,0.6)" }}
@@ -2774,8 +2881,92 @@ Edit instruction:
                           })}
                         </div>
                       )}
+                      {hasLibraryRefs && (
+                        <div style={{ marginTop: hasSceneImages ? 16 : 0 }} className="mb-4">
+                          <div className="mb-2 flex items-center justify-between">
+                            <div className="flex items-center gap-1.5" style={{ fontSize: 12, color: "#999" }}>
+                              <Library className="h-3.5 w-3.5" />
+                              <span>Library</span>
+                              <span className="font-mono text-[10px] text-muted-foreground/60">
+                                {visibleLibraryRefs.length}
+                              </span>
+                            </div>
+                            {onOpenLibraryPicker ? (
+                              <button
+                                type="button"
+                                onClick={onOpenLibraryPicker}
+                                className="text-[10px] font-mono uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors"
+                              >
+                                + Add
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {visibleLibraryRefs.map((ref) => {
+                              const compareUrl = referenceCompareUrl(ref);
+                              const isRef = compareUrl ? compareSelectedRefs.includes(compareUrl) : false;
+                              const Icon = referenceKindIcon(ref);
+                              const badge = referenceKindBadge(ref);
+                              // Pick the static thumbnail source per kind:
+                              //   - image: file_url is the static asset
+                              //   - video / youtube: thumbnail_url holds the
+                              //     poster (static); the original is only
+                              //     used for hover-play on the Conti card
+                              //   - gif: prefer the static poster extracted
+                              //     at upload; if missing (legacy upload),
+                              //     no thumbnail is shown so the glyph card
+                              //     covers up the animation.
+                              const thumbSrc =
+                                ref.kind === "image"
+                                  ? ref.file_url ?? ref.thumbnail_url ?? null
+                                  : ref.kind === "video" || ref.kind === "youtube"
+                                    ? ref.thumbnail_url ?? null
+                                    : ref.kind === "gif"
+                                      ? ref.thumbnail_url && ref.thumbnail_url !== ref.file_url
+                                        ? ref.thumbnail_url
+                                        : null
+                                      : null;
+                              const showThumb = Boolean(thumbSrc) && !brokenLibraryRefIds.has(ref.id);
+                              return (
+                                <button
+                                  key={ref.id}
+                                  type="button"
+                                  onClick={() => compareUrl && setComparePreviewUrl(compareUrl)}
+                                  title={ref.title}
+                                  className="relative rounded-none overflow-hidden transition-all bg-black/40"
+                                  style={{
+                                    width: 64,
+                                    height: 64,
+                                    border: isRef ? `2px solid ${KR}` : "2px solid rgba(255,255,255,0.06)",
+                                  }}
+                                >
+                                  {showThumb ? (
+                                    <img
+                                      src={thumbSrc!}
+                                      className="w-full h-full object-cover"
+                                      loading="lazy"
+                                      decoding="async"
+                                      onError={() => markLibraryRefBroken(ref.id)}
+                                    />
+                                  ) : (
+                                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-white/65">
+                                      <Icon className="h-4 w-4" />
+                                      <span className="font-mono text-[8px] tracking-[0.1em]">{badge}</span>
+                                    </div>
+                                  )}
+                                  <span
+                                    className="absolute left-0.5 top-0.5 bg-black/70 px-1 py-px font-mono text-[8px] text-white"
+                                  >
+                                    {badge}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                       {sortedMoods.length > 0 && (
-                        <div style={{ marginTop: hasSceneImages ? 16 : 0 }}>
+                        <div style={{ marginTop: hasSceneImages || hasLibraryRefs ? 16 : 0 }}>
                           <div style={{ fontSize: 12, color: "#999" }} className="mb-2">
                             {t("studio.moodReference")}
                           </div>
@@ -2794,7 +2985,17 @@ Edit instruction:
                                     border: isRef ? `2px solid ${KR}` : "2px solid rgba(255,255,255,0.06)",
                                   }}
                                 >
-                                  <img src={url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
+                                  {isPlayableMediaUrl(url) ? (
+                                    <MediaPlaceholder className="h-full w-full" />
+                                  ) : (
+                                    <img
+                                      src={url}
+                                      className="w-full h-full object-cover"
+                                      loading="lazy"
+                                      decoding="async"
+                                      onError={() => markMoodUrlBroken(url)}
+                                    />
+                                  )}
                                   {isBookmarked && (
                                     <div
                                       className="absolute top-0.5 right-0.5 flex items-center justify-center rounded-none"

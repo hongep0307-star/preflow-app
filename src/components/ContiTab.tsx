@@ -50,6 +50,7 @@ import {
   ArrowRightLeft,
   Check,
   SlidersHorizontal,
+  Library,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -121,6 +122,15 @@ import { StyleTransferConfirmModal } from "@/components/conti/StyleTransferConfi
 import { GenerateAllModal } from "@/components/conti/GenerateAllModal";
 import { SceneImageCropModal } from "@/components/conti/SceneImageCropModal";
 import { useT, useUiLanguage } from "@/lib/uiLanguage";
+import { ReferencePickerDrawer } from "@/components/library/ReferencePickerDrawer";
+import {
+  getReferencePreviewImageUrl,
+  linkReferenceToProject,
+  listProjectReferenceLinks,
+  listReferencesByIds,
+  unlinkReferenceFromProject,
+  type ReferenceItem,
+} from "@/lib/referenceLibrary";
 
 // ─── 모듈 레벨 상태 ────────────────────────────────────────────
 // 탭 이동(ContiTab unmount → remount)에도 진행 중인 generation 의 로딩 상태가 보존되도록
@@ -219,6 +229,15 @@ function subscribeSceneState(pid: string, fn: () => void) {
 // Image 2 generate depending on the user's selected `contiModel`.
 // See lib/transitions.ts for the full rationale.
 
+// Mirror of the playable-media regex used in SortableContiCard / ContiStudio /
+// AgentSceneCards. Library imports may surface gif/animated webp/apng URLs in
+// scenes.conti_image_url; rendering those via <img> would auto-loop, so the
+// version-history thumbnail collapses them to a static MEDIA placeholder.
+const isPlayableMediaUrlForScene = (url: string | null | undefined): boolean => {
+  if (!url) return false;
+  return /\.(gif|apng|mp4|webm|mov|m4v)(?:[?#].*)?$/i.test(url.split("?")[0] ?? url);
+};
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const VersionCompareModal = ({
   sceneNumber,
@@ -297,7 +316,14 @@ const VersionCompareModal = ({
                   style={{ borderColor: isActive ? KR : "hsl(var(--border))" }}
                 >
                   {scene?.conti_image_url ? (
-                    <img src={scene.conti_image_url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
+                    isPlayableMediaUrlForScene(scene.conti_image_url) ? (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/70 text-white/65">
+                        <Film className="w-5 h-5" />
+                        <span className="text-[10px] font-mono">MEDIA</span>
+                      </div>
+                    ) : (
+                      <img src={scene.conti_image_url} className="w-full h-full object-cover" loading="lazy" decoding="async" />
+                    )
                   ) : (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
                       <Film className="w-6 h-6 text-border" />
@@ -1572,6 +1598,40 @@ const SortableVersionTab = ({
   );
 };
 
+type ContiMoodReference = {
+  id: string;
+  url: string | null;
+  videoUrl?: string | null;
+  liked: boolean;
+  sceneRef: number | null;
+  comment: string;
+  createdAt: string;
+};
+
+function referenceToContiMood(reference: ReferenceItem): ContiMoodReference | null {
+  const url = getReferencePreviewImageUrl(reference);
+  if (!url) return null;
+  // Animated raster (gif / animated webp / apng) plays back on hover from the
+  // original `file_url`, the same hover-preview contract videos use. When no
+  // separate poster exists yet (legacy upload) we skip videoUrl so we don't
+  // hover-loop the same animating asset on top of itself.
+  const animatedSource =
+    reference.kind === "video"
+      ? reference.file_url ?? null
+      : reference.kind === "gif" && reference.file_url && reference.file_url !== url
+        ? reference.file_url
+        : null;
+  return {
+    id: `library_${reference.id}`,
+    url,
+    videoUrl: animatedSource,
+    liked: false,
+    sceneRef: null,
+    comment: reference.title,
+    createdAt: reference.created_at ?? new Date().toISOString(),
+  };
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // ContiTab — 메인 컴포넌트
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1815,6 +1875,16 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
   const moodImagesRef = useRef<Array<{ url: string; sceneRef: number | null }>>([]);
   const [moodImageUrls, setMoodImageUrls] = useState<string[]>([]);
   const [moodBookmarks, setMoodBookmarks] = useState<string[]>([]);
+  const [videoPreviewByThumbnailUrl, setVideoPreviewByThumbnailUrl] = useState<Record<string, string>>({});
+  const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
+  const [linkedContiReferenceIds, setLinkedContiReferenceIds] = useState<string[]>([]);
+  // Library references attached to this project's Conti track. Kept as full
+  // `ReferenceItem` objects (not just URLs) so the Studio Compare panel can
+  // render them in their own section with kind-accurate previews — animated
+  // raster (gif / animated webp) gets a static MEDIA placeholder, videos use
+  // their poster, etc. — instead of being merged into briefs.mood_image_urls
+  // where everything degrades to a bare <img> tag.
+  const [libraryContiRefs, setLibraryContiRefs] = useState<ReferenceItem[]>([]);
 
   const fetchCurrentScenes = useCallback(async () => {
     const { data } = await supabase
@@ -1862,6 +1932,148 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     const linked = moodImagesRef.current.find((img) => img.sceneRef === sceneNumber);
     return linked?.url ?? undefined;
   }, []);
+
+  const getExportSafeContiImageUrl = useCallback(
+    (url: string): string => {
+      const thumbnailEntry = Object.entries(videoPreviewByThumbnailUrl).find(([, videoUrl]) => videoUrl === url);
+      return thumbnailEntry?.[0] ?? url;
+    },
+    [videoPreviewByThumbnailUrl],
+  );
+
+  /**
+   * Records videoPreviewByThumbnailUrl mappings so the Conti scene cards
+   * (when this library reference is later "Used" as `conti_image_url`) can
+   * still hover-play the original animation/video. Library imports no longer
+   * get merged into `briefs.mood_image_urls` — see `libraryContiRefs` for
+   * the dedicated track that powers the Compare panel's Library section.
+   */
+  const ingestLibraryContiVideoPreviews = useCallback((references: ReferenceItem[]) => {
+    const additions = references
+      .filter((reference) => reference.kind !== "link" && !reference.deleted_at)
+      .map(referenceToContiMood)
+      .filter((item): item is ContiMoodReference => Boolean(item));
+    const videoEntries = additions
+      .filter((item) => item.url && item.videoUrl)
+      .map((item) => [item.url as string, item.videoUrl as string] as const);
+    if (videoEntries.length === 0) return;
+    setVideoPreviewByThumbnailUrl((prev) => {
+      const next = { ...prev };
+      for (const [thumbnailUrl, videoUrl] of videoEntries) next[thumbnailUrl] = videoUrl;
+      return next;
+    });
+  }, []);
+
+  /**
+   * Removes URLs that belong to library references from `briefs.mood_image_urls`.
+   * Earlier app versions merged library imports into the mood column, which
+   * meant the Compare panel's Mood Reference section accumulated bare URLs of
+   * gif / animated webp files that auto-loop in any plain <img>. This one-shot
+   * sweep moves them out so the Library section becomes the single source of
+   * truth for project-attached library media.
+   */
+  const purgeLibraryUrlsFromMood = useCallback(
+    async (references: ReferenceItem[]) => {
+      if (references.length === 0) return;
+      const libraryUrls = new Set<string>();
+      for (const ref of references) {
+        const previewUrl = getReferencePreviewImageUrl(ref);
+        if (previewUrl) libraryUrls.add(previewUrl);
+        if (ref.file_url) libraryUrls.add(ref.file_url);
+        if (ref.thumbnail_url) libraryUrls.add(ref.thumbnail_url);
+      }
+      const { data: brief } = await supabase
+        .from("briefs")
+        .select("id,mood_image_urls,mood_bookmarks")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!brief?.id) return;
+      const rawMoodRows = Array.isArray((brief as any)?.mood_image_urls)
+        ? ((brief as any).mood_image_urls as any[])
+        : [];
+      const filteredMoodRows = rawMoodRows.filter((item) => {
+        const url = typeof item === "string" ? item : item?.url;
+        return url ? !libraryUrls.has(url) : true;
+      });
+      const rawBookmarks = Array.isArray((brief as any)?.mood_bookmarks)
+        ? ((brief as any).mood_bookmarks as string[])
+        : [];
+      const filteredBookmarks = rawBookmarks.filter((url) => !libraryUrls.has(url));
+      if (filteredMoodRows.length === rawMoodRows.length && filteredBookmarks.length === rawBookmarks.length) return;
+      await supabase
+        .from("briefs")
+        .update({
+          mood_image_urls: filteredMoodRows,
+          mood_bookmarks: filteredBookmarks,
+        } as any)
+        .eq("id", (brief as any).id);
+      const remainingUrls = filteredMoodRows.map((item: any) =>
+        typeof item === "string" ? item : item?.url,
+      ).filter(Boolean) as string[];
+      setMoodImageUrls(remainingUrls);
+      setMoodBookmarks(filteredBookmarks);
+      moodImagesRef.current = filteredMoodRows.map((item: any) =>
+        typeof item === "string"
+          ? { url: item, sceneRef: null }
+          : { url: item.url, sceneRef: item.sceneRef ?? null },
+      );
+    },
+    [projectId],
+  );
+
+  const refreshLinkedContiReferences = useCallback(async () => {
+    const links = await listProjectReferenceLinks({ projectId, target: "conti" });
+    const referenceIds = links.map((link) => link.reference_id);
+    setLinkedContiReferenceIds(referenceIds);
+    if (referenceIds.length === 0) {
+      setLibraryContiRefs([]);
+      return;
+    }
+    const liveReferences = await listReferencesByIds(referenceIds);
+    setLibraryContiRefs(liveReferences);
+    ingestLibraryContiVideoPreviews(liveReferences);
+    // One-shot migration sweep: earlier app versions merged library URLs into
+    // briefs.mood_image_urls, which still surfaces them in the legacy mood
+    // section. Now that the Compare panel has a dedicated Library section,
+    // strip any URL that already belongs to a library reference.
+    await purgeLibraryUrlsFromMood(liveReferences);
+  }, [ingestLibraryContiVideoPreviews, projectId, purgeLibraryUrlsFromMood]);
+
+  useEffect(() => {
+    void refreshLinkedContiReferences().catch((err) => {
+      console.warn("[conti] linked library reference sync failed", err);
+    });
+  }, [refreshLinkedContiReferences]);
+
+  // Re-pull project_reference_links every time the Library picker opens so
+  // the ATTACHED badge reflects the latest state — references that were
+  // unlinked elsewhere (e.g. via Agent's Mood Ideation delete) won't keep
+  // showing as attached here.
+  useEffect(() => {
+    if (!libraryPickerOpen) return;
+    void refreshLinkedContiReferences().catch((err) => {
+      console.warn("[conti] linked library reference refresh on picker open failed", err);
+    });
+  }, [libraryPickerOpen, refreshLinkedContiReferences]);
+
+  const importContiLibraryReferences = useCallback(
+    async (references: ReferenceItem[]) => {
+      let linked = 0;
+      for (const reference of references) {
+        if (reference.kind === "link" || reference.deleted_at || !getReferencePreviewImageUrl(reference)) continue;
+        await linkReferenceToProject({ projectId, referenceId: reference.id, target: "conti" });
+        linked += 1;
+      }
+      await refreshLinkedContiReferences();
+      toast({
+        title: "Imported from Library",
+        description: `${linked} reference${linked === 1 ? "" : "s"} attached to the Conti library track.`,
+      });
+    },
+    [projectId, refreshLinkedContiReferences, toast],
+  );
 
   // scene_versions.scenes 에 conti_image_history 가 누락된 legacy 데이터를 위해,
   // scenes 테이블에서 scene.id 기준으로 history 를 가져와 머지한다. renumber 에 영향을 받지 않는다.
@@ -1943,6 +2155,66 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
     supabase.functions.invoke("openai-image", { body: { mode: "ping" } }).catch(() => {});
   }, []);
 
+  /**
+   * Refetch mood_image_urls + mood_bookmarks for the current project so the
+   * Compare panel inside ContiStudio doesn't show stale entries that were
+   * already deleted from the Mood Ideation panel (Agent tab). This is called
+   * both on initial mount and again every time the Studio modal opens.
+   */
+  const refreshMoodImagesFromDB = useCallback(async () => {
+    if (!projectId) return;
+    const { data: brief } = await supabase
+      .from("briefs")
+      .select("mood_image_urls, mood_bookmarks")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!brief) {
+      setMoodImageUrls([]);
+      setMoodBookmarks([]);
+      moodImagesRef.current = [];
+      return;
+    }
+    const rawMoods = Array.isArray((brief as any)?.mood_image_urls)
+      ? ((brief as any).mood_image_urls as any[])
+      : [];
+    moodImagesRef.current = rawMoods.map((item: any) =>
+      typeof item === "string"
+        ? { url: item, sceneRef: null }
+        : { url: item.url, sceneRef: item.sceneRef ?? null },
+    );
+    setMoodImageUrls(rawMoods.map((item: any) => (typeof item === "string" ? item : item.url)));
+    setVideoPreviewByThumbnailUrl((prev) => {
+      const next: Record<string, string> = {};
+      for (const item of rawMoods) {
+        if (typeof item !== "string" && item?.url && item?.videoUrl) next[item.url] = item.videoUrl;
+      }
+      // Preserve any in-memory mappings whose key still exists in the fresh
+      // mood list — drops mappings for items that were deleted upstream.
+      const validKeys = new Set(rawMoods.map((m: any) => (typeof m === "string" ? m : m?.url)).filter(Boolean));
+      for (const [k, v] of Object.entries(prev)) {
+        if (validKeys.has(k) && !(k in next)) next[k] = v;
+      }
+      return next;
+    });
+    const likedFromRows = rawMoods
+      .filter((item: any) => typeof item !== "string" && item.liked)
+      .map((item: any) => item.url as string);
+    const dbBookmarks = Array.isArray((brief as any)?.mood_bookmarks)
+      ? ((brief as any).mood_bookmarks as string[])
+      : [];
+    setMoodBookmarks(Array.from(new Set([...likedFromRows, ...dbBookmarks])));
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!studioScene) return;
+    void refreshMoodImagesFromDB();
+    void refreshLinkedContiReferences().catch((err) => {
+      console.warn("[conti] linked library reference refresh on studio open failed", err);
+    });
+  }, [studioScene, refreshMoodImagesFromDB, refreshLinkedContiReferences]);
+
   useEffect(() => {
     // in-flight 스타일 변형/일괄 생성이 진행 중이면, DB 로부터 scene 을 다시 읽어
     // 모듈 store 를 덮어쓰지 않는다. 모듈 store 가 DB 보다 앞서있을 수 있기 때문.
@@ -1980,6 +2252,13 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
               : { url: item.url, sceneRef: item.sceneRef ?? null },
           );
           setMoodImageUrls(rawMoods.map((item: any) => (typeof item === "string" ? item : item.url)));
+          setVideoPreviewByThumbnailUrl((prev) => {
+            const next = { ...prev };
+            for (const item of rawMoods) {
+              if (typeof item !== "string" && item?.url && item?.videoUrl) next[item.url] = item.videoUrl;
+            }
+            return next;
+          });
           const likedUrls = rawMoods
             .filter((item: any) => typeof item !== "string" && item.liked)
             .map((item: any) => item.url as string);
@@ -3835,6 +4114,14 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
+      <ReferencePickerDrawer
+        open={libraryPickerOpen}
+        onOpenChange={setLibraryPickerOpen}
+        target="conti"
+        selectedIds={linkedContiReferenceIds}
+        maxSelectable={12}
+        onImport={importContiLibraryReferences}
+      />
       {/* ── 버전 탭 바 ── */}
       {versions.length > 0 && (
         <DndContext sensors={versionSensors} collisionDetection={closestCenter} onDragEnd={handleVersionDragEnd}>
@@ -4001,6 +4288,20 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
         <div className="flex-1" />
 
         <div className="flex items-center gap-1">
+          <button
+            onClick={() => setLibraryPickerOpen(true)}
+            className="h-6 flex items-center gap-1.5 px-2 text-[10px] font-mono transition-colors"
+            style={{
+              background: "rgba(255,255,255,0.04)",
+              color: "rgba(255,255,255,0.55)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              cursor: "pointer",
+              borderRadius: 0,
+            }}
+          >
+            <Library className="h-3 w-3" />
+            Import from Library
+          </button>
           {(["single", "grid2", "auto"] as ViewMode[]).map((m) => {
             const icons = {
               single: <LayoutList className="w-3 h-3" />,
@@ -4432,6 +4733,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
                           isEditGenerating={editGeneratingIds.has(scene.id)}
                           allScenes={activeScenes}
                           videoFormat={videoFormat}
+                          videoPreviewUrl={scene.conti_image_url ? videoPreviewByThumbnailUrl[scene.conti_image_url] : undefined}
                         />
                       </div>
                     );
@@ -4622,6 +4924,8 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           moodReferenceUrl={getMoodReferenceUrl(studioScene.scene_number)}
           moodImages={moodImageUrls}
           moodBookmarks={moodBookmarks}
+          libraryReferences={libraryContiRefs}
+          onOpenLibraryPicker={() => setLibraryPickerOpen(true)}
           initialTab={studioInitialTab}
           onClose={() => {
             setStudioScene(null);
@@ -4629,6 +4933,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
           }}
           onSaveInpaint={async (url, targetScene = studioScene) => {
             if (!targetScene) return;
+            const contiImageUrl = getExportSafeContiImageUrl(url);
             const current = getSceneState(projectId)?.scenes ?? activeScenes;
             const liveScene = current.find((s) => s.id === targetScene.id);
             pushHistory(targetScene.id, liveScene?.conti_image_url ?? targetScene.conti_image_url);
@@ -4640,7 +4945,7 @@ export const ContiTab = ({ projectId, videoFormat }: Props) => {
             const latest = getSceneState(projectId)?.scenes ?? current;
             await updateVersionScenes(
               latest.map((s) =>
-                s.id === targetScene.id ? { ...s, conti_image_url: url, conti_image_crop: null } : s,
+                s.id === targetScene.id ? { ...s, conti_image_url: contiImageUrl, conti_image_crop: null } : s,
               ),
             );
             bumpCache(targetScene.scene_number);

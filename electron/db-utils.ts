@@ -42,6 +42,21 @@ const TABLE_COLUMNS: Record<string, ReadonlySet<string>> = {
   ]),
   chat_logs: new Set(["id", "project_id", "role", "content", "created_at"]),
   folders: new Set(["id", "user_id", "name", "created_at"]),
+  reference_items: new Set([
+    "id", "kind", "title", "file_url", "thumbnail_url", "mime_type", "file_size",
+    "content_hash", "duration_sec", "width", "height", "tags", "notes", "rating",
+    "is_favorite", "source_url", "cover_at_sec", "timestamp_notes", "color_palette",
+    "ai_suggestions", "classification_status", "classified_at", "origin_project_id",
+    "source_app", "source_library", "source_id", "imported_at", "created_at",
+    "pinned_at", "deleted_at", "updated_at", "last_used_at",
+  ]),
+  project_reference_links: new Set([
+    "id", "project_id", "reference_id", "target", "annotation", "time_range",
+    "created_at", "updated_at",
+  ]),
+  saved_filters: new Set([
+    "id", "name", "query", "source_app", "source_id", "created_at", "updated_at",
+  ]),
 };
 
 function assertTable(table: string): asserts table is keyof typeof TABLE_COLUMNS {
@@ -76,9 +91,22 @@ export const JSON_COLUMNS = new Set<string>([
   "sketches",
   "reference_image_urls",
   "thumbnail_crop",
+  "tags",
+  "timestamp_notes",
+  "color_palette",
+  "ai_suggestions",
+  "time_range",
+  "query",
 ]);
 
-const BOOLEAN_COLUMNS = new Set<string>(["is_transition", "is_final", "is_highlight", "is_active", "is_default"]);
+const BOOLEAN_COLUMNS = new Set<string>([
+  "is_transition",
+  "is_final",
+  "is_highlight",
+  "is_active",
+  "is_default",
+  "is_favorite",
+]);
 
 export function serializeValue(key: string, value: unknown): unknown {
   if (

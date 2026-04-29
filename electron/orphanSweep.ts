@@ -26,27 +26,50 @@ import { getDb } from "./db";
 import { getStorageBasePath } from "./paths";
 import { getLocalServerBaseUrl } from "./constants";
 
-const BUCKETS = ["contis", "assets", "briefs", "mood", "style-presets"] as const;
-type Bucket = (typeof BUCKETS)[number];
+const STARTUP_SWEEP_BUCKETS = ["contis", "assets", "briefs", "mood", "style-presets"] as const;
+const CLEANUP_BUCKETS = ["contis", "assets", "briefs", "mood", "style-presets", "references"] as const;
+type Bucket = (typeof CLEANUP_BUCKETS)[number];
 
 /** 최근 N 초 이내 수정/생성된 파일은 orphan sweep 대상에서 제외. */
 const RECENT_FILE_GRACE_MS = 5 * 60 * 1000;
 
 /** URL → { bucket, filePath } 역파싱. Public URL 포맷:
  *    ${LOCAL_SERVER_BASE_URL}/storage/file/<bucket>/<filePath...>
+ *  과거 실행에서 fallback port 로 저장된 URL, local-file:// URL 도 같은 key 로 정규화한다.
  *  (`?t=...` 같은 cache-buster 쿼리스트링이 섞여있을 수 있음) */
 function parseStorageUrl(url: string): { bucket: string; filePath: string } | null {
   if (!url || typeof url !== "string") return null;
+  let rest = "";
   const prefix = `${getLocalServerBaseUrl()}/storage/file/`;
-  if (!url.startsWith(prefix)) return null;
-  let rest = url.slice(prefix.length);
+  if (url.startsWith(prefix)) {
+    rest = url.slice(prefix.length);
+  } else {
+    const httpMatch = url.match(/^https?:\/\/(?:127\.0\.0\.1|localhost):\d+\/storage\/file\/(.+)$/i);
+    if (httpMatch?.[1]) {
+      rest = httpMatch[1];
+    } else if (url.startsWith("local-file://")) {
+      try {
+        let rawPath = decodeURIComponent(url.slice("local-file://".length).split(/[?#]/)[0]).replace(/\//g, path.sep);
+        if (/^\\[A-Za-z]:/.test(rawPath)) rawPath = rawPath.slice(1);
+        const base = path.resolve(getStorageBasePath());
+        const rel = path.relative(base, path.resolve(rawPath));
+        if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+        rest = rel.split(path.sep).join("/");
+      } catch {
+        return null;
+      }
+    } else {
+      return null;
+    }
+  }
   const qIdx = rest.search(/[?#]/);
   if (qIdx >= 0) rest = rest.slice(0, qIdx);
   const slash = rest.indexOf("/");
   if (slash <= 0) return null;
-  const bucket = rest.slice(0, slash);
+  let bucket: string;
   let filePath: string;
   try {
+    bucket = decodeURIComponent(rest.slice(0, slash));
     filePath = decodeURIComponent(rest.slice(slash + 1));
   } catch {
     return null;
@@ -140,6 +163,22 @@ function collectReferencedKeys(): Set<string> {
     collectUrlsFromJson(safeJsonParse(row.reference_image_urls), urls);
   }
 
+  // reference_items is intentionally collected before the references bucket is
+  // ever swept. That keeps future cleanup changes from drifting into a
+  // "delete every library file" failure mode.
+  try {
+    for (const row of db
+      .prepare(`SELECT file_url, thumbnail_url, timestamp_notes, ai_suggestions FROM reference_items`)
+      .all() as { file_url: string | null; thumbnail_url: string | null; timestamp_notes: string | null; ai_suggestions: string | null }[]) {
+      addUrl(row.file_url);
+      addUrl(row.thumbnail_url);
+      collectUrlsFromJson(safeJsonParse(row.timestamp_notes), urls);
+      collectUrlsFromJson(safeJsonParse(row.ai_suggestions), urls);
+    }
+  } catch {
+    // Older DBs before the global reference library simply do not have this table.
+  }
+
   // URL 을 <bucket>/<filePath> 키로 정규화.
   const keys = new Set<string>();
   for (const u of urls) {
@@ -194,39 +233,28 @@ function listBucketFiles(
   return out;
 }
 
-/** 실제 sweep. App 시작 시 한 번 호출한다.
- *  - 디스크 파일 목록 - DB 참조 목록 = 지울 대상
- *  - 하지만 최근 N분 내 수정된 파일은 건드리지 않음 (race 방지). */
-export function sweepOrphanFiles(): {
-  filesDeleted: number;
-  bytesFreed: number;
+function collectOrphanCandidates(buckets: readonly Bucket[]): {
+  totalFiles: number;
+  referenced: Set<string>;
+  candidates: Array<{ key: string; absPath: string; size: number; mtimeMs: number; bucket: Bucket }>;
   skippedRecent: number;
-  durationMs: number;
+  abortedReason?: string;
 } {
-  const startedAt = Date.now();
   const storageBase = getStorageBasePath();
-
   let referenced: Set<string>;
   try {
     referenced = collectReferencedKeys();
   } catch (err) {
-    // DB 쿼리 실패 시에는 절대 sweep 하지 않는다 — 참조 없음으로 오인돼
-    // 전체를 날릴 수 있음.
     console.error("[orphanSweep] aborted: collectReferencedKeys failed:", err);
-    return { filesDeleted: 0, bytesFreed: 0, skippedRecent: 0, durationMs: Date.now() - startedAt };
+    return { totalFiles: 0, referenced: new Set(), candidates: [], skippedRecent: 0, abortedReason: "reference collection failed" };
   }
 
-  // 디스크 워킹은 DB 스냅샷을 뜬 뒤에 수행 — 새로 들어올 가능성이 있는
-  // 파일은 grace window 로 방어하지만, 반대로 "방금 업로드 + DB 기록 완료"
-  // 된 파일이 디스크에 아직 안 나타날 가능성은 없으므로 순서는 이쪽이 맞다.
-
-  // 전체 on-disk 파일 대비 orphan 후보 수집 먼저 — 실제 unlink 는 나중에.
   let totalFiles = 0;
   const candidates: Array<{ key: string; absPath: string; size: number; mtimeMs: number; bucket: Bucket }> = [];
   let skippedRecent = 0;
   const now = Date.now();
 
-  for (const bucket of BUCKETS) {
+  for (const bucket of buckets) {
     const files = listBucketFiles(bucket, storageBase);
     totalFiles += files.length;
     for (const f of files) {
@@ -239,6 +267,110 @@ export function sweepOrphanFiles(): {
     }
   }
 
+  if (referenced.size === 0 && candidates.length > 0) {
+    return { totalFiles, referenced, candidates: [], skippedRecent, abortedReason: "0 DB references; refusing cleanup" };
+  }
+  if (totalFiles > 20 && candidates.length > totalFiles * 0.5) {
+    return { totalFiles, referenced, candidates: [], skippedRecent, abortedReason: "candidate count exceeds 50% safety cap" };
+  }
+
+  return { totalFiles, referenced, candidates, skippedRecent };
+}
+
+export function previewOrphanFiles(opts: { includeReferences?: boolean } = {}): {
+  total_files: number;
+  orphan_files: number;
+  bytes_reclaimable: number;
+  skipped_recent: number;
+  sample: Array<{ key: string; size: number; mtimeMs: number }>;
+  aborted_reason?: string;
+} {
+  const buckets = opts.includeReferences ? CLEANUP_BUCKETS : STARTUP_SWEEP_BUCKETS;
+  const result = collectOrphanCandidates(buckets);
+  return {
+    total_files: result.totalFiles,
+    orphan_files: result.candidates.length,
+    bytes_reclaimable: result.candidates.reduce((sum, file) => sum + file.size, 0),
+    skipped_recent: result.skippedRecent,
+    sample: result.candidates.slice(0, 20).map(({ key, size, mtimeMs }) => ({ key, size, mtimeMs })),
+    aborted_reason: result.abortedReason,
+  };
+}
+
+export function cleanupOrphanFiles(opts: { includeReferences?: boolean } = {}): {
+  filesDeleted: number;
+  bytesFreed: number;
+  skippedRecent: number;
+  durationMs: number;
+} {
+  const startedAt = Date.now();
+  const buckets = opts.includeReferences ? CLEANUP_BUCKETS : STARTUP_SWEEP_BUCKETS;
+  const { candidates, skippedRecent, abortedReason } = collectOrphanCandidates(buckets);
+  if (abortedReason) {
+    console.warn("[orphanSweep] cleanup aborted:", abortedReason);
+    return { filesDeleted: 0, bytesFreed: 0, skippedRecent, durationMs: Date.now() - startedAt };
+  }
+
+  let filesDeleted = 0;
+  let bytesFreed = 0;
+  for (const f of candidates) {
+    try {
+      fs.unlinkSync(f.absPath);
+      filesDeleted++;
+      bytesFreed += f.size;
+    } catch (err) {
+      console.warn("[orphanSweep] unlink failed", f.absPath, (err as Error).message);
+    }
+  }
+  removeEmptyBucketDirs(buckets);
+  return { filesDeleted, bytesFreed, skippedRecent, durationMs: Date.now() - startedAt };
+}
+
+function removeEmptyBucketDirs(buckets: readonly Bucket[]): void {
+  const storageBase = getStorageBasePath();
+  for (const bucket of buckets) {
+    const bucketDir = path.join(storageBase, bucket);
+    if (!fs.existsSync(bucketDir)) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(bucketDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      if (!ent.isDirectory()) continue;
+      const sub = path.join(bucketDir, ent.name);
+      try {
+        const inner = fs.readdirSync(sub);
+        if (inner.length === 0) fs.rmdirSync(sub);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/** 실제 sweep. App 시작 시 한 번 호출한다.
+ *  - 디스크 파일 목록 - DB 참조 목록 = 지울 대상
+ *  - 하지만 최근 N분 내 수정된 파일은 건드리지 않음 (race 방지). */
+export function sweepOrphanFiles(): {
+  filesDeleted: number;
+  bytesFreed: number;
+  skippedRecent: number;
+  durationMs: number;
+} {
+  const startedAt = Date.now();
+  const { totalFiles, referenced, candidates, skippedRecent, abortedReason } = collectOrphanCandidates(STARTUP_SWEEP_BUCKETS);
+  if (abortedReason) {
+    console.warn("[orphanSweep] aborted:", abortedReason);
+    return { filesDeleted: 0, bytesFreed: 0, skippedRecent, durationMs: Date.now() - startedAt };
+  }
+
+  // 디스크 워킹은 DB 스냅샷을 뜬 뒤에 수행 — 새로 들어올 가능성이 있는
+  // 파일은 grace window 로 방어하지만, 반대로 "방금 업로드 + DB 기록 완료"
+  // 된 파일이 디스크에 아직 안 나타날 가능성은 없으므로 순서는 이쪽이 맞다.
+
+  // 전체 on-disk 파일 대비 orphan 후보 수집 먼저 — 실제 unlink 는 나중에.
   // 안전장치: DB 참조가 비어있다면 (새 프로필 / 빈 DB) 디스크도 비어있어야
   // 자연스럽다. 참조가 0 이면서 삭제 후보가 있다면 뭔가 잘못된 상태 →
   // 경고만 남기고 sweep 스킵.
@@ -273,26 +405,7 @@ export function sweepOrphanFiles(): {
   }
 
   // 빈 projectId 폴더는 자진 정리 (대부분 프로젝트 삭제 후 잔존).
-  for (const bucket of BUCKETS) {
-    const bucketDir = path.join(storageBase, bucket);
-    if (!fs.existsSync(bucketDir)) continue;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(bucketDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const ent of entries) {
-      if (!ent.isDirectory()) continue;
-      const sub = path.join(bucketDir, ent.name);
-      try {
-        const inner = fs.readdirSync(sub);
-        if (inner.length === 0) fs.rmdirSync(sub);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
+  removeEmptyBucketDirs(STARTUP_SWEEP_BUCKETS);
 
   const durationMs = Date.now() - startedAt;
   console.log(

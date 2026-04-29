@@ -98,6 +98,17 @@ const computeTaggedAssets = (
   return out;
 };
 
+const PLAYABLE_MEDIA_URL_RE = /\.(gif|apng|mp4|webm|mov|m4v)(?:[?#].*)?$/i;
+const ANIMATED_IMAGE_URL_RE = /\.(gif|apng)(?:[?#].*)?$/i;
+const isPlayableMediaUrl = (url: string | null | undefined): boolean => {
+  if (!url) return false;
+  return PLAYABLE_MEDIA_URL_RE.test(url.split("?")[0] ?? url);
+};
+const isAnimatedImageUrl = (url: string | null | undefined): boolean => {
+  if (!url) return false;
+  return ANIMATED_IMAGE_URL_RE.test(url.split("?")[0] ?? url);
+};
+
 const TRANSITION_CATEGORY_KO: Record<TransitionCategory, string> = {
   "Camera Movement": "카메라 무브먼트",
   "Light & Optics": "빛/광학",
@@ -921,6 +932,7 @@ export const SortableContiCard = memo(
     isEditGenerating,
     allScenes,
     videoFormat,
+    videoPreviewUrl,
   }: {
     scene: Scene;
     isGenerating: boolean;
@@ -970,20 +982,60 @@ export const SortableContiCard = memo(
     isEditGenerating?: boolean;
     allScenes?: Scene[];
     videoFormat?: string;
+    videoPreviewUrl?: string;
   }) => {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: scene.id });
     const dndStyle = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1 };
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const cardRef = useRef<HTMLDivElement>(null);
+    const imageAreaRef = useRef<HTMLDivElement>(null);
 
     const [imgHov, setImgHov] = useState(false);
+    const [isHoverPlaying, setIsHoverPlaying] = useState(false);
     const [moreHov, setMoreHov] = useState(false);
     const [menuOpen, setMenuOpen] = useState(false);
     const [menuOpenLeft, setMenuOpenLeft] = useState(false);
     const [isDragOver, setIsDragOver] = useState(false);
     const [adjustOpen, setAdjustOpen] = useState(false);
     const t = useT();
+
+    const stopHoverVideo = useCallback(() => {
+      setIsHoverPlaying(false);
+      setImgHov(false);
+    }, []);
+
+    useEffect(() => {
+      setIsHoverPlaying(false);
+      setImgHov(false);
+    }, [scene.id, videoPreviewUrl]);
+
+    // Bulletproof hover detection: rAF poll of CSS :hover state on the image
+    // area. Avoids any reliance on pointer/mouse events that Electron + dnd-kit
+    // can occasionally drop, so the <video> element is guaranteed to unmount
+    // the moment the cursor leaves the card.
+    useEffect(() => {
+      if (!videoPreviewUrl) return;
+      let raf = 0;
+      let prev: boolean | null = null;
+      const tick = () => {
+        const el = imageAreaRef.current;
+        if (el) {
+          const isHov = el.matches(":hover");
+          if (isHov !== prev) {
+            prev = isHov;
+            setIsHoverPlaying(isHov);
+            if (!isHov) setImgHov(false);
+          }
+        }
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+      return () => {
+        cancelAnimationFrame(raf);
+        setIsHoverPlaying(false);
+      };
+    }, [videoPreviewUrl]);
 
     const [localTitle, setLocalTitle] = useState(scene.title ?? "");
     const [localCam, setLocalCam] = useState(scene.camera_angle ?? "");
@@ -1009,7 +1061,8 @@ export const SortableContiCard = memo(
     }, [menuOpen]);
 
     const fmt = videoFormat ?? "horizontal";
-    const imgSrc = scene.conti_image_url
+    const isScenePlayableMedia = isPlayableMediaUrl(scene.conti_image_url);
+    const imgSrc = scene.conti_image_url && !isScenePlayableMedia
       ? cacheBuster
         ? `${scene.conti_image_url}?t=${cacheBuster}`
         : scene.conti_image_url
@@ -1018,6 +1071,19 @@ export const SortableContiCard = memo(
     const hasImage = !!imgSrc && !isBusy;
     const showImgOverlay = imgHov || selected;
     const showMoreBtn = imgHov || menuOpen;
+    const showVideoPreview = Boolean(videoPreviewUrl && imgSrc && isHoverPlaying && !isBusy);
+
+    useEffect(() => {
+      const onVisibilityChange = () => {
+        if (document.visibilityState !== "visible") stopHoverVideo();
+      };
+      window.addEventListener("blur", stopHoverVideo);
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      return () => {
+        window.removeEventListener("blur", stopHoverVideo);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      };
+    }, [stopHoverVideo]);
     const sketchGenSnapshot = useSyncExternalStore(
       useCallback(
         (onStoreChange) => subscribeSketchGen(scene.project_id, scene.id, onStoreChange),
@@ -1249,6 +1315,7 @@ export const SortableContiCard = memo(
 
           {/* ── IMAGE ── */}
           <div
+            ref={imageAreaRef}
             onMouseEnter={() => setImgHov(true)}
             onMouseLeave={() => setImgHov(false)}
             className={`relative ${aspectClass} overflow-hidden shrink-0`}
@@ -1321,34 +1388,68 @@ export const SortableContiCard = memo(
                 </span>
               </div>
             ) : imgSrc ? (
-              cardImageLayout ? (
-                <div
-                  style={{
-                    position: "absolute",
-                    width: `${cardImageLayout.wPct}%`,
-                    height: `${cardImageLayout.hPct}%`,
-                    left: `${cardImageLayout.leftPct}%`,
-                    top: `${cardImageLayout.topPct}%`,
-                    backgroundImage: `url(${imgSrc})`,
-                    backgroundSize: "cover",
-                    backgroundRepeat: "no-repeat",
-                    backgroundColor: "#111",
-                    transform: activeCrop?.rotate ? `rotate(${activeCrop.rotate}deg)` : undefined,
-                    transformOrigin: "center center",
-                  }}
-                />
-              ) : (
-                <div
-                  className="w-full h-full"
-                  style={{
-                    backgroundImage: `url(${imgSrc})`,
-                    backgroundSize: "cover",
-                    backgroundPosition: "center",
-                    backgroundRepeat: "no-repeat",
-                    backgroundColor: "#111",
-                  }}
-                />
-              )
+              <>
+                {cardImageLayout ? (
+                  <div
+                    style={{
+                      position: "absolute",
+                      width: `${cardImageLayout.wPct}%`,
+                      height: `${cardImageLayout.hPct}%`,
+                      left: `${cardImageLayout.leftPct}%`,
+                      top: `${cardImageLayout.topPct}%`,
+                      backgroundImage: `url(${imgSrc})`,
+                      backgroundSize: "cover",
+                      backgroundRepeat: "no-repeat",
+                      backgroundColor: "#111",
+                      transform: activeCrop?.rotate ? `rotate(${activeCrop.rotate}deg)` : undefined,
+                      transformOrigin: "center center",
+                    }}
+                  />
+                ) : (
+                  <div
+                    className="w-full h-full"
+                    style={{
+                      backgroundImage: `url(${imgSrc})`,
+                      backgroundSize: "cover",
+                      backgroundPosition: "center",
+                      backgroundRepeat: "no-repeat",
+                      backgroundColor: "#111",
+                    }}
+                  />
+                )}
+                {showVideoPreview ? (
+                  isAnimatedImageUrl(videoPreviewUrl) ? (
+                    <img
+                      key={videoPreviewUrl}
+                      src={videoPreviewUrl!}
+                      alt=""
+                      className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+                      loading="eager"
+                      decoding="async"
+                    />
+                  ) : (
+                    <video
+                      key={videoPreviewUrl}
+                      src={videoPreviewUrl}
+                      className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+                      autoPlay
+                      muted
+                      loop
+                      playsInline
+                      preload="metadata"
+                    />
+                  )
+                ) : videoPreviewUrl ? (
+                  <span className="pointer-events-none absolute left-2 top-2 bg-black/70 px-1.5 py-0.5 font-mono text-[9px] text-white">
+                    {isAnimatedImageUrl(videoPreviewUrl) ? "GIF" : "VIDEO"}
+                  </span>
+                ) : null}
+              </>
+            ) : isScenePlayableMedia ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-white/65">
+                <Images className="h-5 w-5" />
+                <span className="font-mono text-[10px]">MEDIA</span>
+              </div>
             ) : scene.is_transition ? (
               (() => {
                 const idx = allScenes?.findIndex((s) => s.id === scene.id) ?? -1;

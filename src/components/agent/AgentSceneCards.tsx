@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from "react";
-import { GripVertical, Sparkles, Trash2, X } from "lucide-react";
+import { GripVertical, Images, Sparkles, Trash2, X } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
@@ -18,6 +18,16 @@ import {
   ASSET_ICON,
 } from "./agentTypes";
 import { useT } from "@/lib/uiLanguage";
+
+// Same definition as in SortableContiCard / ContiStudio so playable-media URLs
+// (.gif/.apng + the usual video extensions) get rendered as a static "MEDIA"
+// placeholder instead of being loaded into an <img> tag — otherwise animated
+// raster images auto-loop on the Agent scene card with no way to stop them.
+const PLAYABLE_MEDIA_URL_RE = /\.(gif|apng|mp4|webm|mov|m4v)(?:[?#].*)?$/i;
+const isPlayableMediaUrl = (url: string | null | undefined): boolean => {
+  if (!url) return false;
+  return PLAYABLE_MEDIA_URL_RE.test(url.split("?")[0] ?? url);
+};
 
 /* ━━━━━ TagChip ━━━━━
  * 콘티탭 씬카드(`contiInternals.TagChip`)와 동일 스타일로 통일:
@@ -1202,18 +1212,37 @@ export const SortableSceneCard = React.memo(function SortableSceneCard({
           }}
         >
           {scene.conti_image_url ? (
-            <img
-              src={scene.conti_image_url}
-              alt="mood"
-              loading="lazy"
-              style={{
-                position: "absolute",
-                inset: 0,
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                display: "block",
-              }} decoding="async" />
+            isPlayableMediaUrl(scene.conti_image_url) ? (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                  background: "rgba(0,0,0,0.7)",
+                  color: "rgba(255,255,255,0.65)",
+                }}
+              >
+                <Images width={20} height={20} />
+                <span style={{ fontSize: 10, fontFamily: "monospace" }}>MEDIA</span>
+              </div>
+            ) : (
+              <img
+                src={scene.conti_image_url}
+                alt="mood"
+                loading="lazy"
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  display: "block",
+                }} decoding="async" />
+            )
           ) : (
             <div
               style={{

@@ -28,13 +28,23 @@ export interface VideoMeta {
   heightPx: number;
 }
 
-const MAX_BYTES = 200 * 1024 * 1024;
-const MAX_DURATION_SEC = 5 * 60;
+export const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+export const MAX_DURATION_SEC = 5 * 60;
 const TARGET_WIDTH = 768;
 
 export function validateVideoFile(file: File): { ok: true } | { ok: false; reason: string } {
   if (!file.type.startsWith("video/")) return { ok: false, reason: "비디오 파일이 아닙니다." };
-  if (file.size > MAX_BYTES) return { ok: false, reason: "200MB 이하 영상만 지원합니다." };
+  if (file.size > MAX_VIDEO_BYTES) return { ok: false, reason: "200MB 이하 영상만 지원합니다." };
+  return { ok: true };
+}
+
+export function validateVideoMeta(meta: VideoMeta): { ok: true } | { ok: false; reason: string } {
+  if (meta.durationSec > MAX_DURATION_SEC) {
+    return {
+      ok: false,
+      reason: `5분 이하 영상만 지원합니다. 현재 길이: ${Math.round(meta.durationSec)}초`,
+    };
+  }
   return { ok: true };
 }
 
@@ -58,22 +68,26 @@ export async function extractFirstFrame(file: File): Promise<{ meta: VideoMeta; 
  *
  * `range` 가 주어지면 해당 구간 `[startSec..endSec]` 안에서 균등 추출한다.
  * 구간이 영상 길이를 벗어나거나 폭이 0.2s 미만이면 전체 구간으로 폴백.
+ *
+ * 입력은 `File` 또는 `string` (storage URL). Library 에서 import 된 영상은
+ * 원본 File 핸들이 없으므로 URL 경로로 들어오는 것이 정상이며, 둘 다 동일한
+ * `<video>` element 디코딩 경로를 사용한다.
  */
 export async function sampleFrames(
-  file: File,
+  source: File | string,
   count: number,
   range?: { startSec: number; endSec: number },
 ): Promise<{ meta: VideoMeta; frames: ExtractedFrame[] }> {
-  const url = URL.createObjectURL(file);
+  const isFile = source instanceof File;
+  const url = isFile ? URL.createObjectURL(source) : source;
   try {
     const meta = await probeVideoMeta(url);
-    if (meta.durationSec > MAX_DURATION_SEC) {
-      throw new Error(`Only videos up to ${MAX_DURATION_SEC}s are supported. Current duration: ${Math.round(meta.durationSec)}s.`);
-    }
+    const validation = validateVideoMeta(meta);
+    if (validation.ok !== true) throw new Error(validation.reason);
     const times = computeUniformTimes(meta.durationSec, Math.max(1, count), range);
     return await sampleFromObjectUrl(url, times);
   } finally {
-    URL.revokeObjectURL(url);
+    if (isFile) URL.revokeObjectURL(url);
   }
 }
 

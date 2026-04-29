@@ -5,7 +5,7 @@ import {
   type MoodImageModel,
 } from "@/lib/moodIdeation";
 import { supabase } from "@/lib/supabase";
-import { Trash2, Loader2, X, Check, ExternalLink, Sparkles, ChevronLeft, ChevronRight } from "lucide-react";
+import { Trash2, Loader2, X, Check, ExternalLink, Images, Sparkles, ChevronLeft, ChevronRight, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { useT } from "@/lib/uiLanguage";
@@ -32,6 +32,16 @@ import {
 
 type MoodModelOption = "gpt-image-1.5-ref" | "gpt-image-1.5-text" | "gpt-image-2" | "nano-banana-2";
 const MOOD_MODEL_OPTION_DEFAULT: MoodModelOption = "gpt-image-1.5-ref";
+
+// Mirror of the playable-media regex used in SortableContiCard / ContiStudio.
+// Library imports may surface gif/animated webp/apng URLs in mood_image_urls;
+// rendering them via <img> would auto-loop the animation. Routing them to a
+// static placeholder keeps the panel calm.
+const PLAYABLE_MEDIA_URL_RE = /\.(gif|apng|mp4|webm|mov|m4v)(?:[?#].*)?$/i;
+const isPlayableMediaUrl = (url: string | null | undefined): boolean => {
+  if (!url) return false;
+  return PLAYABLE_MEDIA_URL_RE.test(url.split("?")[0] ?? url);
+};
 
 /* ━━━━━ Mood generation result persistence ━━━━━
  * AgentTab(부모) 이 언마운트된 상태에서 generation 이 끝날 수 있으므로
@@ -114,6 +124,10 @@ const MoodCard = ({
 
   useEffect(() => {
     setImageLoaded(false);
+    // Playable media (gif/apng/video) renders a synchronous placeholder, so
+    // there's no <img onLoad> to flip imageLoaded. Mark it loaded immediately
+    // so the wrapper's loading shimmer doesn't sit on top of the placeholder.
+    if (isPlayableMediaUrl(img.url)) setImageLoaded(true);
   }, [img.url]);
 
   // ── url === null : 스켈레톤을 MoodCard 안에서 직접 렌더링
@@ -192,25 +206,44 @@ const MoodCard = ({
         onLightbox();
       }}
     >
-      <img
-        src={img.url}
-        alt="mood"
-        style={{
-          position: "absolute",
-          inset: 0,
-          width: "100%",
-          height: "100%",
-          objectFit: "cover",
-          display: "block",
-          opacity: imageLoaded ? 1 : 0,
-          transition: "opacity 0.45s ease",
-        }}
-        loading="lazy"
-        onLoad={(e) => {
-          setImageLoaded(true);
-        }}
-        onError={() => onBroken?.()}
-        decoding="async" />
+      {isPlayableMediaUrl(img.url) ? (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 6,
+            background: "rgba(0,0,0,0.65)",
+            color: "rgba(255,255,255,0.7)",
+          }}
+          onLoad={() => setImageLoaded(true)}
+        >
+          <Images width={20} height={20} />
+          <span style={{ fontSize: 10, fontFamily: "monospace" }}>MEDIA</span>
+        </div>
+      ) : (
+        <img
+          src={img.url}
+          alt="mood"
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            display: "block",
+            opacity: imageLoaded ? 1 : 0,
+            transition: "opacity 0.45s ease",
+          }}
+          loading="lazy"
+          onLoad={() => setImageLoaded(true)}
+          onError={() => onBroken?.()}
+          decoding="async"
+        />
+      )}
       {!imageLoaded && (
         <div
           style={{
@@ -454,6 +487,7 @@ export const MoodIdeationPanel = ({
   onAttachToScene,
   onDetachFromScene,
   onDeleteMoodImages,
+  onImportFromLibrary,
 }: {
   projectId: string;
   briefAnalysis: Analysis | null;
@@ -467,6 +501,7 @@ export const MoodIdeationPanel = ({
   onAttachToScene: (imageUrl: string, sceneId: string, moodImageId: string, sceneNumber: number) => Promise<void>;
   onDetachFromScene: (moodImageId: string, sceneNumber: number) => Promise<void>;
   onDeleteMoodImages: (ids: string[]) => Promise<void>;
+  onImportFromLibrary?: () => void;
 }) => {
   const t = useT();
   useEffect(() => {
@@ -1162,6 +1197,29 @@ export const MoodIdeationPanel = ({
             </svg>
             {likedCount > 0 ? t("mood.savedCount", { count: likedCount }) : t("mood.saved")}
           </button>
+          {onImportFromLibrary ? (
+            <button
+              onClick={onImportFromLibrary}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "0 10px",
+                height: 28,
+                borderRadius: 0,
+                fontSize: 11,
+                fontWeight: 500,
+                background: "transparent",
+                color: "hsl(var(--muted-foreground))",
+                border: "0.5px solid hsl(var(--border))",
+                cursor: "pointer",
+                transition: "all 0.15s",
+              }}
+            >
+              <Library className="h-3 w-3" />
+              Library
+            </button>
+          ) : null}
           {/* Column slider + count */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{displayImages.length} imgs</span>

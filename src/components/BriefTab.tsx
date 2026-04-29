@@ -6,6 +6,9 @@ import { subscribeModel } from "@/lib/modelPreference";
 import { getModelMeta } from "@/lib/modelCatalog";
 import { ensureSettingsLoaded, getSettingsCached } from "@/lib/settingsCache";
 import ModelPicker from "@/components/common/ModelPicker";
+import { ReferencePickerDrawer } from "@/components/library/ReferencePickerDrawer";
+import { RecommendedReferences } from "@/components/library/RecommendedReferences";
+import { buildBriefSignalsFromAnalysis } from "@/lib/referenceRecommender";
 import {
   type RefItem,
   type RefImageItem,
@@ -26,6 +29,14 @@ import {
 } from "@/lib/refItems";
 import { ingestYoutube, isYoutubeUrl, YOUTUBE_URL_REGEX } from "@/lib/youtube";
 import { extractFirstFrame, sampleFrames, validateVideoFile } from "@/lib/videoFrames";
+import {
+  linkReferenceToProject,
+  listProjectReferenceLinks,
+  listReferencesByIds,
+  referenceToRefItem,
+  unlinkReferenceFromProject,
+  type ReferenceItem,
+} from "@/lib/referenceLibrary";
 import type {
   ContentType,
   ProductInfo,
@@ -3176,6 +3187,7 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
   const [composerDragOver, setComposerDragOver] = useState(false);
   const [refDragOver, setRefDragOver] = useState(false);
   const [refUrlInput, setRefUrlInput] = useState("");
+  const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
   const [showNextStepModal, setShowNextStepModal] = useState(false);
   const [viewMode, setViewMode] = useState<"list" | "slide">("list");
 
@@ -3430,6 +3442,51 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
   const refCounts = useMemo(() => summarizeRefs(refItems), [refItems]);
   const REF_TOTAL_LIMIT = 8;
 
+  useEffect(() => {
+    let cancelled = false;
+    const syncLinkedLibraryReferences = async () => {
+      try {
+        const links = await listProjectReferenceLinks({ projectId, target: "brief" });
+        const currentRefItems = _draftByProject.get(projectId)?.refItems ?? refItems;
+        const existingIds = new Set(currentRefItems.map((item) => item.id));
+        const missingReferenceIds = links
+          .map((link) => link.reference_id)
+          .filter((referenceId) => !existingIds.has(`library_${referenceId}`))
+          .slice(0, Math.max(0, REF_TOTAL_LIMIT - currentRefItems.length));
+        if (missingReferenceIds.length === 0) return;
+
+        const references = await listReferencesByIds(missingReferenceIds);
+        const converted: RefItem[] = [];
+        for (const reference of references) {
+          if (reference.kind === "link" || reference.deleted_at) continue;
+          try {
+            converted.push(await referenceToRefItem(reference));
+          } catch (err) {
+            console.warn("[brief] linked library reference could not be converted", reference.id, err);
+          }
+        }
+        if (cancelled || converted.length === 0) return;
+
+        const normalized = recomputeIgnoredByModel(converted, supportsVideoFrames);
+        setRefItems((prev) => {
+          const prevIds = new Set(prev.map((item) => item.id));
+          const missing = normalized.filter((item) => !prevIds.has(item.id));
+          const availableSlots = Math.max(0, REF_TOTAL_LIMIT - prev.length);
+          return missing.length > 0 ? [...prev, ...missing.slice(0, availableSlots)] : prev;
+        });
+      } catch (err) {
+        console.warn("[brief] linked library reference sync failed", err);
+      }
+    };
+
+    void syncLinkedLibraryReferences();
+    return () => {
+      cancelled = true;
+    };
+    // Run once per project/model capability; local picker imports still update state immediately.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, supportsVideoFrames]);
+
   const handleRefFileSelect = useCallback(
     async (files: FileList | null) => {
       if (!files) return;
@@ -3589,7 +3646,22 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
     [refItems.length, supportsVideoFrames, toast],
   );
 
-  const removeRefItem = (id: string) => setRefItems((prev) => prev.filter((it) => it.id !== id));
+  const removeRefItem = (id: string) => {
+    setRefItems((prev) => prev.filter((it) => it.id !== id));
+    const libraryReferenceId = id.match(/^library_(.+)$/)?.[1];
+    if (!libraryReferenceId) return;
+    void unlinkReferenceFromProject({
+      projectId,
+      referenceId: libraryReferenceId,
+      target: "brief",
+    }).catch((err) => {
+      toast({
+        variant: "destructive",
+        title: "Library unlink failed",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  };
   const setRefItemAnnotation = (id: string, annotation: RefAnnotation | undefined) =>
     setRefItems((prev) =>
       prev.map((it) => {
@@ -3600,6 +3672,52 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       }),
     );
   const removeBriefImage = (i: number) => setBriefImages((prev) => prev.filter((_, j) => j !== i));
+
+  const importLibraryReferences = useCallback(
+    async (references: ReferenceItem[]) => {
+      const existingIds = new Set(refItems.map((item) => item.id));
+      const slots = Math.max(0, REF_TOTAL_LIMIT - refItems.length);
+      const importable = references
+        .filter((reference) => reference.kind !== "link")
+        .filter((reference) => !existingIds.has(`library_${reference.id}`))
+        .slice(0, slots);
+
+      if (importable.length === 0) {
+        toast({ variant: "destructive", title: "No slots available", description: `Max ${REF_TOTAL_LIMIT} reference items.` });
+        return;
+      }
+
+      const converted: RefItem[] = [];
+      let failed = 0;
+      for (const reference of importable) {
+        try {
+          const refItem = await referenceToRefItem(reference);
+          await linkReferenceToProject({
+            projectId,
+            referenceId: reference.id,
+            target: "brief",
+          });
+          converted.push(refItem);
+        } catch (err) {
+          failed += 1;
+          console.warn("[brief] library reference import failed", reference.id, err);
+        }
+      }
+
+      if (converted.length === 0) {
+        toast({ variant: "destructive", title: "Import failed", description: "Selected Library references could not be converted for Brief." });
+        throw new Error("No Library references could be imported.");
+      }
+
+      const normalized = recomputeIgnoredByModel(converted, supportsVideoFrames);
+      setRefItems((prev) => [...prev, ...normalized]);
+      toast({
+        title: "Imported from Library",
+        description: `${normalized.length} reference item${normalized.length === 1 ? "" : "s"} added to Brief.${failed ? ` ${failed} skipped.` : ""}`,
+      });
+    },
+    [projectId, refItems, supportsVideoFrames, toast],
+  );
 
   const extractTextFromPDF = async (file: File) => {
     const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
@@ -3704,8 +3822,10 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
       const sampledVideos: Array<{ item: RefVideoItem; frames: { base64: string; mediaType: string; t: number }[] }> = [];
       if (modelSupportsVideo) {
         for (const v of videosUsable) {
-          if (!v.file) {
-            // 파일 핸들이 사라진 경우 — poster 만이라도 사용
+          // 우선순위: 메모리에 보관된 File 핸들 → Library import 의 storage URL.
+          // 둘 다 없으면 poster 1 장으로 fallback (분석은 진행되지만 영상 정보는 빈약).
+          const source: File | string | null = v.file ?? v.remoteUrl ?? null;
+          if (!source) {
             sampledVideos.push({ item: v, frames: v.posterBase64 ? [{ base64: v.posterBase64, mediaType: "image/png", t: 0 }] : [] });
             continue;
           }
@@ -3718,9 +3838,10 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
               ann && typeof ann.startSec === "number" && typeof ann.endSec === "number"
                 ? { startSec: ann.startSec, endSec: ann.endSec }
                 : undefined;
-            const { frames } = await sampleFrames(v.file, targetCount, range);
+            const { frames } = await sampleFrames(source, targetCount, range);
             sampledVideos.push({ item: v, frames: frames.map((f) => ({ base64: f.base64, mediaType: f.mediaType, t: f.t })) });
-          } catch {
+          } catch (err) {
+            console.warn("[brief] video frame sampling failed; falling back to poster", v.id, err);
             sampledVideos.push({ item: v, frames: v.posterBase64 ? [{ base64: v.posterBase64, mediaType: "image/png", t: 0 }] : [] });
           }
         }
@@ -4244,6 +4365,16 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
           </div>
         )}
 
+        <button
+          type="button"
+          onClick={() => setLibraryPickerOpen(true)}
+          className="mb-2 flex h-8 w-full items-center justify-center gap-2 border border-border bg-background/60 text-[11px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+          style={{ borderRadius: 0 }}
+        >
+          <Package className="h-3.5 w-3.5" />
+          Import from Library
+        </button>
+
         {/* ── 드롭존 / 타일 ── */}
         {refItems.length === 0 ? (
           <div
@@ -4328,6 +4459,16 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
   /* ━━━━━ RENDER ━━━━━ */
   return (
     <div className="flex gap-3 h-full">
+      <ReferencePickerDrawer
+        open={libraryPickerOpen}
+        onOpenChange={setLibraryPickerOpen}
+        target="brief"
+        selectedIds={refItems
+          .map((item) => item.id.match(/^library_(.+)$/)?.[1])
+          .filter((id): id is string => Boolean(id))}
+        maxSelectable={Math.max(0, REF_TOTAL_LIMIT - refItems.length)}
+        onImport={importLibraryReferences}
+      />
       {/* ── LEFT: Input Panel ── */}
       <div
         className={`shrink-0 ${isMobile ? "w-full" : ""}`}
@@ -4600,7 +4741,29 @@ export const BriefTab = ({ projectId, onSwitchToAgent, onSwitchToAssets }: Props
                 (() => {
                   const displayAnalysis = analysisLang === "en" && analysisEn ? analysisEn : analysis;
                   return isDeepAnalysis(displayAnalysis) ? (
-                    <ProductionGuideUI analysis={displayAnalysis} lang={analysisLang} onUpdate={updateAnalysisField} />
+                    <>
+                      <ProductionGuideUI analysis={displayAnalysis} lang={analysisLang} onUpdate={updateAnalysisField} />
+                      <BriefRecommendedReferences
+                        analysis={displayAnalysis}
+                        rawText={briefText}
+                        ideaNote={ideaNote}
+                        projectId={projectId}
+                        attachedIds={refItems.filter((it) => it.id.startsWith("library_")).map((it) => it.id.replace(/^library_/, ""))}
+                        onAdded={async (reference) => {
+                          try {
+                            const refItem = await referenceToRefItem(reference);
+                            const normalized = recomputeIgnoredByModel([refItem], supportsVideoFrames)[0];
+                            setRefItems((prev) => {
+                              if (prev.some((it) => it.id === normalized.id)) return prev;
+                              if (prev.length >= REF_TOTAL_LIMIT) return prev;
+                              return [...prev, normalized];
+                            });
+                          } catch (err) {
+                            console.warn("[brief] recommended reference convert failed", err);
+                          }
+                        }}
+                      />
+                    </>
                   ) : null;
                 })()}
             </div>
@@ -4936,3 +5099,79 @@ const AnalysisLoader = ({ active, mode = "default", variant = "full", onHidden }
     </div>
   );
 };
+
+/* ━━━━━ Phase 9 — Brief 분석 결과에 묶이는 추천 패널 ━━━━━ */
+
+/**
+ * BriefTab 의 DeepAnalysis 모양에서 추천 신호를 뽑아 RecommendedReferences 에
+ * 위임하는 얇은 wrapper. 클릭하면 project_reference_links 로 link 한 뒤
+ * 호출부의 onAdded 로 변환된 RefItem 를 흘려준다 (Brief 의 refItems state 가
+ * 곧장 갱신되도록).
+ */
+function BriefRecommendedReferences({
+  analysis,
+  rawText,
+  ideaNote,
+  projectId,
+  attachedIds,
+  onAdded,
+}: {
+  analysis: DeepAnalysis;
+  rawText: string;
+  ideaNote: string;
+  projectId: string;
+  attachedIds: string[];
+  onAdded: (reference: ReferenceItem) => Promise<void> | void;
+}) {
+  // tone_manner.visual_direction 은 string 또는 구조체 — 토큰으로 쓰려면
+  // string 으로 평탄화한다. 안 풀어도 추천 자체는 동작하지만 mood 매칭이 약해짐.
+  const visualDirText = useMemo(() => {
+    const vd = analysis.tone_manner?.visual_direction;
+    if (!vd) return "";
+    if (typeof vd === "string") return vd;
+    try {
+      return Object.values(vd).filter((v) => typeof v === "string").join(" ");
+    } catch {
+      return "";
+    }
+  }, [analysis.tone_manner?.visual_direction]);
+
+  const signals = useMemo(
+    () =>
+      buildBriefSignalsFromAnalysis({
+        rawText,
+        ideaNote,
+        toneKeywords: analysis.tone_manner?.keywords ?? [],
+        moodSummary: [analysis.tone_manner?.summary, analysis.tone_manner?.reference_mood, visualDirText]
+          .filter(Boolean)
+          .join(" "),
+        genre: analysis.content_type ?? null,
+        // ProductInfo schema 는 자유 텍스트(`what`, `key_benefit`) 라 단일
+        // 제품/브랜드 토큰이 아닌 키워드 묶음으로 합류시킨다 — 추천기는
+        // 어차피 토큰 단위로만 매칭하므로 free-text 인풋으로도 충분.
+        productName: analysis.product_info?.what ?? null,
+        productBrand: analysis.product_info?.key_benefit ?? null,
+        location: null,
+      }),
+    [analysis, ideaNote, rawText, visualDirText],
+  );
+
+  return (
+    <div className="mt-4">
+      <RecommendedReferences
+        signals={signals}
+        target="brief"
+        attachedIds={attachedIds}
+        onAdd={async (reference) => {
+          await linkReferenceToProject({
+            projectId,
+            referenceId: reference.id,
+            target: "brief",
+          });
+          await onAdded(reference);
+        }}
+        emptyHint="No close matches yet — tag Library items with mood / use_case keywords so future briefs surface them automatically."
+      />
+    </div>
+  );
+}

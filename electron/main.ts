@@ -6,6 +6,16 @@ import { startLocalServer } from "./local-server";
 import { getLocalServerAuthToken, getLocalServerPort } from "./constants";
 import { sweepOrphanFiles } from "./orphanSweep";
 
+const profile = process.env.PREFLOW_PROFILE?.trim();
+if (profile) {
+  const profileName = `preflow-${profile}`;
+  app.setName(profileName);
+  app.setPath("userData", path.join(app.getPath("appData"), profileName));
+  console.log(`[profile] Using isolated userData: ${app.getPath("userData")}`);
+} else if (process.env.VITE_DEV_SERVER_URL) {
+  console.warn("[profile] PREFLOW_PROFILE is not set. Development is using production userData.");
+}
+
 // Chromium의 native UI(달력 피커, context menu 등) 언어를 영문으로 강제.
 // app.whenReady() 이전에 호출되어야 적용됨.
 app.commandLine.appendSwitch("lang", "en-US");
@@ -85,6 +95,7 @@ app.whenReady().then(async () => {
         ext === ".svg" ? "image/svg+xml" :
         ext === ".mp4" ? "video/mp4" :
         ext === ".webm" ? "video/webm" :
+        ext === ".mov" ? "video/quicktime" :
         "application/octet-stream";
       return new Response(data, {
         status: 200,

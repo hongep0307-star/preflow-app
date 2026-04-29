@@ -94,7 +94,17 @@ import {
 import { MessageContent } from "./agent/MessageContent";
 import { AgentChatInput } from "./agent/AgentChatInput";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ReferencePickerDrawer } from "@/components/library/ReferencePickerDrawer";
 import { useT } from "@/lib/uiLanguage";
+import {
+  getReferencePreviewImageUrl,
+  linkReferenceToProject,
+  listProjectReferenceLinks,
+  listReferencesByIds,
+  unlinkReferenceFromProject,
+  type ProjectReferenceLink,
+  type ReferenceItem,
+} from "@/lib/referenceLibrary";
 
 // ══════════════════════════════════════════════════════════
 //   MAIN — AgentTab
@@ -139,6 +149,19 @@ const mergeOrReplaceDrafts = (previous: ParsedScene[], extracted: ParsedScene[],
   return updated.sort((a, b) => a.scene_number - b.scene_number);
 };
 
+function referenceToMoodImage(reference: ReferenceItem): MoodImage | null {
+  const url = getReferencePreviewImageUrl(reference);
+  if (!url) return null;
+  return {
+    id: `library_${reference.id}`,
+    url,
+    liked: false,
+    sceneRef: null,
+    comment: reference.title,
+    createdAt: reference.created_at ?? new Date().toISOString(),
+  };
+}
+
 export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onSwitchToContiTab }: Props) => {
   const { toast } = useToast();
   const t = useT();
@@ -154,6 +177,8 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
   const [sessionImageMap] = useState(() => new Map<string, string[]>());
   const [moodLightboxUrl, setMoodLightboxUrl] = useState<string | null>(null);
   const [moodImages, setMoodImages] = useState<MoodImage[]>([]);
+  const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
+  const [linkedAgentReferenceIds, setLinkedAgentReferenceIds] = useState<string[]>([]);
 
   const [cardHeights, setCardHeights] = useState<Record<string, number>>({});
   const [showImages, setShowImages] = useState(true);
@@ -390,6 +415,107 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
     [projectId],
   );
 
+  const mergeLibraryMoodImages = useCallback(
+    async (references: ReferenceItem[]) => {
+      const nextImages = references
+        .filter((reference) => reference.kind !== "link" && !reference.deleted_at)
+        .map(referenceToMoodImage)
+        .filter((image): image is MoodImage => Boolean(image));
+      if (nextImages.length === 0) return 0;
+
+      const seenUrls = new Set(moodImages.map((image) => image.url).filter(Boolean));
+      const seenIds = new Set(moodImages.map((image) => image.id));
+      const additions = nextImages.filter((image) => image.url && !seenUrls.has(image.url) && !seenIds.has(image.id));
+      if (additions.length === 0) return 0;
+      const merged = [...additions, ...moodImages];
+      setMoodImages(merged);
+      await saveMoodImagesToDB(merged);
+      return additions.length;
+    },
+    [moodImages, saveMoodImagesToDB],
+  );
+
+  const refreshLinkedAgentReferences = useCallback(async () => {
+    const links = await listProjectReferenceLinks({ projectId, target: "agent" });
+    let referenceIds = links.map((link) => link.reference_id);
+    // Reconcile against the live mood list. References whose mood image was
+    // already removed (legacy deletion path didn't unlink the reference row)
+    // would otherwise keep showing ATTACHED in the Library picker forever.
+    if (referenceIds.length > 0) {
+      const referenceIdSet = new Set(referenceIds);
+      const moodLibraryIds = new Set(
+        moodImages.map((m) => m.id.match(/^library_(.+)$/)?.[1]).filter((rid): rid is string => Boolean(rid)),
+      );
+      const orphanIds = [...referenceIdSet].filter((id) => !moodLibraryIds.has(id));
+      // Only treat as orphan when we already have the moodImages snapshot —
+      // first mount, before mergeLibraryMoodImages runs, the moodImages list
+      // doesn't yet include the items we're about to merge in. We cap orphan
+      // removal to references whose preview URL is missing from briefs to
+      // avoid false positives during that bootstrap.
+      if (orphanIds.length > 0 && moodImages.length > 0) {
+        const orphanRefs = await listReferencesByIds(orphanIds);
+        const moodUrlSet = new Set(moodImages.map((m) => m.url));
+        const trulyOrphan = orphanRefs.filter((ref) => {
+          const previewUrl = getReferencePreviewImageUrl(ref);
+          return previewUrl ? !moodUrlSet.has(previewUrl) : false;
+        });
+        if (trulyOrphan.length > 0) {
+          await Promise.all(
+            trulyOrphan.map((ref) =>
+              unlinkReferenceFromProject({ projectId, referenceId: ref.id, target: "agent" }).catch((err) => {
+                console.warn("[agent] orphan link cleanup failed:", err);
+              }),
+            ),
+          );
+          const orphanIdSet = new Set(trulyOrphan.map((ref) => ref.id));
+          referenceIds = referenceIds.filter((id) => !orphanIdSet.has(id));
+        }
+      }
+    }
+    setLinkedAgentReferenceIds(referenceIds);
+    const missingIds = referenceIds.filter((id) => !moodImages.some((image) => image.id === `library_${id}`));
+    if (missingIds.length === 0) return;
+    const references = await listReferencesByIds(missingIds);
+    await mergeLibraryMoodImages(references);
+  }, [mergeLibraryMoodImages, moodImages, projectId]);
+
+  useEffect(() => {
+    void refreshLinkedAgentReferences().catch((err) => {
+      console.warn("[agent] linked library reference sync failed", err);
+    });
+  }, [refreshLinkedAgentReferences]);
+
+  // Re-pull project_reference_links every time the Library picker opens so
+  // the ATTACHED badge reflects the latest state. Without this, a reference
+  // that was unlinked via mood image deletion stays marked as attached until
+  // the next full remount.
+  useEffect(() => {
+    if (!libraryPickerOpen) return;
+    void refreshLinkedAgentReferences().catch((err) => {
+      console.warn("[agent] linked library reference refresh on picker open failed", err);
+    });
+  }, [libraryPickerOpen, refreshLinkedAgentReferences]);
+
+  const importAgentLibraryReferences = useCallback(
+    async (references: ReferenceItem[]) => {
+      let linked = 0;
+      for (const reference of references) {
+        if (reference.kind === "link" || reference.deleted_at) continue;
+        const image = referenceToMoodImage(reference);
+        if (!image) continue;
+        await linkReferenceToProject({ projectId, referenceId: reference.id, target: "agent" });
+        linked += 1;
+      }
+      const added = await mergeLibraryMoodImages(references);
+      await refreshLinkedAgentReferences();
+      toast({
+        title: "Imported from Library",
+        description: `${added} image reference${added === 1 ? "" : "s"} added to Agent.${linked - added > 0 ? ` ${linked - added} already existed.` : ""}`,
+      });
+    },
+    [mergeLibraryMoodImages, projectId, refreshLinkedAgentReferences, toast],
+  );
+
   const fetchAssets = useCallback(async () => {
     const { data } = await supabase
       .from("assets")
@@ -538,6 +664,29 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
   const handleDeleteMoodImages = useCallback(
     async (ids: string[]) => {
       const idsSet = new Set(ids);
+      // Items sourced from the Reference Library carry an id of
+      // `library_<referenceId>`. The mood ideation list is shared between
+      // Agent and Conti (both surface `briefs.mood_image_urls`), so removing
+      // the mood image must also drop every related `project_reference_links`
+      // row — both `target: "agent"` and `target: "conti"` — otherwise the
+      // Library picker keeps reporting ATTACHED and the Conti Studio Compare
+      // panel keeps a now-broken thumbnail.
+      const libraryReferenceIds = ids
+        .map((id) => id.match(/^library_(.+)$/)?.[1])
+        .filter((rid): rid is string => Boolean(rid));
+      if (libraryReferenceIds.length > 0) {
+        const unlinkTargets: Array<ProjectReferenceLink["target"]> = ["agent", "conti"];
+        await Promise.all(
+          libraryReferenceIds.flatMap((referenceId) =>
+            unlinkTargets.map((target) =>
+              unlinkReferenceFromProject({ projectId, referenceId, target }).catch((err) => {
+                console.warn("[agent] unlinkReferenceFromProject failed:", target, err);
+              }),
+            ),
+          ),
+        );
+        setLinkedAgentReferenceIds((prev) => prev.filter((rid) => !libraryReferenceIds.includes(rid)));
+      }
       const connectedSceneIds: string[] = [];
       // 삭제 대상의 파일 URL 후보 — 실제 디스크 삭제는 뒤에서 프로젝트
       // 전반(`scene.conti_image_url`, `conti_image_history`, `sketches`,
@@ -1893,6 +2042,7 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
           onAttachToScene={handleAttachMoodToScene}
           onDetachFromScene={handleDetachFromScene}
           onDeleteMoodImages={handleDeleteMoodImages}
+          onImportFromLibrary={() => setLibraryPickerOpen(true)}
         />
       );
       if (splitView && !isMobile) {
@@ -2146,6 +2296,14 @@ export const AgentTab = ({ projectId, videoFormat = "vertical", lang = "en", onS
 
   return (
     <div className="h-full">
+      <ReferencePickerDrawer
+        open={libraryPickerOpen}
+        onOpenChange={setLibraryPickerOpen}
+        target="agent"
+        selectedIds={linkedAgentReferenceIds}
+        maxSelectable={12}
+        onImport={importAgentLibraryReferences}
+      />
       {chatCollapsed ? (
         <div className="flex h-full">
           {chatRail}

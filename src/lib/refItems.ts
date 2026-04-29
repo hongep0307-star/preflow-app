@@ -68,6 +68,9 @@ export interface RefVideoItem extends RefItemBase {
   frames?: { base64: string; t: number; mediaType: string }[];
   /** File 핸들 — 새로고침 시 사라지므로 사용자에게 재드롭 안내 필요 */
   file?: File;
+  /** 라이브러리에서 import 된 영상의 storage URL (file 핸들이 없는 정상 케이스).
+   *  `sampleFrames` 가 file 우선, 없으면 이 URL 로 프레임을 추출한다. */
+  remoteUrl?: string;
   status: "sampling" | "ready" | "error";
   errorMsg?: string;
 }
@@ -105,6 +108,9 @@ export interface SerializableRefVideo {
   fileSize: number;
   durationSec: number;
   posterBase64: string;
+  /** Library-import 영상은 storage URL 로도 프레임 샘플링이 가능하므로
+   *  직렬화에 보존한다. file 핸들은 직렬화하지 않음. */
+  remoteUrl?: string;
   annotation?: RefAnnotation;
 }
 export type SerializableRefItem =
@@ -158,6 +164,7 @@ export function toSerializableRefItems(items: RefItem[]): SerializableRefItem[] 
           fileSize: it.fileSize,
           durationSec: it.durationSec,
           posterBase64: it.posterBase64,
+          remoteUrl: it.remoteUrl,
           annotation: it.annotation,
         };
       }
@@ -204,6 +211,7 @@ export function fromSerializableRefItems(serialized: SerializableRefItem[]): Ref
       fileSize: s.fileSize,
       durationSec: s.durationSec,
       posterBase64: s.posterBase64,
+      remoteUrl: s.remoteUrl,
       status: "ready",
       annotation: s.annotation,
     };

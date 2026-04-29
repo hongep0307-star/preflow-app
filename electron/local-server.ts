@@ -1,4 +1,5 @@
 import http from "http";
+import { dialog, shell } from "electron";
 import { getSettings, setSettings } from "./settings";
 import { getStorageBasePath } from "./paths";
 import {
@@ -10,6 +11,11 @@ import {
   handleOpenAIResponses,
 } from "./api-handlers";
 import { handleYoutubeIngest } from "./youtube-handler";
+import { importEagleLibrary, previewEagleLibrary } from "./eagle-import";
+import { exportLibraryPack } from "./packExport";
+import { applyPack, previewPackFromDisk } from "./packImport";
+import { cleanupOrphanFiles, previewOrphanFiles } from "./orphanSweep";
+import { getStorageUsage } from "./storageMaintenance";
 import {
   dbSelect,
   dbInsert,
@@ -20,18 +26,59 @@ import {
 import path from "path";
 import fs from "fs";
 
-import { getLocalServerAuthToken, LOCAL_SERVER_PORT, setLocalServerPort } from "./constants";
+import { getLocalServerAuthToken, getLocalServerBaseUrl, LOCAL_SERVER_PORT, setLocalServerPort } from "./constants";
+import { REFERENCE_UPLOAD_MAX_BYTES, REFERENCE_UPLOAD_MAX_LABEL } from "../shared/constants";
 export { LOCAL_SERVER_PORT };
 
-function parseBody(req: http.IncomingMessage): Promise<any> {
+class HttpError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+type JsonBody = Record<string, unknown>;
+
+function asJsonBody(value: unknown): JsonBody {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonBody) : {};
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function errorStatus(err: unknown): number {
+  return typeof err === "object" && err !== null && "status" in err && typeof (err as { status?: unknown }).status === "number"
+    ? (err as { status: number }).status
+    : 500;
+}
+
+// JSON body 한도는 base64 팽창(약 4/3 배) + form/manifest 오버헤드를 감안해
+// 업로드 상한보다 여유를 두지만, 디스크에 떨어지는 실제 파일 크기는 항상
+// `REFERENCE_UPLOAD_MAX_BYTES` 로 제한한다.
+const MAX_JSON_BODY_BYTES = Math.ceil(REFERENCE_UPLOAD_MAX_BYTES * 1.5);
+
+function parseBody(req: http.IncomingMessage, maxBytes = MAX_JSON_BODY_BYTES): Promise<JsonBody> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(c));
+    let total = 0;
+    req.on("data", (c: Buffer) => {
+      total += c.length;
+      if (total > maxBytes) {
+        reject(new HttpError(413, `Request body too large. Limit is ${Math.round(maxBytes / 1024 / 1024)}MB.`));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => {
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString()));
+        const raw = Buffer.concat(chunks).toString();
+        resolve(asJsonBody(raw.trim() ? JSON.parse(raw) : {}));
       } catch {
-        resolve({});
+        reject(new HttpError(400, "Malformed JSON request body."));
       }
     });
     req.on("error", reject);
@@ -47,12 +94,13 @@ const STORAGE_MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".mp4": "video/mp4",
   ".webm": "video/webm",
+  ".mov": "video/quicktime",
 };
 
 // Storage layout is: <userData>/storage/<bucket>/<projectId|...>/<file>
 // The renderer must not be allowed to choose arbitrary buckets — that would
 // let a malicious script overwrite app config files etc.
-const ALLOWED_BUCKETS = new Set(["assets", "contis", "briefs", "style-presets", "mood"]);
+const ALLOWED_BUCKETS = new Set(["assets", "contis", "briefs", "style-presets", "mood", "references"]);
 
 function resolveBucketPath(bucket: string, sub: string): string {
   if (!ALLOWED_BUCKETS.has(bucket)) {
@@ -77,6 +125,75 @@ function resolveStorageReadPath(relative: string): string {
     throw new Error(`Path traversal detected: ${relative}`);
   }
   return target;
+}
+
+function resolveStorageUrlToPath(rawUrl: unknown): string {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) {
+    throw new HttpError(400, "Missing file URL.");
+  }
+  const storageBase = path.resolve(getStorageBasePath());
+  let target: string;
+
+  if (rawUrl.startsWith("local-file://")) {
+    let rawPath = decodeURIComponent(rawUrl.slice("local-file://".length).split(/[?#]/)[0]).replace(/\//g, path.sep);
+    if (/^\\[A-Za-z]:/.test(rawPath)) rawPath = rawPath.slice(1);
+    target = path.resolve(rawPath);
+  } else {
+    const match = rawUrl.match(/^https?:\/\/(?:127\.0\.0\.1|localhost):\d+\/storage\/file\/(.+)$/i);
+    if (!match?.[1]) throw new HttpError(400, "URL is not a local storage file.");
+    target = resolveStorageReadPath(decodeURIComponent(match[1].split(/[?#]/)[0]));
+  }
+
+  const rel = path.relative(storageBase, target);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new HttpError(403, "File is outside app storage.");
+  }
+  return target;
+}
+
+function sanitizeCopyName(name: string): string {
+  const cleaned = name
+    .normalize("NFKD")
+    .replace(/[^\w.\- ]+/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return cleaned || "reference";
+}
+
+async function copyReferenceStorageFile(rawUrl: unknown, targetId: unknown, label: unknown): Promise<{ publicUrl: string; filePath: string }> {
+  if (typeof targetId !== "string" || !/^[a-zA-Z0-9_-]+$/.test(targetId)) {
+    throw new HttpError(400, "Invalid target reference id.");
+  }
+  const sourcePath = resolveStorageUrlToPath(rawUrl);
+  await fs.promises.access(sourcePath);
+  const ext = path.extname(sourcePath) || ".bin";
+  const sourceBase = path.basename(sourcePath, ext);
+  const safeLabel = typeof label === "string" && label.trim() ? label.trim() : sourceBase;
+  const yyyyMm = new Date().toISOString().slice(0, 7);
+  const relative = `${yyyyMm}/${targetId}/${sanitizeCopyName(safeLabel)}${ext}`;
+  const targetPath = resolveBucketPath("references", relative);
+  await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.promises.copyFile(sourcePath, targetPath);
+  return {
+    publicUrl: `${getLocalServerBaseUrl()}/storage/file/references/${relative}`,
+    filePath: relative,
+  };
+}
+
+function decodeUploadPayload(dataB64: unknown): Buffer {
+  if (typeof dataB64 !== "string" || !dataB64) {
+    throw new HttpError(400, "Missing upload data.");
+  }
+  const approxBytes = Math.floor((dataB64.length * 3) / 4);
+  const tooLargeMsg = `Reference uploads must be ${REFERENCE_UPLOAD_MAX_LABEL} or smaller.`;
+  if (approxBytes > REFERENCE_UPLOAD_MAX_BYTES) {
+    throw new HttpError(413, tooLargeMsg);
+  }
+  const buffer = Buffer.from(dataB64, "base64");
+  if (buffer.byteLength > REFERENCE_UPLOAD_MAX_BYTES) {
+    throw new HttpError(413, tooLargeMsg);
+  }
+  return buffer;
 }
 
 function isAuthorized(req: http.IncomingMessage): boolean {
@@ -117,7 +234,7 @@ function listenOnce(server: http.Server, port: number): Promise<number> {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export function startLocalServer(): Promise<number> {
-  return new Promise<number>(async (resolve, reject) => {
+  return new Promise<number>((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -152,8 +269,43 @@ export function startLocalServer(): Promise<number> {
           return;
         }
         const ext = path.extname(fullPath).toLowerCase();
+        const stat = await fs.promises.stat(fullPath);
+        const contentType = STORAGE_MIME[ext] || "application/octet-stream";
+        const range = req.headers.range;
+        if (range) {
+          const match = range.match(/^bytes=(\d*)-(\d*)$/);
+          if (!match) {
+            res.writeHead(416, {
+              "Content-Range": `bytes */${stat.size}`,
+              "Accept-Ranges": "bytes",
+            });
+            res.end();
+            return;
+          }
+          const start = match[1] ? Number(match[1]) : 0;
+          const end = match[2] ? Number(match[2]) : stat.size - 1;
+          if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < 0 || end >= stat.size) {
+            res.writeHead(416, {
+              "Content-Range": `bytes */${stat.size}`,
+              "Accept-Ranges": "bytes",
+            });
+            res.end();
+            return;
+          }
+          res.writeHead(206, {
+            "Content-Type": contentType,
+            "Content-Length": end - start + 1,
+            "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache",
+          });
+          fs.createReadStream(fullPath, { start, end }).pipe(res);
+          return;
+        }
         res.writeHead(200, {
-          "Content-Type": STORAGE_MIME[ext] || "application/octet-stream",
+          "Content-Type": contentType,
+          "Content-Length": stat.size,
+          "Accept-Ranges": "bytes",
           "Cache-Control": "no-cache",
         });
         fs.createReadStream(fullPath).pipe(res);
@@ -174,7 +326,7 @@ export function startLocalServer(): Promise<number> {
 
       try {
         const body = await parseBody(req);
-        let result: any;
+        let result: unknown;
 
         if (url === "/db/select") {
           const { table, where, options } = body;
@@ -194,13 +346,16 @@ export function startLocalServer(): Promise<number> {
         } else if (url === "/storage/upload") {
           const { bucket, filePath: fp, data: dataB64 } = body;
           const fullPath = resolveBucketPath(bucket, fp);
+          const uploadBuffer = decodeUploadPayload(dataB64);
           await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-          await fs.promises.writeFile(fullPath, Buffer.from(dataB64, "base64"));
+          await fs.promises.writeFile(fullPath, uploadBuffer);
           result = { error: null };
         } else if (url === "/storage/getPublicUrl") {
           const { bucket, filePath: fp } = body;
           const fullPath = resolveBucketPath(bucket, fp);
           result = { data: { publicUrl: `local-file://${fullPath.replace(/\\/g, "/")}` } };
+        } else if (url === "/storage/copy-reference-file") {
+          result = await copyReferenceStorageFile(body?.url, body?.targetId, body?.label);
         } else if (url === "/storage/remove") {
           const { bucket, filePaths } = body;
           await Promise.all(
@@ -227,6 +382,47 @@ export function startLocalServer(): Promise<number> {
           } catch {
             result = { data: [], error: null };
           }
+        } else if (url === "/storage/usage") {
+          result = getStorageUsage();
+        } else if (url === "/storage/orphans/preview") {
+          result = previewOrphanFiles({ includeReferences: Boolean(body?.includeReferences) });
+        } else if (url === "/storage/orphans/cleanup") {
+          result = cleanupOrphanFiles({ includeReferences: Boolean(body?.includeReferences) });
+        } else if (url === "/eagle/select-library") {
+          const picked = await dialog.showOpenDialog({
+            title: "Select Eagle Library",
+            properties: ["openDirectory"],
+          });
+          if (picked.canceled || picked.filePaths.length === 0) {
+            result = { canceled: true, rootPath: null, preview: null };
+          } else {
+            const rootPath = picked.filePaths[0];
+            result = { canceled: false, rootPath, preview: await previewEagleLibrary(rootPath) };
+          }
+        } else if (url === "/eagle/preview") {
+          const { rootPath } = body;
+          result = await previewEagleLibrary(String(rootPath ?? ""));
+        } else if (url === "/eagle/import") {
+          const { rootPath } = body;
+          result = await importEagleLibrary(String(rootPath ?? ""));
+        } else if (url === "/pack/export") {
+          result = await exportLibraryPack(body);
+        } else if (url === "/pack/preview") {
+          result = await previewPackFromDisk();
+        } else if (url === "/pack/import") {
+          result = await applyPack(body);
+        } else if (url === "/shell/resolve-path") {
+          const filePath = resolveStorageUrlToPath(body?.url);
+          result = { filePath };
+        } else if (url === "/shell/open-path") {
+          const filePath = resolveStorageUrlToPath(body?.url);
+          const error = await shell.openPath(filePath);
+          if (error) throw new HttpError(500, error);
+          result = { ok: true };
+        } else if (url === "/shell/show-item") {
+          const filePath = resolveStorageUrlToPath(body?.url);
+          shell.showItemInFolder(filePath);
+          result = { ok: true };
         } else if (url === "/settings/get") {
           result = getSettings();
         } else if (url === "/settings/set") {
@@ -254,13 +450,14 @@ export function startLocalServer(): Promise<number> {
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error(`[local-server] ${url} error:`, err);
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err.message }));
+        res.writeHead(errorStatus(err), { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: errorMessage(err) }));
       }
     });
 
+    void (async () => {
     // ── 포트 바인딩 전략 ─────────────────────────────────────────────
     // 1. 선호 포트 19876 을 3 회까지 재시도 (TIME_WAIT / zombie 해제 대기).
     // 2. 그래도 EADDRINUSE 면 port=0 으로 OS 가 할당해 주는 랜덤 포트 사용.
@@ -303,5 +500,6 @@ export function startLocalServer(): Promise<number> {
     } catch (err) {
       reject(err);
     }
+    })();
   });
 }

@@ -10,7 +10,9 @@ import Index from './pages/Index';
 import SettingsPage from './pages/SettingsPage';
 import DashboardPage from './pages/DashboardPage';
 import ProjectPage from './pages/ProjectPage';
+import LibraryPage from './pages/LibraryPage';
 import NotFound from './pages/NotFound';
+import { ModeSwitcher } from '@/components/ModeSwitcher';
 
 const queryClient = new QueryClient();
 
@@ -28,10 +30,12 @@ const App = () => (
                 <Route path="/settings" element={<SettingsPage />} />
                 <Route element={<ProtectedRoute />}>
                   <Route path="/dashboard" element={<DashboardPage />} />
+                  <Route path="/library" element={<LibraryPage />} />
                   <Route path="/project/:id" element={<ProjectPage />} />
                 </Route>
                 <Route path="*" element={<NotFound />} />
               </Routes>
+              <ModeSwitcher />
             </ErrorBoundary>
           </div>
         </HashRouter>

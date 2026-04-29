@@ -184,6 +184,18 @@ function createTables() {
     d.exec(`ALTER TABLE assets ADD COLUMN photo_variations TEXT`);
   } catch (_) { /* column already exists */ }
 
+  // Promote-to-Asset: 라이브러리 자료를 자산(assets) 으로 승격하면 reference 측에는
+  // 어떤 asset(들) 이 만들어졌는지를 JSON 배열로 남기고, asset 측에는 어떤
+  // reference 에서 비롯됐는지를 단일 id 로 남긴다. 양쪽 다 옵션이라 기존 행은
+  // 영향 없음. 라이브러리 행은 절대 자동 삭제되지 않으며, "이 자료에서 만든
+  // 자산이 있다" 메타로만 사용된다.
+  try {
+    d.exec(`ALTER TABLE reference_items ADD COLUMN promoted_asset_ids TEXT`);
+  } catch (_) { /* column already exists */ }
+  try {
+    d.exec(`ALTER TABLE assets ADD COLUMN source_reference_id TEXT`);
+  } catch (_) { /* column already exists */ }
+
   d.exec(`
     CREATE TABLE IF NOT EXISTS scene_versions (
       id TEXT PRIMARY KEY,
@@ -239,6 +251,78 @@ function createTables() {
     )
   `);
 
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS reference_items (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      file_url TEXT,
+      thumbnail_url TEXT,
+      mime_type TEXT,
+      file_size INTEGER,
+      content_hash TEXT,
+      duration_sec REAL,
+      width INTEGER,
+      height INTEGER,
+      tags TEXT DEFAULT '[]',
+      notes TEXT,
+      rating INTEGER,
+      is_favorite INTEGER DEFAULT 0,
+      source_url TEXT,
+      cover_at_sec REAL,
+      timestamp_notes TEXT DEFAULT '[]',
+      color_palette TEXT DEFAULT '[]',
+      ai_suggestions TEXT,
+      classification_status TEXT DEFAULT 'unclassified',
+      classified_at TEXT,
+      origin_project_id TEXT,
+      source_app TEXT,
+      source_library TEXT,
+      source_id TEXT,
+      imported_at TEXT,
+      pinned_at TEXT,
+      deleted_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT,
+      last_used_at TEXT,
+      FOREIGN KEY (origin_project_id) REFERENCES projects(id) ON DELETE SET NULL
+    )
+  `);
+
+  try {
+    d.exec(`ALTER TABLE reference_items ADD COLUMN pinned_at TEXT`);
+  } catch (_) { /* column already exists */ }
+  try {
+    d.exec(`ALTER TABLE reference_items ADD COLUMN deleted_at TEXT`);
+  } catch (_) { /* column already exists */ }
+
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS project_reference_links (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      reference_id TEXT NOT NULL,
+      target TEXT NOT NULL,
+      annotation TEXT,
+      time_range TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY (reference_id) REFERENCES reference_items(id) ON DELETE CASCADE
+    )
+  `);
+
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS saved_filters (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      query TEXT DEFAULT '{}',
+      source_app TEXT,
+      source_id TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT
+    )
+  `);
+
   // Indexes — every read path filters by project_id; chat history orders by
   // created_at; scenes are sorted by scene_number per project. Keeping the
   // indexes here is idempotent (CREATE INDEX IF NOT EXISTS).
@@ -249,5 +333,15 @@ function createTables() {
     CREATE INDEX IF NOT EXISTS idx_scene_versions_project   ON scene_versions(project_id);
     CREATE INDEX IF NOT EXISTS idx_chat_logs_project_time   ON chat_logs(project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_projects_folder_id       ON projects(folder_id);
+    CREATE INDEX IF NOT EXISTS idx_reference_items_kind     ON reference_items(kind);
+    CREATE INDEX IF NOT EXISTS idx_reference_items_hash     ON reference_items(content_hash);
+    CREATE INDEX IF NOT EXISTS idx_reference_items_created  ON reference_items(created_at);
+    CREATE INDEX IF NOT EXISTS idx_reference_items_used     ON reference_items(last_used_at);
+    CREATE INDEX IF NOT EXISTS idx_reference_items_pinned   ON reference_items(pinned_at);
+    CREATE INDEX IF NOT EXISTS idx_reference_items_deleted  ON reference_items(deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_reference_items_source   ON reference_items(source_app, source_library, source_id);
+    CREATE INDEX IF NOT EXISTS idx_project_refs_project     ON project_reference_links(project_id);
+    CREATE INDEX IF NOT EXISTS idx_project_refs_reference   ON project_reference_links(reference_id);
+    CREATE INDEX IF NOT EXISTS idx_assets_source_reference  ON assets(source_reference_id);
   `);
 }

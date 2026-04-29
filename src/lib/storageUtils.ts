@@ -5,6 +5,7 @@ import { supabase } from "./supabase";
  *
  *  로컬 스토리지의 public URL 은 다음 형태다:
  *    ${LOCAL_SERVER_BASE_URL}/storage/file/<bucket>/<filePath...>
+ *  예전 실행에서 fallback port 로 저장된 URL 도 같은 storage key 로 취급한다.
  *
  *  - `filePath` 는 projectId 폴더 + 파일명 (예: "abc-123/scene_1_xxx.png")
  *  - `?t=...` 같은 cache-buster 쿼리스트링은 제거한다.
@@ -12,18 +13,33 @@ import { supabase } from "./supabase";
 export function parseStorageUrl(url: string | null | undefined): { bucket: string; filePath: string } | null {
   if (!url || typeof url !== "string") return null;
 
-  const prefix = `${LOCAL_SERVER_BASE_URL}/storage/file/`;
-  if (!url.startsWith(prefix)) return null;
+  let rest = "";
+  const currentPrefix = `${LOCAL_SERVER_BASE_URL}/storage/file/`;
+  if (url.startsWith(currentPrefix)) {
+    rest = url.slice(currentPrefix.length);
+  } else {
+    const httpMatch = url.match(/^https?:\/\/(?:127\.0\.0\.1|localhost):\d+\/storage\/file\/(.+)$/i);
+    if (httpMatch?.[1]) {
+      rest = httpMatch[1];
+    } else if (url.startsWith("local-file://")) {
+      const normalized = url.slice("local-file://".length).replace(/\\/g, "/");
+      const marker = "/storage/";
+      const idx = normalized.lastIndexOf(marker);
+      if (idx < 0) return null;
+      rest = normalized.slice(idx + marker.length);
+    } else {
+      return null;
+    }
+  }
 
   // strip query string / hash (cache-busters like `?t=12345` 이 붙어있음)
-  let rest = url.slice(prefix.length);
   const qIdx = rest.search(/[?#]/);
   if (qIdx >= 0) rest = rest.slice(0, qIdx);
 
   const slash = rest.indexOf("/");
   if (slash <= 0) return null;
 
-  const bucket = rest.slice(0, slash);
+  const bucket = decodeURIComponent(rest.slice(0, slash));
   const filePath = decodeURIComponent(rest.slice(slash + 1));
   if (!bucket || !filePath) return null;
 

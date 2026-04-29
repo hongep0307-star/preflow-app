@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import http from "http";
 
-const DEV_URL = "http://localhost:8080";
+const DEV_URL = process.env.VITE_DEV_SERVER_URL || "http://localhost:8080";
 const MAX_WAIT = 30000;
 const POLL = 500;
 
